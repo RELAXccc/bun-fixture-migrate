@@ -127,3 +127,69 @@ func TestInvert(t *testing.T) {
 		t.Fatalf("an update reverts by swapping, got %+v", back)
 	}
 }
+
+// A guard that matched nothing is not success. bun records a migration as
+// applied the moment the function returns nil, so the default for every reason
+// a statement could not do its job is to fail and roll back.
+func TestModeForIsStrictByDefault(t *testing.T) {
+	var strict fixturechange.Policy
+	for _, pr := range []problem{problemMissing, problemIDDrift} {
+		if got := modeFor(strict, pr); got != "error" {
+			t.Errorf("modeFor(zero, %q) = %q, want error", pr, got)
+		}
+	}
+	// Except a row somebody edited here: their edit is kept, and an update
+	// that would overwrite it is skipped with a warning.
+	if got := modeFor(strict, problemChanged); got != "warn" {
+		t.Errorf("modeFor(zero, changed) = %q, want warn", got)
+	}
+	// And the database already holding what the change wanted is never a
+	// problem at all.
+	if got := modeFor(strict, problemBenign); got != "warn" {
+		t.Errorf("modeFor(zero, benign) = %q, want warn", got)
+	}
+}
+
+func TestModeForFollowsThePolicy(t *testing.T) {
+	p := fixturechange.Policy{MissingRow: "warn", ChangedRow: "error", IDDrift: "ignore"}
+	if got := modeFor(p, problemMissing); got != "warn" {
+		t.Errorf("missing: %q", got)
+	}
+	if got := modeFor(p, problemChanged); got != "error" {
+		t.Errorf("changed: %q", got)
+	}
+	if got := modeFor(p, problemIDDrift); got != "warn" {
+		t.Errorf("id drift: %q", got)
+	}
+}
+
+func TestValidateWantsAnIDColumnForAnIDGuard(t *testing.T) {
+	set := fixturechange.Set{
+		Name:   "rename",
+		Tables: fixturechange.Tables{"Plan": {Name: "plans"}},
+		Changes: []fixturechange.Change{{Model: "Plan", Kind: fixturechange.Update, ID: "2",
+			Key: fixturechange.Values{"name": fixturechange.Lit("team")},
+			Old: fixturechange.Values{"name": fixturechange.Lit("team")},
+			New: fixturechange.Values{"name": fixturechange.Lit("crew")}}},
+	}
+	if err := Validate(set); err == nil || !strings.Contains(err.Error(), "id column") {
+		t.Fatalf("a change guarded by an id needs the id column, got %v", err)
+	}
+	set.Tables["Plan"] = fixturechange.Table{Name: "plans", ID: "id"}
+	if err := Validate(set); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateRefusesAnInsertWithAnIDGuard(t *testing.T) {
+	set := fixturechange.Set{
+		Name:   "bad",
+		Tables: tables(),
+		Changes: []fixturechange.Change{{Model: "Plan", Kind: fixturechange.Insert, ID: "2",
+			Key: fixturechange.Values{"name": fixturechange.Lit("team")},
+			New: fixturechange.Values{"name": fixturechange.Lit("team")}}},
+	}
+	if err := Validate(set); err == nil {
+		t.Fatal("an insert has nothing to guard on yet")
+	}
+}
