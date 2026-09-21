@@ -1,0 +1,394 @@
+package fixturemigrate
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
+	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+
+	"github.com/uptrace/bun"
+)
+
+// SnapshotOptions steers what DatabaseSnapshot reads.
+type SnapshotOptions struct {
+	// Columns limits, per model, the columns that are read. An export leaves
+	// it nil and takes every column of the table; a comparison against a
+	// fixture file passes that file's columns, because a column no fixture row
+	// mentions is not master data and a difference in it is not drift.
+	Columns map[string][]string
+	// Order overrides the model order. Nil means the dependency order worked
+	// out from the configured references.
+	Order []string
+}
+
+// rawRow is one database row before its references are resolved.
+type rawRow struct {
+	id     string
+	values map[string]fixturechange.Value
+	anchor string
+}
+
+// DatabaseSnapshot reads the master data out of a database.
+//
+// It needs no Go model types. The configuration says which table a model lives
+// in, which columns are its natural key and which columns point at another
+// model; the catalog says what the columns are and how to read them. That is
+// the whole of it, and it is why an export can be part of this tool at all.
+func DatabaseSnapshot(ctx context.Context, db bun.IDB, cfg *Config, tables map[string]*dbschema.Table,
+	opts SnapshotOptions) (*Snapshot, error) {
+
+	order := opts.Order
+	if order == nil {
+		var err error
+		if order, err = cfg.DependencyOrder(); err != nil {
+			return nil, err
+		}
+	}
+	snap := &Snapshot{Source: "the database", Order: order,
+		Entries: map[string][]*Entry{}, Columns: map[string][]string{}}
+
+	// First pass: read the rows as text. References still hold ids here,
+	// because the row they point at may not have been read yet.
+	raw := map[string][]*rawRow{}
+	for _, model := range order {
+		m, err := cfg.model(model)
+		if err != nil {
+			return nil, err
+		}
+		table := tables[cfg.QualifiedTable(m)]
+		if table == nil {
+			return nil, fmt.Errorf("model %q: the configuration says %s, which is not a table in this database",
+				model, cfg.QualifiedTable(m))
+		}
+		cols, err := readColumns(m, table, opts.Columns[model])
+		if err != nil {
+			return nil, fmt.Errorf("model %q: %w", model, err)
+		}
+		rows, err := readRows(ctx, db, cfg, m, table, cols)
+		if err != nil {
+			return nil, fmt.Errorf("model %q: %w", model, err)
+		}
+		raw[model] = rows
+		snap.Columns[model] = cols
+	}
+
+	// Second pass, in dependency order: resolve the reference columns, build
+	// the natural key out of the resolved values so it matches the fixture
+	// side, and give every row an anchor. A model's targets are finished
+	// before it is reached, which is what makes the single pass enough.
+	refValues := map[string]map[string]string{} // model -> id -> ref value
+	for _, model := range order {
+		m := cfg.Models[model]
+		refValues[model] = map[string]string{}
+		taken := map[string]bool{}
+		for _, r := range raw[model] {
+			e := &Entry{ID: r.id, Cells: fixturechange.Values{}}
+			for col, v := range r.values {
+				target, isRef := m.References[col]
+				if !isRef || v.IsNull || isZero(v) {
+					e.Cells[col] = v
+					continue
+				}
+				ref, ok := refValues[target][v.Lit]
+				if !ok {
+					return nil, fmt.Errorf(
+						"%s: %s = %s points at a row of %s that this snapshot does not hold; "+
+							"either that row is outside the model's where clause or the foreign key is dangling",
+						model, col, v.Lit, target)
+				}
+				e.Cells[col] = fixturechange.RefTo(target, ref)
+			}
+			key, err := keyOf(cfg, m, model, e.Cells)
+			if err != nil {
+				return nil, err
+			}
+			e.Key, e.KeyStr = key, keyString(model, key)
+			e.Anchor = uniqueAnchor(anchorOf(key), r.id, taken)
+			if r.id != "" {
+				if v, ok := e.Cells[m.Ref]; ok && v.Ref == nil && !v.IsNull {
+					refValues[model][r.id] = v.Lit
+				}
+			}
+			snap.Entries[model] = append(snap.Entries[model], e)
+		}
+		snap.reportDuplicates(model)
+	}
+	reportDuplicateRefs(cfg, snap)
+	return snap, nil
+}
+
+// readColumns is the column list to read for a model: the projection the caller
+// asked for, or every column of the table that takes part.
+func readColumns(m *Model, table *dbschema.Table, want []string) ([]string, error) {
+	if want == nil {
+		var out []string
+		for _, c := range table.Columns {
+			if m.skip(c.Name) {
+				continue
+			}
+			out = append(out, c.Name)
+		}
+		sort.Strings(out)
+		return out, nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	add := func(col string) error {
+		if seen[col] || m.skip(col) {
+			return nil
+		}
+		if _, ok := table.Column(col); !ok {
+			return fmt.Errorf("column %q is not in %s", col, table.Qualified())
+		}
+		seen[col] = true
+		out = append(out, col)
+		return nil
+	}
+	for _, col := range want {
+		if err := add(col); err != nil {
+			return nil, err
+		}
+	}
+	// A key column is always read, even when no fixture row spells it out,
+	// because without it the row cannot be matched at all.
+	for _, col := range m.keyColumns() {
+		if _, ok := table.Column(col); !ok {
+			return nil, fmt.Errorf("key column %q is not in %s", col, table.Qualified())
+		}
+		if seen[col] || m.skip(col) {
+			continue
+		}
+		seen[col] = true
+		out = append(out, col)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// readRows runs the one SELECT per model. Every column is cast to text in SQL,
+// so a boolean arrives as "true" and a numeric as its own notation rather than
+// as whatever the driver decided; the identifiers come from the configuration
+// and the catalog and are quoted, and a where clause is the operator's own SQL.
+func readRows(ctx context.Context, db bun.IDB, cfg *Config, m *Model, table *dbschema.Table,
+	cols []string) ([]*rawRow, error) {
+
+	selects := make([]string, 0, len(cols)+1)
+	idQuoted, err := quoteIdent(m.ID)
+	if err != nil {
+		return nil, err
+	}
+	hasID := false
+	if _, ok := table.Column(m.ID); ok {
+		hasID = true
+		selects = append(selects, "("+idQuoted+")::text")
+	}
+	for _, col := range cols {
+		q, err := quoteIdent(col)
+		if err != nil {
+			return nil, err
+		}
+		selects = append(selects, "("+q+")::text")
+	}
+	qualified, err := quoteQualified(cfg.QualifiedTable(m))
+	if err != nil {
+		return nil, err
+	}
+	query := "SELECT " + strings.Join(selects, ", ") + " FROM " + qualified
+	if m.Where != "" {
+		query += " WHERE (" + m.Where + ")"
+	}
+	var orderBy []string
+	if hasID {
+		orderBy = append(orderBy, idQuoted)
+	}
+	for _, col := range m.Key {
+		if q, err := quoteIdent(col); err == nil {
+			orderBy = append(orderBy, q)
+		}
+	}
+	if len(orderBy) > 0 {
+		query += " ORDER BY " + strings.Join(orderBy, ", ")
+	}
+
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", query, err)
+	}
+	defer rows.Close()
+	var out []*rawRow
+	for rows.Next() {
+		cells := make([]sql.NullString, len(selects))
+		scan := make([]any, len(selects))
+		for i := range cells {
+			scan[i] = &cells[i]
+		}
+		if err := rows.Scan(scan...); err != nil {
+			return nil, err
+		}
+		r := &rawRow{values: map[string]fixturechange.Value{}}
+		i := 0
+		if hasID {
+			if cells[0].Valid {
+				r.id = normalize(cells[0].String)
+			}
+			if r.id == "0" {
+				r.id = ""
+			}
+			i = 1
+		}
+		for j, col := range cols {
+			c := cells[i+j]
+			if !c.Valid {
+				r.values[col] = fixturechange.Null()
+				continue
+			}
+			r.values[col] = fixturechange.Lit(normalize(c.String))
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, rows.Close()
+}
+
+// keyOf builds a natural key out of already-resolved values.
+func keyOf(cfg *Config, m *Model, model string, values fixturechange.Values) (fixturechange.Values, error) {
+	out := fixturechange.Values{}
+	for _, col := range m.Key {
+		v, ok := values[col]
+		if !ok {
+			return nil, fmt.Errorf("%s: key column %q was not read", model, col)
+		}
+		out[col] = v
+	}
+	for _, group := range m.KeyAnyOf {
+		chosen, value := group[0], fixturechange.Lit("")
+		if v, ok := values[group[0]]; ok {
+			value = v
+		}
+		for _, col := range group {
+			v, ok := values[col]
+			if ok && !isZero(v) {
+				chosen, value = col, v
+				break
+			}
+		}
+		out[chosen] = value
+	}
+	return out, nil
+}
+
+// anchorOf makes dbfixture's "_id" out of a natural key. It has to be readable,
+// stable and unique inside the model, in that order: it is what a reference in
+// the exported file names.
+func anchorOf(key fixturechange.Values) string {
+	parts := make([]string, 0, len(key))
+	for _, col := range sortedColumns(key) {
+		v := key[col]
+		s := v.Lit
+		if v.Ref != nil {
+			s = v.Ref.Key
+		}
+		if v.IsNull {
+			s = "null"
+		}
+		if s = slug(s); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	if len(parts) == 0 {
+		return "row"
+	}
+	return strings.Join(parts, "_")
+}
+
+func uniqueAnchor(base, id string, taken map[string]bool) string {
+	candidate := base
+	if taken[candidate] && id != "" {
+		candidate = base + "_" + slug(id)
+	}
+	for n := 2; taken[candidate]; n++ {
+		candidate = fmt.Sprintf("%s_%d", base, n)
+	}
+	taken[candidate] = true
+	return candidate
+}
+
+// slug reduces a value to [a-z0-9_], which is what a dbfixture anchor may hold
+// and still be readable inside a template.
+func slug(s string) string {
+	var b strings.Builder
+	last := byte('_')
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'A' && c <= 'Z':
+			c += 'a' - 'A'
+		case (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'):
+		default:
+			c = '_'
+		}
+		if c == '_' && last == '_' {
+			continue
+		}
+		b.WriteByte(c)
+		last = c
+	}
+	return strings.Trim(b.String(), "_")
+}
+
+// reportDuplicateRefs reports a model whose ref column is not unique among the
+// rows something points at. Every generated migration resolves a reference with
+// "WHERE <ref> = ?", so two rows sharing one ref value make that lookup pick an
+// arbitrary row, or fail. GK found two such tables; they had no unique index and
+// no check in the admin UI, and nothing had ever said so.
+func reportDuplicateRefs(cfg *Config, snap *Snapshot) {
+	referenced := map[string]bool{}
+	for _, model := range snap.Order {
+		for col, target := range cfg.Models[model].References {
+			if !cfg.Models[model].skip(col) {
+				referenced[target] = true
+			}
+		}
+	}
+	for _, model := range snap.Order {
+		if !referenced[model] {
+			continue
+		}
+		m := cfg.Models[model]
+		seen := map[string][]string{}
+		var order []string
+		for _, e := range snap.Entries[model] {
+			v, ok := e.Cells[m.Ref]
+			if !ok || v.Ref != nil || v.IsNull {
+				continue
+			}
+			if _, dup := seen[v.Lit]; !dup {
+				order = append(order, v.Lit)
+			}
+			id := e.ID
+			if id == "" {
+				id = "(no id)"
+			}
+			seen[v.Lit] = append(seen[v.Lit], id)
+		}
+		for _, value := range order {
+			ids := seen[value]
+			if len(ids) < 2 {
+				continue
+			}
+			snap.Findings = append(snap.Findings, Finding{
+				Kind: FindingDuplicateKey, Model: model, Row: m.Ref + "=" + value,
+				Detail: fmt.Sprintf(
+					"%s rows share this %s (%s), and every generated reference resolves with "+
+						"WHERE %s = ?, so it cannot name one of them: add a unique index on %s",
+					plural(len(ids), "row"), m.Ref, strings.Join(ids, ", "), m.Ref, m.Ref),
+			})
+		}
+	}
+}

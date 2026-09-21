@@ -19,9 +19,10 @@ func (r Refusal) String() string { return r.Model + " " + r.Key + ": " + r.Reaso
 
 // Result is what Compute found.
 type Result struct {
-	// Changes are in apply order: inserts in the order the models appear in
-	// the fixture file, then updates in that order, then deletes in reverse,
-	// so no row is written before the row it points at.
+	// Changes are in apply order: renames first, then inserts in model order,
+	// then updates, then deletes in reverse model order, so no row is written
+	// before the row it points at and none is removed before the rows that
+	// point at it.
 	Changes []fixturechange.Change
 	// Refusals are the differences that need a hand-written migration.
 	Refusals []Refusal
@@ -29,6 +30,8 @@ type Result struct {
 	Tables fixturechange.Tables
 	// Order is the model order that was used.
 	Order []string
+	// Base and Head name the two snapshots, for the generated file's comment.
+	Base, Head string
 }
 
 // Totals counts the changes by kind.
@@ -91,235 +94,6 @@ func plural(n int, word string) string {
 	return fmt.Sprintf("%d %ss", n, word)
 }
 
-// index lets one document resolve the references inside it.
-type index struct {
-	cfg      *Config
-	rows     map[string][]Row
-	byAnchor map[string]map[string]Row
-	byID     map[string]map[string]Row
-}
-
-func newIndex(cfg *Config, doc Doc) *index {
-	ix := &index{
-		cfg:      cfg,
-		rows:     map[string][]Row{},
-		byAnchor: map[string]map[string]Row{},
-		byID:     map[string]map[string]Row{},
-	}
-	for _, dm := range doc {
-		ix.rows[dm.Name] = append(ix.rows[dm.Name], dm.Rows...)
-		if ix.byAnchor[dm.Name] == nil {
-			ix.byAnchor[dm.Name] = map[string]Row{}
-			ix.byID[dm.Name] = map[string]Row{}
-		}
-		for _, row := range dm.Rows {
-			if a := row.Str(anchorColumn); a != "" {
-				if _, dup := ix.byAnchor[dm.Name][a]; !dup {
-					ix.byAnchor[dm.Name][a] = row
-				}
-			}
-			if m := cfg.Models[dm.Name]; m != nil {
-				if id := normalize(row.Str(m.ID)); id != "" && id != "0" {
-					if _, dup := ix.byID[dm.Name][id]; !dup {
-						ix.byID[dm.Name][id] = row
-					}
-				}
-			}
-		}
-	}
-	return ix
-}
-
-// cell returns a column of a row, falling back to the configured default. The
-// second result is false when the column is neither in the row nor in the
-// defaults, which the caller has to handle rather than guess at.
-func (ix *index) cell(m *Model, col string, row Row) (Cell, bool) {
-	if c, ok := row[col]; ok {
-		return c, true
-	}
-	if def, ok := m.Defaults[col]; ok {
-		return Cell{Text: def}, true
-	}
-	return Cell{}, false
-}
-
-// value turns one column of a row into the value a migration carries.
-func (ix *index) value(model, col string, row Row) (fixturechange.Value, bool, error) {
-	m := ix.cfg.Models[model]
-	cell, ok := ix.cell(m, col, row)
-	if !ok {
-		return fixturechange.Value{}, false, nil
-	}
-	if cell.Structured {
-		return fixturechange.Value{}, false, fmt.Errorf(
-			"%s.%s is a mapping or a sequence; this tool only handles scalar columns, put it in ignore", model, col)
-	}
-	if cell.IsNull {
-		return fixturechange.Null(), true, nil
-	}
-	text := strings.TrimSpace(cell.Text)
-	target, isRef := m.References[col]
-
-	if match := template.FindStringSubmatch(text); match != nil {
-		v, err := ix.resolveTemplate(model, col, text, match, target, isRef)
-		return v, err == nil, err
-	}
-	if !isRef {
-		return fixturechange.Lit(normalize(text)), true, nil
-	}
-	// A reference column holding nothing, 0 or NULL points at no row.
-	if n := normalize(text); n == "" || n == "0" {
-		return fixturechange.Lit(n), true, nil
-	}
-	v, err := ix.refByID(model, col, target, normalize(text))
-	return v, err == nil, err
-}
-
-// resolveTemplate turns a "{{ $.Model.row.Field }}" value into either a
-// reference, when the column is configured as one and the template names the
-// target's id, or into the literal the target row holds in that field.
-func (ix *index) resolveTemplate(model, col, text string, match []string, target string, isRef bool) (fixturechange.Value, error) {
-	tmodel, anchor, field := match[1], match[2], match[3]
-	tm, err := ix.cfg.model(tmodel)
-	if err != nil {
-		return fixturechange.Value{}, fmt.Errorf("%s.%s: %s: %w", model, col, text, err)
-	}
-	trow, ok := ix.byAnchor[tmodel][anchor]
-	if !ok {
-		return fixturechange.Value{}, fmt.Errorf("%s.%s: %s names no row of %s", model, col, text, tmodel)
-	}
-	column := underscore(field)
-	if isRef {
-		if tmodel != target {
-			return fixturechange.Value{}, fmt.Errorf(
-				"%s.%s: the configuration says it references %s but %s points at %s", model, col, target, text, tmodel)
-		}
-		if column == tm.ID {
-			key := trow.Str(tm.Ref)
-			if key == "" {
-				return fixturechange.Value{}, fmt.Errorf(
-					"%s.%s: %s points at a row of %s without a %s", model, col, text, tmodel, tm.Ref)
-			}
-			return fixturechange.RefTo(target, key), nil
-		}
-	}
-	tcell, ok := trow[column]
-	if !ok {
-		return fixturechange.Value{}, fmt.Errorf("%s.%s: %s names no column %q of %s", model, col, text, column, tmodel)
-	}
-	if tcell.IsNull {
-		return fixturechange.Null(), nil
-	}
-	return fixturechange.Lit(normalize(tcell.Text)), nil
-}
-
-// refByID turns the id a reference column holds into a reference by key, using
-// the row the same document declares under that id.
-func (ix *index) refByID(model, col, target, id string) (fixturechange.Value, error) {
-	tm := ix.cfg.Models[target]
-	trow, ok := ix.byID[target][id]
-	if !ok {
-		return fixturechange.Value{}, fmt.Errorf(
-			"%s.%s = %s: no row of %s in this file has that %s, so the generator cannot name the row it points at",
-			model, col, id, target, tm.ID)
-	}
-	key := trow.Str(tm.Ref)
-	if key == "" {
-		return fixturechange.Value{}, fmt.Errorf("%s.%s = %s: that row of %s has no %s", model, col, id, target, tm.Ref)
-	}
-	return fixturechange.RefTo(target, key), nil
-}
-
-func isZero(v fixturechange.Value) bool {
-	if v.Ref != nil {
-		return false
-	}
-	return v.IsNull || v.Lit == "" || normalize(v.Lit) == "0"
-}
-
-// keyValues is the natural key of a row.
-func (ix *index) keyValues(model string, row Row) (fixturechange.Values, error) {
-	m := ix.cfg.Models[model]
-	out := fixturechange.Values{}
-	for _, col := range m.Key {
-		v, present, err := ix.value(model, col, row)
-		if err != nil {
-			return nil, err
-		}
-		if !present {
-			return nil, fmt.Errorf("%s: key column %q is missing from a row and has no default", model, col)
-		}
-		out[col] = v
-	}
-	for _, group := range m.KeyAnyOf {
-		chosen, value := group[0], fixturechange.Lit("")
-		for _, col := range group {
-			v, present, err := ix.value(model, col, row)
-			if err != nil {
-				return nil, err
-			}
-			if present && !isZero(v) {
-				chosen, value = col, v
-				break
-			}
-			if col == group[0] && present {
-				value = v
-			}
-		}
-		out[chosen] = value
-	}
-	return out, nil
-}
-
-func keyString(model string, key fixturechange.Values) string {
-	cols := make([]string, 0, len(key))
-	for c := range key {
-		cols = append(cols, c)
-	}
-	sort.Strings(cols)
-	parts := make([]string, 0, len(cols))
-	for _, c := range cols {
-		parts = append(parts, c+"="+key[c].String())
-	}
-	return model + "/" + strings.Join(parts, "/")
-}
-
-// comparedColumns is the union of the rows' columns without the anchor, the
-// id, the ignored and the derived ones.
-func comparedColumns(m *Model, rows ...Row) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, row := range rows {
-		for col := range row {
-			if m.skip(col) || seen[col] {
-				continue
-			}
-			seen[col] = true
-			out = append(out, col)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
-// fullRowColumns is the whole row as the fixture loader would have written it:
-// what the row spells out, what the defaults say about the rest, and the id
-// when the row has one. An insert writes these, a delete guards on them.
-func fullRowColumns(m *Model, row Row) []string {
-	cols := comparedColumns(m, row)
-	for col := range m.Defaults {
-		if _, ok := row[col]; ok || m.skip(col) {
-			continue
-		}
-		cols = append(cols, col)
-	}
-	sort.Strings(cols)
-	if _, ok := row[m.ID]; ok {
-		cols = append(cols, m.ID)
-	}
-	return cols
-}
-
 func sameValue(a, b fixturechange.Value) bool {
 	if a.IsNull != b.IsNull {
 		return false
@@ -333,54 +107,44 @@ func sameValue(a, b fixturechange.Value) bool {
 	return normalize(a.Lit) == normalize(b.Lit)
 }
 
-type keyedRow struct {
-	key    fixturechange.Values
-	keyStr string
-	row    Row
-}
-
-// Compute diffs two revisions of a fixture file.
-func Compute(cfg *Config, old, next Doc) (*Result, error) {
+// Compute diffs two snapshots. Both sides are the same shape whether they came
+// from a fixture file or from a database, so this one function serves the diff
+// between two revisions of the file and the diff between the database and the
+// file.
+func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 	order, err := modelOrder(cfg, old, next)
 	if err != nil {
 		return nil, err
 	}
-	oldIx, newIx := newIndex(cfg, old), newIndex(cfg, next)
-	res := &Result{Tables: fixturechange.Tables{}, Order: order}
-	var inserts, updates, deletes []fixturechange.Change
+	res := &Result{Tables: fixturechange.Tables{}, Order: order, Base: old.Source, Head: next.Source}
+	var renames, inserts, updates, deletes []fixturechange.Change
 
-	// First pass: key every row and take the refusals that make a whole row
-	// disappear from the diff. A rename and a renumbering are the same
-	// refusal seen from two sides, and both have to be known before any
-	// change is built, because a row elsewhere may point at the renamed one.
+	// First pass over every model: decide the identity questions before any
+	// value is compared. A rename and a renumbering both make a whole row
+	// disappear from the value diff, and a row in another model may point at
+	// the renamed one, so all of them have to be known first.
 	type state struct {
-		old, cur []keyedRow
-		skip     map[string]bool
+		skip    map[string]bool
+		renamed map[string]bool // ref values that are in the middle of a rename
 	}
-	states := make(map[string]*state, len(order))
+	states := map[string]*state{}
 	renamed := map[string]bool{}
 	for _, model := range order {
-		st := &state{}
-		var err error
-		if st.old, err = keyRows(oldIx, model); err != nil {
+		st := &state{skip: map[string]bool{}}
+		if err := identity(cfg, model, old, next, res, st.skip, renamed, &renames); err != nil {
 			return nil, err
 		}
-		if st.cur, err = keyRows(newIx, model); err != nil {
-			return nil, err
-		}
-		st.skip = refuseRenames(cfg.Models[model], model, st.old, st.cur, res, renamed)
 		states[model] = st
 	}
 
 	for _, model := range order {
 		m := cfg.Models[model]
-		st := states[model]
-		skipKeys := st.skip
-		oldGroups, oldOrder := groupRows(st.old)
-		newGroups, newOrder := groupRows(st.cur)
+		skip := states[model].skip
+		oldGroups, oldOrder := byKey(old.Entries[model])
+		newGroups, newOrder := byKey(next.Entries[model])
 
 		for _, k := range newOrder {
-			if skipKeys[k] {
+			if skip[k] {
 				continue
 			}
 			cur, prev := newGroups[k], oldGroups[k]
@@ -388,24 +152,17 @@ func Compute(cfg *Config, old, next Doc) (*Result, error) {
 			// that hits the right row. As long as the group did not change
 			// that costs nothing; once it does, it has to be hand-written.
 			if len(cur) > 1 || len(prev) > 1 {
-				same, err := sameRowSet(m, model, oldIx, newIx, prev, cur)
-				if err != nil {
-					return nil, err
-				}
-				if !same {
+				if !sameRowSet(m, prev, cur) {
 					res.Refusals = append(res.Refusals, Refusal{model, k, fmt.Sprintf(
-						"the natural key is not unique (%d row(s) before, %d after) and the rows differ: hand-write the migration",
-						len(prev), len(cur))})
+						"the natural key is not unique (%s before, %s after) and the rows differ: "+
+							"hand-write the migration, and give the table a unique index",
+						plural(len(prev), "row"), plural(len(cur), "row"))})
 				}
 				continue
 			}
 			if len(prev) == 0 {
-				values, err := rowValues(newIx, model, fullRowColumns(m, cur[0].row), cur[0].row)
-				if err != nil {
-					return nil, err
-				}
 				change := fixturechange.Change{
-					Model: model, Kind: fixturechange.Insert, Key: cur[0].key, New: values}
+					Model: model, Kind: fixturechange.Insert, Key: cur[0].Key, New: cur[0].Full(m)}
 				if r, ok := refusedByRename(renamed, change); ok {
 					res.Refusals = append(res.Refusals, r)
 					continue
@@ -413,10 +170,7 @@ func Compute(cfg *Config, old, next Doc) (*Result, error) {
 				inserts = append(inserts, change)
 				continue
 			}
-			change, refusal, err := diffRow(oldIx, newIx, m, model, prev[0], cur[0])
-			if err != nil {
-				return nil, err
-			}
+			change, refusal := diffRow(m, model, prev[0], cur[0])
 			if refusal != nil {
 				res.Refusals = append(res.Refusals, *refusal)
 				continue
@@ -432,29 +186,26 @@ func Compute(cfg *Config, old, next Doc) (*Result, error) {
 		}
 
 		for _, k := range oldOrder {
-			if skipKeys[k] {
+			if skip[k] {
 				continue
 			}
 			if _, stillThere := newGroups[k]; stillThere {
 				continue
 			}
 			prev := oldGroups[k]
-			if m.NoDelete {
+			if m.Deletes == DeleteRefuse {
 				res.Refusals = append(res.Refusals, Refusal{model, k,
-					"deletes of this model are refused because other rows may point at it: hand-write the migration"})
+					"deletes of this model are refused by the configuration because other rows may point at it: " +
+						"hand-write the migration"})
 				continue
 			}
 			if len(prev) > 1 {
 				res.Refusals = append(res.Refusals, Refusal{model, k, fmt.Sprintf(
-					"delete of %d rows sharing one natural key: hand-write the migration", len(prev))})
+					"delete of %s sharing one natural key: hand-write the migration", plural(len(prev), "row"))})
 				continue
 			}
-			values, err := rowValues(oldIx, model, fullRowColumns(m, prev[0].row), prev[0].row)
-			if err != nil {
-				return nil, err
-			}
 			change := fixturechange.Change{
-				Model: model, Kind: fixturechange.Delete, Key: prev[0].key, Old: values}
+				Model: model, Kind: fixturechange.Delete, Key: prev[0].Key, Old: prev[0].Full(m)}
 			if r, ok := refusedByRename(renamed, change); ok {
 				res.Refusals = append(res.Refusals, r)
 				continue
@@ -466,7 +217,10 @@ func Compute(cfg *Config, old, next Doc) (*Result, error) {
 	for i, j := 0, len(deletes)-1; i < j; i, j = i+1, j-1 {
 		deletes[i], deletes[j] = deletes[j], deletes[i]
 	}
-	res.Changes = append(append(append([]fixturechange.Change{}, inserts...), updates...), deletes...)
+	res.Changes = nil
+	for _, part := range [][]fixturechange.Change{renames, inserts, updates, deletes} {
+		res.Changes = append(res.Changes, part...)
+	}
 	res.Tables = tablesFor(cfg, res.Changes)
 	sort.SliceStable(res.Refusals, func(i, j int) bool {
 		if res.Refusals[i].Model != res.Refusals[j].Model {
@@ -477,115 +231,222 @@ func Compute(cfg *Config, old, next Doc) (*Result, error) {
 	return res, nil
 }
 
-// modelOrder is the order the models appear in the new file, with models only
-// the old file had appended. dbfixture loads a file top to bottom, so that
-// order already satisfies the foreign keys.
-func modelOrder(cfg *Config, old, cur Doc) ([]string, error) {
-	var order []string
-	seen := map[string]bool{}
-	for _, doc := range []Doc{cur, old} {
-		for _, dm := range doc {
-			if _, err := cfg.model(dm.Name); err != nil {
-				return nil, err
-			}
-			if seen[dm.Name] {
+// identity settles what happened to a row's name and its id before anything
+// compares values.
+//
+// Two things can happen and neither is an ordinary update. A row can keep its
+// id and change its natural key, which is a rename: written as an insert plus a
+// delete it would break every row that points at the old one and everything
+// outside the database that knows the old name. And a row can keep its natural
+// key and change its id, which is a renumbering: live data points at the old id.
+// Policy.Renames and Policy.IDDrift decide what to do with each; the rows
+// involved are left out of the value diff either way, because their keys no
+// longer line up.
+func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
+	skip map[string]bool, renamed map[string]bool, renames *[]fixturechange.Change) error {
+
+	m := cfg.Models[model]
+	byID := func(entries []*Entry) map[string]*Entry {
+		out := map[string]*Entry{}
+		for _, e := range entries {
+			if e.ID == "" {
 				continue
 			}
-			seen[dm.Name] = true
-			order = append(order, dm.Name)
-		}
-	}
-	return order, nil
-}
-
-func keyRows(ix *index, model string) ([]keyedRow, error) {
-	var out []keyedRow
-	for _, row := range ix.rows[model] {
-		key, err := ix.keyValues(model, row)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, keyedRow{key: key, keyStr: keyString(model, key), row: row})
-	}
-	return out, nil
-}
-
-func groupRows(rows []keyedRow) (map[string][]keyedRow, []string) {
-	groups := map[string][]keyedRow{}
-	var order []string
-	for _, kr := range rows {
-		if _, seen := groups[kr.keyStr]; !seen {
-			order = append(order, kr.keyStr)
-		}
-		groups[kr.keyStr] = append(groups[kr.keyStr], kr)
-	}
-	return groups, order
-}
-
-// refuseRenames reports the rows whose stable id kept but whose natural key
-// changed, and the rows whose natural key kept but whose stable id changed.
-// Neither can be migrated: the first would insert the new row and delete the
-// old one, which is not a rename, and the second would renumber a primary key
-// other tables point at. The returned keys are left out of the diff.
-func refuseRenames(m *Model, model string, old, cur []keyedRow, res *Result, renamed map[string]bool) map[string]bool {
-	skip := map[string]bool{}
-	if m.StableID == "" {
-		return skip
-	}
-	byStable := func(rows []keyedRow) map[string]keyedRow {
-		out := map[string]keyedRow{}
-		for _, kr := range rows {
-			id := normalize(kr.row.Str(m.StableID))
-			if id == "" || id == "0" {
-				continue
-			}
-			if _, dup := out[id]; !dup {
-				out[id] = kr
+			if _, dup := out[e.ID]; !dup {
+				out[e.ID] = e
 			}
 		}
 		return out
 	}
-	newByStable := byStable(cur)
-	for _, kr := range old {
-		id := normalize(kr.row.Str(m.StableID))
-		nkr, ok := newByStable[id]
-		if !ok || nkr.keyStr == kr.keyStr {
+	newByID := byID(next.Entries[model])
+	oldByKey := map[string]*Entry{}
+	for _, e := range old.Entries[model] {
+		if _, dup := oldByKey[e.KeyStr]; !dup {
+			oldByKey[e.KeyStr] = e
+		}
+	}
+
+	for _, prev := range old.Entries[model] {
+		if prev.ID == "" {
 			continue
 		}
-		res.Refusals = append(res.Refusals, Refusal{model, m.StableID + " " + id, fmt.Sprintf(
-			"renamed from %s to %s: an insert plus a delete is not a rename, and rows elsewhere may point at it "+
-				"— hand-write the migration, then run this again", kr.keyStr, nkr.keyStr)})
-		skip[kr.keyStr] = true
-		skip[nkr.keyStr] = true
-		renamed[model+"\x00"+kr.row.Str(m.Ref)] = true
-		renamed[model+"\x00"+nkr.row.Str(m.Ref)] = true
-	}
-	if m.StableID == m.ID {
-		newByKey := make(map[string]keyedRow, len(cur))
-		for _, kr := range cur {
-			if _, dup := newByKey[kr.keyStr]; !dup {
-				newByKey[kr.keyStr] = kr
+		cur, ok := newByID[prev.ID]
+		if !ok || cur.KeyStr == prev.KeyStr {
+			continue
+		}
+		// A rename into a name another row still holds cannot be written in
+		// any order this tool can work out: two rows swapping names need one
+		// of them parked somewhere first.
+		occupied := false
+		if other, ok := oldByKey[cur.KeyStr]; ok && other.ID != prev.ID {
+			occupied = true
+		}
+		if cfg.Policy.Renames == RenameUpdate && !occupied {
+			change, err := renameChange(m, model, prev, cur)
+			if err != nil {
+				return err
+			}
+			*renames = append(*renames, change)
+			// Everything that points at this row named it by its old value.
+			// The id behind that name does not change, so no dependent row
+			// needs a statement of its own; what it needs is for the base
+			// state to stop calling the row by a name that will not exist by
+			// the time the rest of the migration runs.
+			if from, to := prev.refValue(m), cur.refValue(m); from != to && from != "" && to != "" {
+				rewriteRefs(cfg, old, model, from, to)
+			}
+			// The rename covers the key columns. The base row now carries the
+			// new key, so the ordinary diff lines the two up and writes
+			// whatever else about the row changed.
+			for col := range cur.Key {
+				if v, ok := cur.Cells[col]; ok {
+					prev.Cells[col] = v
+				}
+			}
+			prev.Key, prev.KeyStr = cur.Key, cur.KeyStr
+			continue
+		}
+		skip[prev.KeyStr] = true
+		skip[cur.KeyStr] = true
+		for _, e := range []*Entry{prev, cur} {
+			if v := e.refValue(m); v != "" {
+				renamed[model+"\x00"+v] = true
 			}
 		}
-		for _, kr := range old {
-			if skip[kr.keyStr] {
-				continue
-			}
-			nkr, ok := newByKey[kr.keyStr]
-			if !ok {
-				continue
-			}
-			o, n := normalize(kr.row.Str(m.ID)), normalize(nkr.row.Str(m.ID))
-			if o == n || o == "" || n == "" || o == "0" || n == "0" {
-				continue
-			}
-			res.Refusals = append(res.Refusals, Refusal{model, kr.keyStr, fmt.Sprintf(
-				"its %s changed from %s to %s: this tool does not renumber primary keys, "+
-					"put %s back or hand-write the migration", m.ID, o, n, o)})
-			skip[kr.keyStr] = true
+		if occupied && cfg.Policy.Renames == RenameUpdate {
+			res.Refusals = append(res.Refusals, Refusal{model, m.ID + " " + prev.ID, fmt.Sprintf(
+				"renamed from %s to %s, but another row still holds %s in the base state. Two rows cannot swap "+
+					"names in one step: park one of them under a third name first, in a migration of its own",
+				prev.KeyStr, cur.KeyStr, cur.KeyStr)})
+			continue
+		}
+		res.Refusals = append(res.Refusals, Refusal{model, m.ID + " " + prev.ID, fmt.Sprintf(
+			"renamed from %s to %s. An insert plus a delete is not a rename: rows elsewhere point at this one "+
+				"and so does whatever knows the old name outside the database. Hand-write the migration, or set "+
+				"policy.renames to update and run this again", prev.KeyStr, cur.KeyStr)})
+	}
+
+	if cfg.Policy.IDDrift == ModeIgnore {
+		return nil
+	}
+	newByKey := map[string]*Entry{}
+	for _, e := range next.Entries[model] {
+		if _, dup := newByKey[e.KeyStr]; !dup {
+			newByKey[e.KeyStr] = e
 		}
 	}
-	return skip
+	for _, prev := range old.Entries[model] {
+		if skip[prev.KeyStr] || prev.ID == "" {
+			continue
+		}
+		cur, ok := newByKey[prev.KeyStr]
+		if !ok || cur.ID == "" || cur.ID == prev.ID {
+			continue
+		}
+		reason := fmt.Sprintf(
+			"its %s changed from %s to %s. This tool does not renumber a primary key: live data points at %s, "+
+				"and so does anything outside the database that was given an id. Put %s back, or set "+
+				"policy.id_drift to warn if nothing outside this database names these ids",
+			m.ID, prev.ID, cur.ID, prev.ID, prev.ID)
+		if cfg.Policy.IDDrift == ModeWarn {
+			// The row still gets its value diff; only the id is left alone,
+			// which an update never writes anyway.
+			res.Refusals = append(res.Refusals, Refusal{model, prev.KeyStr, "warning: " + reason})
+			continue
+		}
+		res.Refusals = append(res.Refusals, Refusal{model, prev.KeyStr, reason})
+		skip[prev.KeyStr] = true
+	}
+	return nil
+}
+
+// rewriteRefs renames a row inside a snapshot: every reference to it, and
+// every natural key made out of one, starts calling it by its new name.
+func rewriteRefs(cfg *Config, snap *Snapshot, model, from, to string) {
+	for _, other := range snap.Order {
+		m := cfg.Models[other]
+		if m == nil {
+			continue
+		}
+		for _, e := range snap.Entries[other] {
+			touched := false
+			for col, v := range e.Cells {
+				if v.Ref != nil && v.Ref.Model == model && v.Ref.Key == from {
+					e.Cells[col] = fixturechange.RefTo(model, to)
+					touched = true
+				}
+			}
+			if !touched {
+				continue
+			}
+			if key, err := keyOf(cfg, m, other, e.Cells); err == nil {
+				e.Key, e.KeyStr = key, keyString(other, key)
+			}
+		}
+	}
+}
+
+// refValue is the value a reference to this row carries.
+func (e *Entry) refValue(m *Model) string {
+	v, ok := e.Cells[m.Ref]
+	if !ok || v.Ref != nil {
+		return ""
+	}
+	return v.Lit
+}
+
+// renameChange writes a rename as what it is: an update of the key columns,
+// guarded by the id as well as by the old key, so it cannot land on a row that
+// merely happens to carry the old name.
+func renameChange(m *Model, model string, prev, cur *Entry) (fixturechange.Change, error) {
+	if prev.ID == "" {
+		return fixturechange.Change{}, fmt.Errorf("%s %s: a rename needs the row's %s", model, prev.KeyStr, m.ID)
+	}
+	oldVals, newVals := fixturechange.Values{}, fixturechange.Values{}
+	for _, col := range sortedColumns(cur.Key) {
+		ov, hadOld := prev.Key[col]
+		nv := cur.Key[col]
+		if hadOld && sameValue(ov, nv) {
+			continue
+		}
+		if !hadOld {
+			ov = fixturechange.Null()
+		}
+		oldVals[col], newVals[col] = ov, nv
+	}
+	// A key_any_of group can move the key to a different column, which leaves
+	// the old one holding a value nothing clears.
+	for _, col := range sortedColumns(prev.Key) {
+		if _, ok := cur.Key[col]; ok {
+			continue
+		}
+		return fixturechange.Change{}, fmt.Errorf(
+			"%s %s: the natural key moved from column %q to another column; hand-write this one",
+			model, prev.KeyStr, col)
+	}
+	return fixturechange.Change{
+		Model: model, Kind: fixturechange.Update, Key: prev.Key, ID: prev.ID,
+		Old: oldVals, New: newVals}, nil
+}
+
+// modelOrder is the order the models appear in the new snapshot, with models
+// only the old one had appended.
+func modelOrder(cfg *Config, old, next *Snapshot) ([]string, error) {
+	var order []string
+	seen := map[string]bool{}
+	for _, snap := range []*Snapshot{next, old} {
+		for _, model := range snap.Order {
+			if _, err := cfg.model(model); err != nil {
+				return nil, err
+			}
+			if seen[model] {
+				continue
+			}
+			seen[model] = true
+			order = append(order, model)
+		}
+	}
+	return order, nil
 }
 
 // refusedByRename reports a change that points at a row whose rename was
@@ -596,7 +457,7 @@ func refusedByRename(renamed map[string]bool, c fixturechange.Change) (Refusal, 
 		return Refusal{}, false
 	}
 	for _, values := range []fixturechange.Values{c.Key, c.Old, c.New} {
-		for _, col := range sortedValueKeys(values) {
+		for _, col := range sortedColumns(values) {
 			ref := values[col].Ref
 			if ref == nil || !renamed[ref.Model+"\x00"+ref.Key] {
 				continue
@@ -609,45 +470,30 @@ func refusedByRename(renamed map[string]bool, c fixturechange.Change) (Refusal, 
 	return Refusal{}, false
 }
 
-// rowValues renders the given columns of a row. A column that does not
-// resolve is an error: guessing here is how a generator writes a migration
-// that looks right and is not.
-func rowValues(ix *index, model string, cols []string, row Row) (fixturechange.Values, error) {
-	out := fixturechange.Values{}
-	for _, col := range cols {
-		v, present, err := ix.value(model, col, row)
-		if err != nil {
-			return nil, err
-		}
-		if !present {
-			continue
-		}
-		out[col] = v
-	}
-	return out, nil
-}
-
 // diffRow compares two revisions of one row. A column that is spelled out on
 // one side and missing on the other with no configured default is refused: the
 // generator would have to invent what the missing one means.
-func diffRow(oldIx, newIx *index, m *Model, model string, prev, cur keyedRow) (*fixturechange.Change, *Refusal, error) {
+func diffRow(m *Model, model string, prev, cur *Entry) (*fixturechange.Change, *Refusal) {
 	oldVals, newVals := fixturechange.Values{}, fixturechange.Values{}
-	for _, col := range comparedColumns(m, prev.row, cur.row) {
-		ov, oldPresent, err := oldIx.value(model, col, prev.row)
-		if err != nil {
-			return nil, nil, err
-		}
-		nv, newPresent, err := newIx.value(model, col, cur.row)
-		if err != nil {
-			return nil, nil, err
-		}
-		if !oldPresent && !newPresent {
-			continue
-		}
+	cols := map[string]bool{}
+	for col := range prev.Cells {
+		cols[col] = true
+	}
+	for col := range cur.Cells {
+		cols[col] = true
+	}
+	names := make([]string, 0, len(cols))
+	for col := range cols {
+		names = append(names, col)
+	}
+	sort.Strings(names)
+	for _, col := range names {
+		ov, oldPresent := prev.Cells[col]
+		nv, newPresent := cur.Cells[col]
 		if oldPresent != newPresent {
-			return nil, &Refusal{model, cur.keyStr, fmt.Sprintf(
-				"column %q is written in one revision and left out in the other, and has no entry in defaults: "+
-					"say what an omitted %q means and run this again", col, col)}, nil
+			return nil, &Refusal{model, cur.KeyStr, fmt.Sprintf(
+				"column %q is written on one side and left out on the other, and has no entry in defaults: "+
+					"say what an omitted %q means and run this again", col, col)}
 		}
 		if sameValue(ov, nv) {
 			continue
@@ -655,59 +501,41 @@ func diffRow(oldIx, newIx *index, m *Model, model string, prev, cur keyedRow) (*
 		oldVals[col], newVals[col] = ov, nv
 	}
 	if len(newVals) == 0 {
-		return nil, nil, nil
+		return nil, nil
 	}
 	return &fixturechange.Change{
-		Model: model, Kind: fixturechange.Update, Key: cur.key, Old: oldVals, New: newVals}, nil, nil
+		Model: model, Kind: fixturechange.Update, Key: cur.Key, Old: oldVals, New: newVals}, nil
 }
 
 // sameRowSet compares two groups of rows that share one natural key, as
-// multisets. A column that does not resolve is an error, never a placeholder:
-// two rows that both failed to resolve would otherwise look equal and the
-// group would count as unchanged.
-func sameRowSet(m *Model, model string, oldIx, newIx *index, old, cur []keyedRow) (bool, error) {
-	signatures := func(ix *index, rows []keyedRow) ([]string, error) {
-		out := make([]string, 0, len(rows))
-		for _, kr := range rows {
+// multisets.
+func sameRowSet(m *Model, old, cur []*Entry) bool {
+	signatures := func(entries []*Entry) []string {
+		out := make([]string, 0, len(entries))
+		for _, e := range entries {
 			var parts []string
-			for _, col := range comparedColumns(m, kr.row) {
-				v, present, err := ix.value(model, col, kr.row)
-				if err != nil {
-					return nil, err
-				}
-				if !present {
-					continue
-				}
-				parts = append(parts, col+"="+v.String())
+			for _, col := range sortedColumns(e.Cells) {
+				parts = append(parts, col+"="+e.Cells[col].String())
 			}
 			out = append(out, strings.Join(parts, "\x00"))
 		}
 		sort.Strings(out)
-		return out, nil
+		return out
 	}
-	// Both sides are rendered even when the lengths differ, so an unresolvable
-	// reference is reported instead of hidden behind a "they differ".
-	a, err := signatures(oldIx, old)
-	if err != nil {
-		return false, err
-	}
-	b, err := signatures(newIx, cur)
-	if err != nil {
-		return false, err
-	}
+	a, b := signatures(old), signatures(cur)
 	if len(a) != len(b) {
-		return false, nil
+		return false
 	}
 	for i := range a {
 		if a[i] != b[i] {
-			return false, nil
+			return false
 		}
 	}
-	return true, nil
+	return true
 }
 
-// tablesFor collects the models the change set touches and the models it
-// points at, so the generated file carries nothing it does not need.
+// tablesFor collects the models the change set touches and the models it points
+// at, so the generated file carries nothing it does not need.
 func tablesFor(cfg *Config, changes []fixturechange.Change) fixturechange.Tables {
 	out := fixturechange.Tables{}
 	add := func(model string, referenced bool) {

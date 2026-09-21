@@ -17,18 +17,16 @@ func testConfig(t *testing.T) *Config {
 		SeedGuardTable: "plans",
 		Models: map[string]*Model{
 			"Currency": {
-				Table:    "currencies",
-				Ref:      "code",
-				Key:      []string{"code"},
-				StableID: "id",
+				Table: "currencies",
+				Ref:   "code",
+				Key:   []string{"code"},
 			},
 			"Plan": {
 				Table:      "plans",
 				Key:        []string{"name"},
-				StableID:   "id",
 				References: map[string]string{"currency_id": "Currency"},
 				Derived:    []string{"price_per_seat_cents"},
-				NoDelete:   true,
+				Deletes:    DeleteRefuse,
 			},
 			"Feature": {
 				Table:      "features",
@@ -85,18 +83,40 @@ func doc(t *testing.T, text string) Doc {
 	return d
 }
 
-func compute(t *testing.T, oldText, newText string) *Result {
+// snap resolves a fixture document with the test configuration.
+func snap(t *testing.T, cfg *Config, text, source string) *Snapshot {
 	t.Helper()
-	res, err := Compute(testConfig(t), doc(t, oldText), doc(t, newText))
+	s, err := FixtureSnapshot(cfg, doc(t, text), source)
+	if err != nil {
+		t.Fatalf("snapshot %s: %v", source, err)
+	}
+	return s
+}
+
+func computeWith(t *testing.T, cfg *Config, oldText, newText string) *Result {
+	t.Helper()
+	res, err := Compute(cfg, snap(t, cfg, oldText, "base"), snap(t, cfg, newText, "head"))
 	if err != nil {
 		t.Fatalf("Compute: %v", err)
 	}
 	return res
 }
 
+func compute(t *testing.T, oldText, newText string) *Result {
+	t.Helper()
+	return computeWith(t, testConfig(t), oldText, newText)
+}
+
 func computeErr(t *testing.T, oldText, newText string) error {
 	t.Helper()
-	_, err := Compute(testConfig(t), doc(t, oldText), doc(t, newText))
+	cfg := testConfig(t)
+	old, err := FixtureSnapshot(cfg, doc(t, oldText), "base")
+	if err == nil {
+		var next *Snapshot
+		if next, err = FixtureSnapshot(cfg, doc(t, newText), "head"); err == nil {
+			_, err = Compute(cfg, old, next)
+		}
+	}
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -471,10 +491,7 @@ func TestKeyAnyOfPicksTheColumnThatIsSet(t *testing.T) {
       code: seats
       value: 5
 `
-	res, err := Compute(cfg, doc(t, limits), doc(t, strings.Replace(limits, "      value: 5\n", "      value: 9\n", 1)))
-	if err != nil {
-		t.Fatalf("Compute: %v", err)
-	}
+	res := computeWith(t, cfg, limits, strings.Replace(limits, "      value: 5\n", "      value: 9\n", 1))
 	if len(res.Changes) != 1 {
 		t.Fatalf("the two rows must not collapse into one key: %+v", res.Changes)
 	}
@@ -492,5 +509,191 @@ func TestSummary(t *testing.T) {
 	got := strings.Join(res.Summary(), "; ")
 	if got != "Plan: 1 update" {
 		t.Fatalf("unexpected summary %q", got)
+	}
+}
+
+// A rename is refused by default because an insert plus a delete is not a
+// rename. With policy.renames set to update it is written as what it is: an
+// update of the key columns, guarded by the id as well, so it cannot land on a
+// row that merely happens to carry the old name.
+func TestRenameAsAnUpdate(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Policy.Renames = RenameUpdate
+	res := computeWith(t, cfg, base, replace(t, base, "      name: team\n", "      name: crew\n"))
+	if len(res.Refusals) != 0 {
+		t.Fatalf("expected no refusal, got %+v", res.Refusals)
+	}
+	c := only(t, res, "Plan", fixturechange.Update)
+	if c.ID != "2" {
+		t.Fatalf("a rename has to be guarded by the id, got %q", c.ID)
+	}
+	if c.Key["name"].Lit != "team" || c.New["name"].Lit != "crew" || c.Old["name"].Lit != "team" {
+		t.Fatalf("expected team -> crew, got key %+v old %+v new %+v", c.Key, c.Old, c.New)
+	}
+	// The rename runs before everything else, so a row that points at the new
+	// name finds it.
+	if res.Changes[0].ID != "2" {
+		t.Fatalf("the rename belongs first: %+v", res.Changes)
+	}
+}
+
+// The case a cascade has to cover: one row is renamed away from a name and
+// another row takes it. Writing only half of that leaves the database holding
+// the old name twice, or not at all.
+func TestRenameRefusedWhileANewRowTakesTheOldName(t *testing.T) {
+	next := replace(t, base, "      name: team\n", "      name: crew\n")
+	next = replace(t, next, "- model: Feature\n", `    - _id: team2
+      id: 9
+      name: team
+      currency_id: '{{ $.Currency.eur.ID }}'
+      price_cents: 3000
+      seats: 20
+- model: Feature
+`)
+	res := compute(t, base, next)
+	for _, c := range res.Changes {
+		if c.Model == "Plan" {
+			t.Fatalf("nothing may be written for Plan while the rename stands: %+v", c)
+		}
+	}
+	if len(res.Refusals) == 0 {
+		t.Fatal("expected the rename to be refused")
+	}
+}
+
+// With renames set to update the same case works, because the rename runs
+// first and the name is free by the time the new row is inserted.
+func TestRenameAsAnUpdateFreesTheOldName(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Policy.Renames = RenameUpdate
+	next := replace(t, base, "      name: team\n", "      name: crew\n")
+	next = replace(t, next, "- model: Feature\n", `    - _id: team2
+      id: 9
+      name: team
+      currency_id: '{{ $.Currency.eur.ID }}'
+      price_cents: 3000
+      seats: 20
+- model: Feature
+`)
+	res := computeWith(t, cfg, base, next)
+	if len(res.Refusals) != 0 {
+		t.Fatalf("expected no refusal, got %+v", res.Refusals)
+	}
+	var kinds []string
+	for _, c := range res.Changes {
+		kinds = append(kinds, string(c.Kind)+" "+c.Model)
+	}
+	if len(kinds) != 2 || kinds[0] != "update Plan" || kinds[1] != "insert Plan" {
+		t.Fatalf("the rename has to come before the insert that takes the name: %v", kinds)
+	}
+}
+
+// Renumbering a primary key is refused by default: live data points at the old
+// id. A project whose ids are internal can say so.
+func TestIDDriftPolicy(t *testing.T) {
+	next := replace(t, base, "      id: 2\n      name: team\n", "      id: 7\n      name: team\n")
+
+	warn := testConfig(t)
+	warn.Policy.IDDrift = ModeWarn
+	res := computeWith(t, warn, base, next)
+	if len(res.Refusals) != 1 || !strings.HasPrefix(res.Refusals[0].Reason, "warning:") {
+		t.Fatalf("expected a warning, got %+v", res.Refusals)
+	}
+
+	ignore := testConfig(t)
+	ignore.Policy.IDDrift = ModeIgnore
+	res = computeWith(t, ignore, base, next)
+	if len(res.Refusals) != 0 || len(res.Changes) != 0 {
+		t.Fatalf("ignore means the id is nobody's business: %+v / %+v", res.Refusals, res.Changes)
+	}
+}
+
+func TestDeletePolicyAppliesToModelsThatDoNotOverrideIt(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Models["Feature"].Deletes = ""
+	cfg.Policy.Deletes = DeleteRefuse
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	old := base + `    - plan_id: '{{ $.Plan.free.ID }}'
+      code: webhooks
+`
+	res := computeWith(t, cfg, old, base)
+	if len(res.Changes) != 0 || len(res.Refusals) != 1 {
+		t.Fatalf("expected the delete to be refused, got %+v / %+v", res.Changes, res.Refusals)
+	}
+}
+
+// The models have to be written out in an order that lets dbfixture resolve
+// every reference as it goes.
+func TestDependencyOrder(t *testing.T) {
+	order, err := testConfig(t).DependencyOrder()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pos := map[string]int{}
+	for i, m := range order {
+		pos[m] = i
+	}
+	if pos["Currency"] > pos["Plan"] || pos["Plan"] > pos["Feature"] {
+		t.Fatalf("unexpected order %v", order)
+	}
+}
+
+func TestDependencyOrderReportsACircle(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{
+		"A": {Table: "a", References: map[string]string{"b_id": "B"}},
+		"B": {Table: "b", References: map[string]string{"a_id": "A"}},
+	}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cfg.DependencyOrder(); err == nil || !strings.Contains(err.Error(), "circle") {
+		t.Fatalf("expected a circle to be reported, got %v", err)
+	}
+}
+
+// Two rows holding one natural key make every lookup by it ambiguous. It is
+// reported with the ids, so the list can be worked through.
+func TestSnapshotReportsDuplicateKeys(t *testing.T) {
+	cfg := testConfig(t)
+	dup := replace(t, base, "      code: EUR\n", "      code: EUR\n    - _id: eur2\n      id: 2\n      code: EUR\n")
+	s := snap(t, cfg, dup, "fixture.yml")
+	if len(s.Findings) != 1 || s.Findings[0].Kind != FindingDuplicateKey {
+		t.Fatalf("expected one duplicate finding, got %+v", s.Findings)
+	}
+	if !strings.Contains(s.Findings[0].Detail, "(1, 2)") {
+		t.Fatalf("the finding has to name the colliding ids: %q", s.Findings[0].Detail)
+	}
+}
+
+// Two rows swapping names cannot be written in either order without the
+// intermediate step breaking a unique index, so it is refused even where
+// renames are allowed.
+func TestSwappedNamesAreRefused(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Policy.Renames = RenameUpdate
+	next := replace(t, base, "      name: free\n", "      name: TEMP\n")
+	next = replace(t, next, "      name: team\n", "      name: free\n")
+	next = replace(t, next, "      name: TEMP\n", "      name: team\n")
+	res := computeWith(t, cfg, base, next)
+	if len(res.Refusals) == 0 {
+		t.Fatalf("expected a refusal, got changes %+v", res.Changes)
+	}
+	var swap int
+	for _, r := range res.Refusals {
+		switch {
+		case strings.Contains(r.Reason, "cannot swap"):
+			swap++
+		case strings.Contains(r.Reason, "whose rename was refused"):
+		default:
+			t.Fatalf("unexpected refusal %v", r)
+		}
+	}
+	if swap != 2 {
+		t.Fatalf("both halves of the swap have to be named: %+v", res.Refusals)
+	}
+	if len(res.Changes) != 0 {
+		t.Fatalf("a refused swap writes nothing: %+v", res.Changes)
 	}
 }
