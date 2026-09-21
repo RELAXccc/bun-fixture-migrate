@@ -116,6 +116,12 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	// An accepted rename rewrites the base state: the renamed row starts
+	// carrying its new key, and every row that named it by the old one follows.
+	// That happens on a copy. A caller that hands the same snapshot to two
+	// comparisons — check reads the database once and could diff it against
+	// more than one file — must get the same answer both times.
+	old = old.clone()
 	res := &Result{Tables: fixturechange.Tables{}, Order: order, Base: old.Source, Head: next.Source}
 	var renames, inserts, updates, deletes []fixturechange.Change
 
@@ -123,23 +129,24 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 	// value is compared. A rename and a renumbering both make a whole row
 	// disappear from the value diff, and a row in another model may point at
 	// the renamed one, so all of them have to be known first.
-	type state struct {
-		skip    map[string]bool
-		renamed map[string]bool // ref values that are in the middle of a rename
-	}
-	states := map[string]*state{}
+	//
+	// skipped holds, per model, the natural keys the value diff leaves alone;
+	// renamed holds the reference values that are in the middle of a rename,
+	// across all models, because a change in one model can point at a row of
+	// another.
+	skipped := map[string]map[string]bool{}
 	renamed := map[string]bool{}
 	for _, model := range order {
-		st := &state{skip: map[string]bool{}}
-		if err := identity(cfg, model, old, next, res, st.skip, renamed, &renames); err != nil {
+		skip := map[string]bool{}
+		if err := identity(cfg, model, old, next, res, skip, renamed, &renames); err != nil {
 			return nil, err
 		}
-		states[model] = st
+		skipped[model] = skip
 	}
 
 	for _, model := range order {
 		m := cfg.Models[model]
-		skip := states[model].skip
+		skip := skipped[model]
 		oldGroups, oldOrder := byKey(old.Entries[model])
 		newGroups, newOrder := byKey(next.Entries[model])
 
@@ -152,7 +159,7 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 			// that hits the right row. As long as the group did not change
 			// that costs nothing; once it does, it has to be hand-written.
 			if len(cur) > 1 || len(prev) > 1 {
-				if !sameRowSet(m, prev, cur) {
+				if !sameRowSet(prev, cur) {
 					res.Refusals = append(res.Refusals, Refusal{model, k, fmt.Sprintf(
 						"the natural key is not unique (%s before, %s after) and the rows differ: "+
 							"hand-write the migration, and give the table a unique index",
@@ -170,7 +177,7 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 				inserts = append(inserts, change)
 				continue
 			}
-			change, refusal := diffRow(m, model, prev[0], cur[0])
+			change, refusal := diffRow(model, prev[0], cur[0])
 			if refusal != nil {
 				res.Refusals = append(res.Refusals, *refusal)
 				continue
@@ -473,7 +480,7 @@ func refusedByRename(renamed map[string]bool, c fixturechange.Change) (Refusal, 
 // diffRow compares two revisions of one row. A column that is spelled out on
 // one side and missing on the other with no configured default is refused: the
 // generator would have to invent what the missing one means.
-func diffRow(m *Model, model string, prev, cur *Entry) (*fixturechange.Change, *Refusal) {
+func diffRow(model string, prev, cur *Entry) (*fixturechange.Change, *Refusal) {
 	oldVals, newVals := fixturechange.Values{}, fixturechange.Values{}
 	cols := map[string]bool{}
 	for col := range prev.Cells {
@@ -509,7 +516,7 @@ func diffRow(m *Model, model string, prev, cur *Entry) (*fixturechange.Change, *
 
 // sameRowSet compares two groups of rows that share one natural key, as
 // multisets.
-func sameRowSet(m *Model, old, cur []*Entry) bool {
+func sameRowSet(old, cur []*Entry) bool {
 	signatures := func(entries []*Entry) []string {
 		out := make([]string, 0, len(entries))
 		for _, e := range entries {

@@ -588,6 +588,33 @@ func TestRenameAsAnUpdateFreesTheOldName(t *testing.T) {
 	}
 }
 
+// An accepted rename rewrites the base state, and that has to happen on a copy:
+// check reads the database once, and a snapshot that came back changed would
+// make a second comparison against it answer something else.
+func TestComputeLeavesItsSnapshotsAlone(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Policy.Renames = RenameUpdate
+	next := replace(t, base, "      name: team\n", "      name: crew\n")
+	old, head := snap(t, cfg, base, "base"), snap(t, cfg, next, "head")
+
+	first, err := Compute(cfg, old, head)
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+	second, err := Compute(cfg, old, head)
+	if err != nil {
+		t.Fatalf("second Compute: %v", err)
+	}
+	if len(first.Changes) != len(second.Changes) {
+		t.Fatalf("the second run saw %d changes, the first %d", len(second.Changes), len(first.Changes))
+	}
+	for _, e := range old.Entries["Plan"] {
+		if e.ID == "2" && e.Cells["name"].Lit != "team" {
+			t.Fatalf("the base snapshot was rewritten in place: %+v", e.Cells)
+		}
+	}
+}
+
 // Renumbering a primary key is refused by default: live data points at the old
 // id. A project whose ids are internal can say so.
 func TestIDDriftPolicy(t *testing.T) {

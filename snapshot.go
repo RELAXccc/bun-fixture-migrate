@@ -62,6 +62,33 @@ type Snapshot struct {
 	Findings []Finding
 }
 
+// clone copies a snapshot deeply enough that rewriting an entry in it cannot
+// be seen through the original. The findings and the column lists are shared:
+// nothing rewrites those.
+func (s *Snapshot) clone() *Snapshot {
+	out := *s
+	out.Entries = make(map[string][]*Entry, len(s.Entries))
+	for model, entries := range s.Entries {
+		copied := make([]*Entry, 0, len(entries))
+		for _, e := range entries {
+			c := *e
+			c.Key = copyValues(e.Key)
+			c.Cells = copyValues(e.Cells)
+			copied = append(copied, &c)
+		}
+		out.Entries[model] = copied
+	}
+	return &out
+}
+
+func copyValues(v fixturechange.Values) fixturechange.Values {
+	out := make(fixturechange.Values, len(v))
+	for col, value := range v {
+		out[col] = value
+	}
+	return out
+}
+
 // Finding is something wrong with a snapshot that does not stop it being read.
 type Finding struct {
 	// Kind groups findings for the exit code and the report.
