@@ -143,9 +143,9 @@ func pipelineConfig(t *testing.T) *fixturemigrate.Config {
 	cfg := &fixturemigrate.Config{
 		SeedGuardTable: "plans",
 		Models: map[string]*fixturemigrate.Model{
-			"Currency": {Table: "currencies", Ref: "code", Key: []string{"code"}, StableID: "id"},
+			"Currency": {Table: "currencies", Ref: "code", Key: []string{"code"}},
 			"Plan": {
-				Table: "plans", Serial: true, Key: []string{"name"}, StableID: "id",
+				Table: "plans", Serial: true, Key: []string{"name"},
 				References: map[string]string{"currency_id": "Currency"},
 			},
 			"Feature": {
@@ -249,15 +249,8 @@ func snapshot(t *testing.T, db *bun.DB) string {
 func changeSetFor(t *testing.T, oldText, newText string) fixturechange.Set {
 	t.Helper()
 	cfg := pipelineConfig(t)
-	oldDoc, err := fixturemigrate.ParseDoc([]byte(oldText))
-	if err != nil {
-		t.Fatal(err)
-	}
-	newDoc, err := fixturemigrate.ParseDoc([]byte(newText))
-	if err != nil {
-		t.Fatal(err)
-	}
-	res, err := fixturemigrate.Compute(cfg, oldDoc, newDoc)
+	res, err := fixturemigrate.Compute(cfg, fixtureSnapshot(t, cfg, oldText, "base"),
+		fixtureSnapshot(t, cfg, newText, "head"))
 	if err != nil {
 		t.Fatalf("Compute: %v", err)
 	}
@@ -266,7 +259,7 @@ func changeSetFor(t *testing.T, oldText, newText string) fixturechange.Set {
 	}
 	// The same rendering the generated file gets, so a mistake in Render shows
 	// up here and not at deploy time.
-	if _, err := fixturemigrate.Render(cfg, "pipeline", "20260921120000", "HEAD", res); err != nil {
+	if _, err := fixturemigrate.Render(cfg, "pipeline", "20260921120000", res); err != nil {
 		t.Fatalf("Render: %v", err)
 	}
 	return fixturechange.Set{
@@ -275,6 +268,20 @@ func changeSetFor(t *testing.T, oldText, newText string) fixturechange.Set {
 		Tables:         res.Tables,
 		Changes:        res.Changes,
 	}
+}
+
+// fixtureSnapshot parses and resolves a fixture file the way the command does.
+func fixtureSnapshot(t *testing.T, cfg *fixturemigrate.Config, text, source string) *fixturemigrate.Snapshot {
+	t.Helper()
+	doc, err := fixturemigrate.ParseDoc([]byte(text))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := fixturemigrate.FixtureSnapshot(cfg, doc, source)
+	if err != nil {
+		t.Fatalf("resolve %s: %v", source, err)
+	}
+	return snap
 }
 
 func TestGeneratedChangesReproduceTheNewFixture(t *testing.T) {
