@@ -20,9 +20,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -40,41 +42,74 @@ const usage = `bun-fixture-migrate <command> [flags]
   export     write the fixture file from a database
   check      report what the database and the fixture file disagree about
   scaffold   write a starter configuration from a database
+  version    print the version of this binary
 
 Run "bun-fixture-migrate <command> -h" for the flags of one command.`
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, usage)
-		os.Exit(1)
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// streams is where a command writes. It exists so the tests can drive a
+// command the way a shell does and read what it said.
+type streams struct {
+	stdout, stderr io.Writer
+}
+
+// run is main with its arguments, its streams and its exit code handed to it.
+func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, usage)
+		return 1
 	}
+	o := streams{stdout: stdout, stderr: stderr}
 	var err error
-	switch os.Args[1] {
+	switch args[0] {
 	case "generate":
-		err = generate(os.Args[2:])
+		err = generate(o, args[1:])
 	case "export":
-		err = export(os.Args[2:])
+		err = export(o, args[1:])
 	case "check":
-		err = check(os.Args[2:])
+		err = check(o, args[1:])
 	case "scaffold":
-		err = scaffold(os.Args[2:])
+		err = scaffold(o, args[1:])
+	case "version":
+		fmt.Fprintln(stdout, version())
+		return 0
 	case "-h", "--help", "help":
-		fmt.Println(usage)
-		return
+		fmt.Fprintln(stdout, usage)
+		return 0
 	default:
-		fmt.Fprintf(os.Stderr, "bun-fixture-migrate: no command %q\n\n%s\n", os.Args[1], usage)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "bun-fixture-migrate: no command %q\n\n%s\n", args[0], usage)
+		return 1
 	}
-	if err == nil {
-		return
+	// A flag set that was asked for its help has already printed it.
+	if err == nil || errors.Is(err, flag.ErrHelp) {
+		return 0
 	}
 	var exit exitError
 	if errors.As(err, &exit) {
-		fmt.Fprintln(os.Stderr, exit.message)
-		os.Exit(exit.code)
+		fmt.Fprintln(stderr, exit.message)
+		return exit.code
 	}
-	fmt.Fprintln(os.Stderr, "bun-fixture-migrate:", err)
-	os.Exit(1)
+	fmt.Fprintln(stderr, "bun-fixture-migrate:", err)
+	return 1
+}
+
+// version is what the build carries: the module version for a binary from
+// "go install", the revision for one built out of a checkout.
+func version() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "bun-fixture-migrate (built without version information)"
+	}
+	v := info.Main.Version
+	for _, setting := range info.Settings {
+		if setting.Key == "vcs.revision" && len(setting.Value) >= 12 {
+			v += " (" + setting.Value[:12] + ")"
+		}
+	}
+	return "bun-fixture-migrate " + v
 }
 
 type exitError struct {
@@ -104,7 +139,8 @@ type setup struct {
 	fixturePath string
 }
 
-func common(fs *flag.FlagSet, args []string) (*setup, error) {
+func common(o streams, fs *flag.FlagSet, args []string) (*setup, error) {
+	fs.SetOutput(o.stderr)
 	configPath := fs.String("config", "fixture-migrate.yml", "configuration file")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -161,8 +197,8 @@ func (s *setup) readFixture() (*fixturemigrate.Snapshot, error) {
 }
 
 // generate writes the migration.
-func generate(args []string) error {
-	fs := flag.NewFlagSet("generate", flag.ExitOnError)
+func generate(o streams, args []string) error {
+	fs := flag.NewFlagSet("generate", flag.ContinueOnError)
 	var (
 		name         = fs.String("name", "", "short name for the migration, required")
 		base         = fs.String("base", "HEAD", "git revision to diff the fixture file against")
@@ -173,7 +209,7 @@ func generate(args []string) error {
 		allowPartial = fs.Bool("allow-partial", false, "write the changes that were accepted even when others were refused")
 		noLint       = fs.Bool("no-lint", false, "do not check the fixture file against the database's column defaults")
 	)
-	s, err := common(fs, args)
+	s, err := common(o, fs, args)
 	if err != nil {
 		return err
 	}
@@ -195,12 +231,12 @@ func generate(args []string) error {
 		if old, err = databaseSnapshot(db, s.cfg, head); err != nil {
 			return err
 		}
-		if err := lint(db, s.cfg, head, *noLint); err != nil {
+		if err := lint(o, db, s.cfg, head, *noLint); err != nil {
 			return err
 		}
 	} else {
 		var data []byte
-		source := *base
+		var source string
 		if *oldPath != "" {
 			source = *oldPath
 			data, err = os.ReadFile(*oldPath)
@@ -220,7 +256,7 @@ func generate(args []string) error {
 				return err
 			}
 			defer db.Close()
-			if err := lint(db, s.cfg, head, false); err != nil {
+			if err := lint(o, db, s.cfg, head, false); err != nil {
 				return err
 			}
 		}
@@ -231,16 +267,16 @@ func generate(args []string) error {
 		return err
 	}
 	for _, line := range res.Summary() {
-		fmt.Println(line)
+		fmt.Fprintln(o.stdout, line)
 	}
 	for _, r := range res.Refusals {
-		fmt.Fprintln(os.Stderr, "refused:", r.String())
+		fmt.Fprintln(o.stderr, "refused:", r.String())
 	}
 	if len(res.Changes) == 0 {
 		if len(res.Refusals) > 0 {
 			return refused(len(res.Refusals))
 		}
-		fmt.Printf("nothing changed in %s since %s\n", s.cfg.Fixture, res.Base)
+		fmt.Fprintf(o.stdout, "nothing changed in %s since %s\n", s.cfg.Fixture, res.Base)
 		return nil
 	}
 	if len(res.Refusals) > 0 && !*allowPartial {
@@ -255,7 +291,7 @@ func generate(args []string) error {
 		return err
 	}
 	if *dryRun {
-		os.Stdout.Write(src)
+		o.stdout.Write(src)
 		return nil
 	}
 	dir := *out
@@ -266,15 +302,15 @@ func generate(args []string) error {
 	if err := os.WriteFile(target, src, 0o644); err != nil {
 		return err
 	}
-	fmt.Println("wrote", target)
-	fmt.Println("read it, then run your migrations")
+	fmt.Fprintln(o.stdout, "wrote", target)
+	fmt.Fprintln(o.stdout, "read it, then run your migrations")
 	return nil
 }
 
 // lint checks the fixture file against what the database says about its own
 // columns. A lint that could not run is never reported as a lint that found
 // nothing: the connection error comes back as an error.
-func lint(db *bun.DB, cfg *fixturemigrate.Config, snap *fixturemigrate.Snapshot, skip bool) error {
+func lint(o streams, db *bun.DB, cfg *fixturemigrate.Config, snap *fixturemigrate.Snapshot, skip bool) error {
 	if skip {
 		return nil
 	}
@@ -290,7 +326,7 @@ func lint(db *bun.DB, cfg *fixturemigrate.Config, snap *fixturemigrate.Snapshot,
 		return nil
 	}
 	for _, f := range findings {
-		fmt.Fprintln(os.Stderr, string(f.Kind)+":", f.String())
+		fmt.Fprintln(o.stderr, string(f.Kind)+":", f.String())
 	}
 	if mode == fixturemigrate.ModeError {
 		return exitError{2, fmt.Sprintf("%s in the fixture file, nothing written", plural(len(findings), "problem"))}
@@ -316,13 +352,13 @@ func databaseSnapshot(db *bun.DB, cfg *fixturemigrate.Config, head *fixturemigra
 }
 
 // export writes the fixture file from the database.
-func export(args []string) error {
-	fs := flag.NewFlagSet("export", flag.ExitOnError)
+func export(o streams, args []string) error {
+	fs := flag.NewFlagSet("export", flag.ContinueOnError)
 	var (
 		out    = fs.String("o", "", "write here instead of the fixture file of the configuration")
 		stdout = fs.Bool("stdout", false, "write to standard output")
 	)
-	s, err := common(fs, args)
+	s, err := common(o, fs, args)
 	if err != nil {
 		return err
 	}
@@ -355,7 +391,7 @@ func export(args []string) error {
 		return err
 	}
 	for _, f := range findings {
-		fmt.Fprintln(os.Stderr, string(f.Kind)+":", f.String())
+		fmt.Fprintln(o.stderr, string(f.Kind)+":", f.String())
 	}
 	if mode == fixturemigrate.ModeError {
 		return exitError{3, fmt.Sprintf(
@@ -363,7 +399,7 @@ func export(args []string) error {
 				"Fix them, or set the policy to warn to write it anyway", plural(len(findings), "problem"))}
 	}
 	if *stdout {
-		os.Stdout.Write(data)
+		o.stdout.Write(data)
 		return nil
 	}
 	target := *out
@@ -376,14 +412,14 @@ func export(args []string) error {
 	if err := os.WriteFile(target, data, 0o644); err != nil {
 		return err
 	}
-	fmt.Println("wrote", target)
+	fmt.Fprintln(o.stdout, "wrote", target)
 	return nil
 }
 
 // check reports the drift between the database and the fixture file.
-func check(args []string) error {
-	fs := flag.NewFlagSet("check", flag.ExitOnError)
-	s, err := common(fs, args)
+func check(o streams, args []string) error {
+	fs := flag.NewFlagSet("check", flag.ContinueOnError)
+	s, err := common(o, fs, args)
 	if err != nil {
 		return err
 	}
@@ -414,7 +450,7 @@ func check(args []string) error {
 	mode, findings := s.cfg.Worst(res.Findings)
 	res.Findings = findings
 	for _, line := range res.Lines() {
-		fmt.Println(line)
+		fmt.Fprintln(o.stdout, line)
 	}
 	if !res.Drifted() {
 		return nil
@@ -426,14 +462,15 @@ func check(args []string) error {
 }
 
 // scaffold writes a starter configuration from a database.
-func scaffold(args []string) error {
-	fs := flag.NewFlagSet("scaffold", flag.ExitOnError)
+func scaffold(o streams, args []string) error {
+	fs := flag.NewFlagSet("scaffold", flag.ContinueOnError)
 	var (
 		dsn    = fs.String("dsn", "", "PostgreSQL DSN (there is no configuration file yet)")
 		schema = fs.String("schema", "public", "schema to read")
 		only   = fs.String("tables", "", "comma-separated tables to include, default all of them")
 		out    = fs.String("o", "", "write here instead of standard output")
 	)
+	fs.SetOutput(o.stderr)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -458,14 +495,14 @@ func scaffold(args []string) error {
 	}
 	data := fixturemigrate.Scaffold(tables, wanted, *schema)
 	if *out == "" {
-		os.Stdout.Write(data)
+		o.stdout.Write(data)
 		return nil
 	}
 	if err := os.WriteFile(*out, data, 0o644); err != nil {
 		return err
 	}
-	fmt.Fprintln(os.Stderr, "wrote", *out)
-	fmt.Fprintln(os.Stderr, "read it: the natural keys and the model names are guesses")
+	fmt.Fprintln(o.stderr, "wrote", *out)
+	fmt.Fprintln(o.stderr, "read it: the natural keys and the model names are guesses")
 	return nil
 }
 
