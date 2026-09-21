@@ -72,11 +72,15 @@ func (v Value) String() string {
 // Values maps a column to its value.
 type Values = map[string]Value
 
-// Change is one row that differs between two revisions of the fixture file.
+// Change is one row that differs between the two states being compared.
 type Change struct {
 	// Model is the fixture model name; Tables says which table that is.
 	Model string
 	Kind  Kind
+	// ID, when set, is an extra guard: the row must also hold this primary
+	// key. A rename needs it, because the update changes the very columns the
+	// natural key is made of and only the id says the right row was found.
+	ID string
 	// Key is the natural key: enough columns to find the row without using
 	// its id.
 	Key Values
@@ -100,4 +104,32 @@ type Set struct {
 	SeedGuardTable string
 	Tables         Tables
 	Changes        []Change
+	// Policy is what the migration does when the database is not in the state
+	// the change set was generated against. The generator writes the values
+	// from the configuration file into it, so the migration carries its own
+	// policy and a later change to the configuration does not silently change
+	// what an old migration does.
+	Policy Policy
+}
+
+// Policy is the run-time half of the configuration's policy block. The zero
+// value is the strict one: anything unexpected fails and the transaction rolls
+// back.
+//
+// This matters more than it looks. bun's migrator records a migration as
+// applied as soon as the function returns nil, so a statement that matched no
+// row and returned nil is a change that is now lost for good: fix the drift,
+// deploy again, and the migration never runs a second time. A migration that
+// cannot do what it says has to fail.
+type Policy struct {
+	// MissingRow is what happens when an update or a delete finds no row with
+	// the natural key at all: "error" (the default) or "warn".
+	MissingRow string
+	// ChangedRow is what happens when the row is there but no longer holds the
+	// values the base state had, which is somebody's hand edit: "warn" (keep
+	// the edit and carry on) or "error".
+	ChangedRow string
+	// IDDrift is what happens when the id in the change set is not the id the
+	// database gave the row: "error" (the default), "warn" or "ignore".
+	IDDrift string
 }
