@@ -19,6 +19,8 @@ Four commands:
 | `check` | report what the database and the fixture file disagree about, changing nothing |
 | `generate` | write the bun migration that closes the gap, from git or from the database |
 
+`bun-fixture-migrate version` says which build you have; every command takes `-h`.
+
 It never looks at your Go model types. PostgreSQL's catalog knows the tables, the columns and their
 types, the column defaults, the primary keys, the unique indexes, the foreign keys and the
 sequences; the configuration file says which model lives in which table and which column is a
@@ -288,7 +290,10 @@ in the file must be listed or the tool stops:
 
 And the policy block: `id_drift`, `missing_row`, `changed_row`, `zero_default`, `duplicate_key`,
 `renames`, `deletes`. Defaults are the strict reading of each. `missing_row` is the one that can lose
-a change if you set it wrong, and its comment says so.
+a change if you set it wrong, and its comment says so. A value none of them knows is refused by name
+rather than read as the nearest one: the generated migration carries its own copy of the three
+run-time settings, and a typo in a file nobody reads again would quietly decide what that migration
+does when a database is not in the state it expected.
 
 Everything else is not configurable, on purpose:
 
@@ -360,7 +365,9 @@ In every case the answer is the same: write that one migration by hand, then run
 
 ## Tests
 
-`go test ./...` runs the diff, export, scaffold, rendering and validation tests without a database.
+`go test ./...` runs everything that needs no database: the diff, the export, the report the `check`
+command prints, the scaffold, the rendering, the validation, the SQL the database side builds, and
+the commands themselves — `generate` against two files is the whole pipeline and never connects.
 
 The tests that need a real PostgreSQL live in the `dbtest` module and are skipped unless a DSN is set.
 They seed with the actual `dbfixture`, export the result and check the export is the file again;

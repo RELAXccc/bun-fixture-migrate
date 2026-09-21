@@ -365,8 +365,9 @@ func slug(s string) string {
 // reportDuplicateRefs reports a model whose ref column is not unique among the
 // rows something points at. Every generated migration resolves a reference with
 // "WHERE <ref> = ?", so two rows sharing one ref value make that lookup pick an
-// arbitrary row, or fail. GK found two such tables; they had no unique index and
-// no check in the admin UI, and nothing had ever said so.
+// arbitrary row, or fail. The schema this tool was written for had two such
+// tables: no unique index, no check in the admin UI, and nothing had ever said
+// so.
 func reportDuplicateRefs(cfg *Config, snap *Snapshot) {
 	referenced := map[string]bool{}
 	for _, model := range snap.Order {

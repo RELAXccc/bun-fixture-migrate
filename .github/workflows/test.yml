@@ -21,13 +21,23 @@ jobs:
         with:
           go-version: "1.24"
 
-      - run: gofmt -l . && test -z "$(gofmt -l .)"
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
       - run: go vet ./...
-      - run: go test ./...
+      - run: go test -race ./...
 
       - run: go vet ./...
         working-directory: dbtest
-      - run: go test ./...
+      # The database suite holds no shared state between tests, but it is the
+      # only place the run time is exercised at all, so it runs under -race too.
+      - run: go test -race ./...
         working-directory: dbtest
         env:
           BUN_FIXTURE_MIGRATE_POSTGRES: postgres://postgres:pg@127.0.0.1:5432/postgres?sslmode=disable

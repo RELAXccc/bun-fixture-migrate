@@ -99,7 +99,8 @@ type Policy struct {
 	MissingRow Mode `yaml:"missing_row"`
 	// ChangedRow decides what a generated update or delete does when the row is
 	// there but no longer holds the values the base revision had, which is
-	// somebody's hand edit. Default "skip": keep the edit, do not overwrite it.
+	// somebody's hand edit. Default "warn": the row is left alone and their
+	// edit is kept.
 	ChangedRow Mode `yaml:"changed_row"`
 	// ZeroDefault decides what happens when a fixture row writes a type's zero
 	// into a column whose database default is not that zero. bun sends DEFAULT
