@@ -80,6 +80,21 @@ func TestValidateRejects(t *testing.T) {
 				{Model: "Plan", Kind: fixturechange.Delete,
 					Key: fixturechange.Values{"name": fixturechange.RefTo("Coupon", "x")}},
 			}}, "unknown model"},
+		// The natural key alone would delete whatever carries the name now,
+		// including a row somebody has since edited into something else.
+		"delete without the row it removes": {
+			fixturechange.Set{Tables: tables(), Changes: []fixturechange.Change{
+				{Model: "Plan", Kind: fixturechange.Delete,
+					Key: fixturechange.Values{"name": fixturechange.Lit("team")}},
+			}}, "delete without the row it removes"},
+		// A misspelled policy reads as one of the two settings, and which one
+		// depends on the field: strict here, lenient in ChangedRow.
+		"policy nobody can read": {
+			fixturechange.Set{Tables: tables(), Policy: fixturechange.Policy{MissingRow: "warm"}},
+			"policy MissingRow"},
+		"policy that is not offered for this field": {
+			fixturechange.Set{Tables: tables(), Policy: fixturechange.Policy{MissingRow: fixturechange.Ignore}},
+			"policy MissingRow"},
 	} {
 		err := Validate(tc.set)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -191,5 +206,53 @@ func TestValidateRefusesAnInsertWithAnIDGuard(t *testing.T) {
 	}
 	if err := Validate(set); err == nil {
 		t.Fatal("an insert has nothing to guard on yet")
+	}
+}
+
+// The empty policy is the one a hand-written set carries, and it has to pass.
+func TestValidateAcceptsAnEmptyPolicy(t *testing.T) {
+	if err := (fixturechange.Policy{}).Validate(); err != nil {
+		t.Fatalf("the zero policy is the default, not a mistake: %v", err)
+	}
+	full := fixturechange.Policy{
+		MissingRow: fixturechange.Error, ChangedRow: fixturechange.Warn, IDDrift: fixturechange.Ignore}
+	if err := full.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+func TestKeyLabelIsStableWhateverTheMapOrder(t *testing.T) {
+	key := fixturechange.Values{
+		"code":    fixturechange.Lit("api"),
+		"plan_id": fixturechange.RefTo("Plan", "team"),
+		"note":    fixturechange.Null(),
+	}
+	const want = "code=api,note=NULL,plan_id=Plan(team)"
+	for i := 0; i < 20; i++ {
+		if got := keyLabel(key); got != want {
+			t.Fatalf("keyLabel = %q, want %q", got, want)
+		}
+	}
+}
+
+// The id is written by the insert but left out of the check for a row that is
+// already there: the row is the same row whatever id this database gave it.
+func TestWithoutColumn(t *testing.T) {
+	values := fixturechange.Values{
+		"id": fixturechange.Lit("3"), "name": fixturechange.Lit("pro")}
+	out := withoutColumn(values, "id")
+	if len(out) != 1 || out["name"].Lit != "pro" {
+		t.Fatalf("withoutColumn dropped the wrong thing: %+v", out)
+	}
+	if len(values) != 2 {
+		t.Fatal("the original has to be left alone")
+	}
+}
+
+func TestRowCount(t *testing.T) {
+	for n, want := range map[int64]string{0: "0 rows", 1: "1 row", 2: "2 rows"} {
+		if got := rowCount(n); got != want {
+			t.Errorf("rowCount(%d) = %q, want %q", n, got, want)
+		}
 	}
 }

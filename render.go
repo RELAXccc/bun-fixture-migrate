@@ -62,9 +62,9 @@ func Render(cfg *Config, name, stamp string, res *Result) ([]byte, error) {
 		Tables:         res.Tables,
 		Changes:        res.Changes,
 		Policy: fixturechange.Policy{
-			MissingRow: string(cfg.Policy.MissingRow),
-			ChangedRow: string(cfg.Policy.ChangedRow),
-			IDDrift:    string(cfg.Policy.IDDrift),
+			MissingRow: fixturechange.Mode(cfg.Policy.MissingRow),
+			ChangedRow: fixturechange.Mode(cfg.Policy.ChangedRow),
+			IDDrift:    fixturechange.Mode(cfg.Policy.IDDrift),
 		},
 	}
 	if err := fixtureapply.Validate(set); err != nil {

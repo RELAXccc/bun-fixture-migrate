@@ -6,6 +6,11 @@
 // has.
 package fixturechange
 
+import (
+	"fmt"
+	"strings"
+)
+
 // Kind is what a change does to a row.
 type Kind string
 
@@ -112,6 +117,21 @@ type Set struct {
 	Policy Policy
 }
 
+// Mode is what a policy does when it triggers. The empty Mode is the strict
+// reading of whichever policy carries it, so a Policy nobody filled in fails on
+// anything unexpected.
+type Mode string
+
+const (
+	// Error fails the migration, which rolls the transaction back and leaves
+	// bun's migration table without a row for it.
+	Error Mode = "error"
+	// Warn reports the row and carries on.
+	Warn Mode = "warn"
+	// Ignore does not even look.
+	Ignore Mode = "ignore"
+)
+
 // Policy is the run-time half of the configuration's policy block. The zero
 // value is the strict one: anything unexpected fails and the transaction rolls
 // back.
@@ -123,13 +143,55 @@ type Set struct {
 // cannot do what it says has to fail.
 type Policy struct {
 	// MissingRow is what happens when an update or a delete finds no row with
-	// the natural key at all: "error" (the default) or "warn".
-	MissingRow string
+	// the natural key at all: Error (the default) or Warn.
+	MissingRow Mode
 	// ChangedRow is what happens when the row is there but no longer holds the
-	// values the base state had, which is somebody's hand edit: "warn" (keep
-	// the edit and carry on) or "error".
-	ChangedRow string
+	// values the base state had, which is somebody's hand edit: Warn (keep the
+	// edit and carry on) or Error.
+	ChangedRow Mode
 	// IDDrift is what happens when the id in the change set is not the id the
-	// database gave the row: "error" (the default), "warn" or "ignore".
-	IDDrift string
+	// database gave the row: Error (the default), Warn or Ignore.
+	IDDrift Mode
+}
+
+// modes is what each field of a Policy accepts. A value outside its list is a
+// typo, and a typo that silently means something else is the sort of thing this
+// tool exists to stop: "warm" in MissingRow would read as the strict setting
+// and "warm" in ChangedRow as the lenient one.
+var modes = []struct {
+	Field   string
+	Value   func(Policy) Mode
+	Allowed []Mode
+}{
+	{"MissingRow", func(p Policy) Mode { return p.MissingRow }, []Mode{Error, Warn}},
+	{"ChangedRow", func(p Policy) Mode { return p.ChangedRow }, []Mode{Error, Warn}},
+	{"IDDrift", func(p Policy) Mode { return p.IDDrift }, []Mode{Error, Warn, Ignore}},
+}
+
+// Validate reports a policy field holding something this package does not know.
+// An empty field is the default and always allowed.
+func (p Policy) Validate() error {
+	for _, m := range modes {
+		value := m.Value(p)
+		if value == "" {
+			continue
+		}
+		ok := false
+		for _, allowed := range m.Allowed {
+			ok = ok || value == allowed
+		}
+		if !ok {
+			return fmt.Errorf("policy %s is %q, it has to be one of %s or empty for the default",
+				m.Field, value, join(m.Allowed))
+		}
+	}
+	return nil
+}
+
+func join(modes []Mode) string {
+	out := make([]string, 0, len(modes))
+	for _, m := range modes {
+		out = append(out, string(m))
+	}
+	return strings.Join(out, ", ")
 }

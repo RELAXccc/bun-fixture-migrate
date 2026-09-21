@@ -98,6 +98,9 @@ func quoteIdent(name string) (string, error) {
 // plain identifiers, a kind that exists, and the shape each kind needs. Apply
 // and Revert call it first, and the generator's tests call it on their output.
 func Validate(set fixturechange.Set) error {
+	if err := set.Policy.Validate(); err != nil {
+		return err
+	}
 	// A model nobody points at needs no key column, so an empty one is only an
 	// error where a reference would use it.
 	referenced := map[string]bool{}
@@ -183,6 +186,12 @@ func Validate(set fixturechange.Set) error {
 			if len(c.New) != 0 {
 				return fmt.Errorf("change %d (%s): delete with new values", i, c.Model)
 			}
+			// A delete guards on the whole row it is removing. Without that it
+			// would take the natural key's word for it and remove a row
+			// somebody had since edited into something else.
+			if len(c.Old) == 0 {
+				return fmt.Errorf("change %d (%s): delete without the row it removes", i, c.Model)
+			}
 		default:
 			return fmt.Errorf("change %d (%s): unknown kind %q", i, c.Model, c.Kind)
 		}
@@ -226,14 +235,14 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 			return fmt.Errorf("%s: %w", where, err)
 		}
 		if res.problem == "" {
-			o.logf("%s: applied (%d row(s))", where, res.rows)
+			o.logf("%s: applied (%s)", where, rowCount(res.rows))
 			continue
 		}
 		if res.problem == problemBenign {
 			o.logf("%s: %s", where, res.message)
 			continue
 		}
-		if modeFor(set.Policy, res.problem) == "error" {
+		if modeFor(set.Policy, res.problem) == fixturechange.Error {
 			return fmt.Errorf("%s: %s", where, res.message)
 		}
 		o.logf("%s: SKIPPED. %s", where, res.message)
@@ -258,25 +267,25 @@ const (
 // policy field is the strict reading: a change that could not be made fails the
 // migration rather than being recorded as done. A benign outcome, where the
 // database already holds what the change wanted, is never an error.
-func modeFor(p fixturechange.Policy, pr problem) string {
+func modeFor(p fixturechange.Policy, pr problem) fixturechange.Mode {
 	switch pr {
 	case problemBenign:
-		return "warn"
+		return fixturechange.Warn
 	case problemMissing:
-		if p.MissingRow == "warn" {
-			return "warn"
+		if p.MissingRow == fixturechange.Warn {
+			return fixturechange.Warn
 		}
 	case problemChanged:
-		if p.ChangedRow == "error" {
-			return "error"
+		if p.ChangedRow == fixturechange.Error {
+			return fixturechange.Error
 		}
-		return "warn"
+		return fixturechange.Warn
 	case problemIDDrift:
-		if p.IDDrift == "warn" || p.IDDrift == "ignore" {
-			return "warn"
+		if p.IDDrift == fixturechange.Warn || p.IDDrift == fixturechange.Ignore {
+			return fixturechange.Warn
 		}
 	}
-	return "error"
+	return fixturechange.Error
 }
 
 type outcome struct {
@@ -326,7 +335,7 @@ func (r *runner) insert(ctx context.Context, c fixturechange.Change, t fixturech
 	// An explicit id that another row already holds is checked before the
 	// statement runs, so the failure names the row instead of arriving as a
 	// primary-key violation from somewhere inside the driver.
-	if id, ok := c.New[t.ID]; ok && id.Ref == nil && !id.IsNull && r.set.Policy.IDDrift != "ignore" {
+	if id, ok := c.New[t.ID]; ok && id.Ref == nil && !id.IsNull && r.set.Policy.IDDrift != fixturechange.Ignore {
 		taken, err := r.idTakenByAnotherRow(ctx, c, t, table, id.Lit)
 		if err != nil {
 			return outcome{}, err
@@ -762,6 +771,13 @@ func tableHasRows(ctx context.Context, tx bun.IDB, table string) (bool, error) {
 }
 
 func isNoRows(err error) bool { return errors.Is(err, sql.ErrNoRows) }
+
+func rowCount(n int64) string {
+	if n == 1 {
+		return "1 row"
+	}
+	return fmt.Sprintf("%d rows", n)
+}
 
 func keyLabel(key fixturechange.Values) string {
 	parts := make([]string, 0, len(key))
