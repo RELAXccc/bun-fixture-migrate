@@ -123,14 +123,23 @@ type Set struct {
 type Mode string
 
 const (
-	// Error fails the migration, which rolls the transaction back and leaves
-	// bun's migration table without a row for it.
-	Error Mode = "error"
-	// Warn reports the row and carries on.
-	Warn Mode = "warn"
-	// Ignore does not even look.
-	Ignore Mode = "ignore"
+	// ModeError fails the migration, which rolls the transaction back and
+	// leaves bun's migration table without a row for it.
+	ModeError Mode = "error"
+	// ModeWarn reports the row and carries on.
+	ModeWarn Mode = "warn"
+	// ModeIgnore does not even look.
+	ModeIgnore Mode = "ignore"
 )
+
+func (m Mode) valid(allowed ...Mode) bool {
+	for _, a := range allowed {
+		if m == a {
+			return true
+		}
+	}
+	return false
+}
 
 // Policy is the run-time half of the configuration's policy block. The zero
 // value is the strict one: anything unexpected fails and the transaction rolls
@@ -143,52 +152,44 @@ const (
 // cannot do what it says has to fail.
 type Policy struct {
 	// MissingRow is what happens when an update or a delete finds no row with
-	// the natural key at all: Error (the default) or Warn.
+	// the natural key at all: ModeError (the default) or ModeWarn.
 	MissingRow Mode
 	// ChangedRow is what happens when the row is there but no longer holds the
-	// values the base state had, which is somebody's hand edit: Warn (keep the
-	// edit and carry on) or Error.
+	// values the base state had, which is somebody's hand edit: ModeWarn (keep
+	// the edit and carry on) or ModeError.
 	ChangedRow Mode
 	// IDDrift is what happens when the id in the change set is not the id the
-	// database gave the row: Error (the default), Warn or Ignore.
+	// database gave the row: ModeError (the default), ModeWarn or ModeIgnore.
 	IDDrift Mode
 }
 
-// modes is what each field of a Policy accepts. A value outside its list is a
-// typo, and a typo that silently means something else is the sort of thing this
-// tool exists to stop: "warm" in MissingRow would read as the strict setting
-// and "warm" in ChangedRow as the lenient one.
-var modes = []struct {
-	Field   string
-	Value   func(Policy) Mode
-	Allowed []Mode
-}{
-	{"MissingRow", func(p Policy) Mode { return p.MissingRow }, []Mode{Error, Warn}},
-	{"ChangedRow", func(p Policy) Mode { return p.ChangedRow }, []Mode{Error, Warn}},
-	{"IDDrift", func(p Policy) Mode { return p.IDDrift }, []Mode{Error, Warn, Ignore}},
-}
-
-// Validate reports a policy field holding something this package does not know.
-// An empty field is the default and always allowed.
+// Validate reports a policy field holding something this package does not
+// know. An empty field is the default and always allowed.
+//
+// A value outside the list is a typo, and a typo that silently means something
+// else is the sort of thing this tool exists to stop: "warm" in MissingRow
+// would read as the strict setting and the same typo in ChangedRow as the
+// lenient one.
 func (p Policy) Validate() error {
-	for _, m := range modes {
-		value := m.Value(p)
-		if value == "" {
+	for _, f := range []struct {
+		name    string
+		value   Mode
+		allowed []Mode
+	}{
+		{"MissingRow", p.MissingRow, []Mode{ModeError, ModeWarn}},
+		{"ChangedRow", p.ChangedRow, []Mode{ModeError, ModeWarn}},
+		{"IDDrift", p.IDDrift, []Mode{ModeError, ModeWarn, ModeIgnore}},
+	} {
+		if f.value == "" || f.value.valid(f.allowed...) {
 			continue
 		}
-		ok := false
-		for _, allowed := range m.Allowed {
-			ok = ok || value == allowed
-		}
-		if !ok {
-			return fmt.Errorf("policy %s is %q, it has to be one of %s or empty for the default",
-				m.Field, value, join(m.Allowed))
-		}
+		return fmt.Errorf("policy %s is %q, it has to be one of %s or empty for the default",
+			f.name, f.value, modeList(f.allowed))
 	}
 	return nil
 }
 
-func join(modes []Mode) string {
+func modeList(modes []Mode) string {
 	out := make([]string, 0, len(modes))
 	for _, m := range modes {
 		out = append(out, string(m))

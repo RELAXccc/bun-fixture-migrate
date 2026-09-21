@@ -93,7 +93,7 @@ func TestValidateRejects(t *testing.T) {
 			fixturechange.Set{Tables: tables(), Policy: fixturechange.Policy{MissingRow: "warm"}},
 			"policy MissingRow"},
 		"policy that is not offered for this field": {
-			fixturechange.Set{Tables: tables(), Policy: fixturechange.Policy{MissingRow: fixturechange.Ignore}},
+			fixturechange.Set{Tables: tables(), Policy: fixturechange.Policy{MissingRow: fixturechange.ModeIgnore}},
 			"policy MissingRow"},
 	} {
 		err := Validate(tc.set)
@@ -215,7 +215,7 @@ func TestValidateAcceptsAnEmptyPolicy(t *testing.T) {
 		t.Fatalf("the zero policy is the default, not a mistake: %v", err)
 	}
 	full := fixturechange.Policy{
-		MissingRow: fixturechange.Error, ChangedRow: fixturechange.Warn, IDDrift: fixturechange.Ignore}
+		MissingRow: fixturechange.ModeError, ChangedRow: fixturechange.ModeWarn, IDDrift: fixturechange.ModeIgnore}
 	if err := full.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}

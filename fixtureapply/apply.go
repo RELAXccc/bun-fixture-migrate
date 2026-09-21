@@ -242,7 +242,7 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 			o.logf("%s: %s", where, res.message)
 			continue
 		}
-		if modeFor(set.Policy, res.problem) == fixturechange.Error {
+		if modeFor(set.Policy, res.problem) == fixturechange.ModeError {
 			return fmt.Errorf("%s: %s", where, res.message)
 		}
 		o.logf("%s: SKIPPED. %s", where, res.message)
@@ -270,22 +270,22 @@ const (
 func modeFor(p fixturechange.Policy, pr problem) fixturechange.Mode {
 	switch pr {
 	case problemBenign:
-		return fixturechange.Warn
+		return fixturechange.ModeWarn
 	case problemMissing:
-		if p.MissingRow == fixturechange.Warn {
-			return fixturechange.Warn
+		if p.MissingRow == fixturechange.ModeWarn {
+			return fixturechange.ModeWarn
 		}
 	case problemChanged:
-		if p.ChangedRow == fixturechange.Error {
-			return fixturechange.Error
+		if p.ChangedRow == fixturechange.ModeError {
+			return fixturechange.ModeError
 		}
-		return fixturechange.Warn
+		return fixturechange.ModeWarn
 	case problemIDDrift:
-		if p.IDDrift == fixturechange.Warn || p.IDDrift == fixturechange.Ignore {
-			return fixturechange.Warn
+		if p.IDDrift == fixturechange.ModeWarn || p.IDDrift == fixturechange.ModeIgnore {
+			return fixturechange.ModeWarn
 		}
 	}
-	return fixturechange.Error
+	return fixturechange.ModeError
 }
 
 type outcome struct {
@@ -335,7 +335,7 @@ func (r *runner) insert(ctx context.Context, c fixturechange.Change, t fixturech
 	// An explicit id that another row already holds is checked before the
 	// statement runs, so the failure names the row instead of arriving as a
 	// primary-key violation from somewhere inside the driver.
-	if id, ok := c.New[t.ID]; ok && id.Ref == nil && !id.IsNull && r.set.Policy.IDDrift != fixturechange.Ignore {
+	if id, ok := c.New[t.ID]; ok && id.Ref == nil && !id.IsNull && r.set.Policy.IDDrift != fixturechange.ModeIgnore {
 		taken, err := r.idTakenByAnotherRow(ctx, c, t, table, id.Lit)
 		if err != nil {
 			return outcome{}, err
