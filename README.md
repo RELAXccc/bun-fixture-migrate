@@ -372,7 +372,9 @@ the commands themselves — `generate` against two files is the whole pipeline a
 The tests that need a real PostgreSQL live in the `dbtest` module and are skipped unless a DSN is set.
 They seed with the actual `dbfixture`, export the result and check the export is the file again;
 apply a generated change set and compare against a database seeded from the new file; and exercise
-every run-time policy, including the one that proves bun stores `1` where the fixture said `0`.
+every run-time policy, including the one that proves bun stores `1` where the fixture said `0`. One
+of them needs no database: it builds a generated migration against a real `migrate.Migrations`,
+because a file that parses is not the same as a file that compiles.
 
 ```
 podman run --rm -d -p 55461:5432 -e POSTGRES_PASSWORD=pg --name bfm-test postgres:18
