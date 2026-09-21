@@ -6,6 +6,11 @@
 // has.
 package fixturechange
 
+import (
+	"fmt"
+	"strings"
+)
+
 // Kind is what a change does to a row.
 type Kind string
 
@@ -72,11 +77,15 @@ func (v Value) String() string {
 // Values maps a column to its value.
 type Values = map[string]Value
 
-// Change is one row that differs between two revisions of the fixture file.
+// Change is one row that differs between the two states being compared.
 type Change struct {
 	// Model is the fixture model name; Tables says which table that is.
 	Model string
 	Kind  Kind
+	// ID, when set, is an extra guard: the row must also hold this primary
+	// key. A rename needs it, because the update changes the very columns the
+	// natural key is made of and only the id says the right row was found.
+	ID string
 	// Key is the natural key: enough columns to find the row without using
 	// its id.
 	Key Values
@@ -100,4 +109,90 @@ type Set struct {
 	SeedGuardTable string
 	Tables         Tables
 	Changes        []Change
+	// Policy is what the migration does when the database is not in the state
+	// the change set was generated against. The generator writes the values
+	// from the configuration file into it, so the migration carries its own
+	// policy and a later change to the configuration does not silently change
+	// what an old migration does.
+	Policy Policy
+}
+
+// Mode is what a policy does when it triggers. The empty Mode is the strict
+// reading of whichever policy carries it, so a Policy nobody filled in fails on
+// anything unexpected.
+type Mode string
+
+const (
+	// ModeError fails the migration, which rolls the transaction back and
+	// leaves bun's migration table without a row for it.
+	ModeError Mode = "error"
+	// ModeWarn reports the row and carries on.
+	ModeWarn Mode = "warn"
+	// ModeIgnore does not even look.
+	ModeIgnore Mode = "ignore"
+)
+
+func (m Mode) valid(allowed ...Mode) bool {
+	for _, a := range allowed {
+		if m == a {
+			return true
+		}
+	}
+	return false
+}
+
+// Policy is the run-time half of the configuration's policy block. The zero
+// value is the strict one: anything unexpected fails and the transaction rolls
+// back.
+//
+// This matters more than it looks. bun's migrator records a migration as
+// applied as soon as the function returns nil, so a statement that matched no
+// row and returned nil is a change that is now lost for good: fix the drift,
+// deploy again, and the migration never runs a second time. A migration that
+// cannot do what it says has to fail.
+type Policy struct {
+	// MissingRow is what happens when an update or a delete finds no row with
+	// the natural key at all: ModeError (the default) or ModeWarn.
+	MissingRow Mode
+	// ChangedRow is what happens when the row is there but no longer holds the
+	// values the base state had, which is somebody's hand edit: ModeWarn (keep
+	// the edit and carry on) or ModeError.
+	ChangedRow Mode
+	// IDDrift is what happens when the id in the change set is not the id the
+	// database gave the row: ModeError (the default), ModeWarn or ModeIgnore.
+	IDDrift Mode
+}
+
+// Validate reports a policy field holding something this package does not
+// know. An empty field is the default and always allowed.
+//
+// A value outside the list is a typo, and a typo that silently means something
+// else is the sort of thing this tool exists to stop: "warm" in MissingRow
+// would read as the strict setting and the same typo in ChangedRow as the
+// lenient one.
+func (p Policy) Validate() error {
+	for _, f := range []struct {
+		name    string
+		value   Mode
+		allowed []Mode
+	}{
+		{"MissingRow", p.MissingRow, []Mode{ModeError, ModeWarn}},
+		{"ChangedRow", p.ChangedRow, []Mode{ModeError, ModeWarn}},
+		{"IDDrift", p.IDDrift, []Mode{ModeError, ModeWarn, ModeIgnore}},
+	} {
+		if f.value == "" || f.value.valid(f.allowed...) {
+			continue
+		}
+		return fmt.Errorf("policy %s is %q, it has to be one of %s or empty for the default",
+			f.name, f.value, modeList(f.allowed))
+	}
+	return nil
+}
+
+func modeList(modes []Mode) string {
+	out := make([]string, 0, len(modes))
+	for _, m := range modes {
+		out = append(out, string(m))
+	}
+	return strings.Join(out, ", ")
 }

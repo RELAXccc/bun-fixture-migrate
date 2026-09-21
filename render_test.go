@@ -14,7 +14,7 @@ import (
 func TestRenderIsValidGoAndGofmtClean(t *testing.T) {
 	cfg := testConfig(t)
 	res := compute(t, base, replace(t, base, "      price_cents: 2000\n", "      price_cents: 2500\n"))
-	src, err := Render(cfg, "plan prices", "20260921120000", "HEAD", res)
+	src, err := Render(cfg, "plan prices", "20260921120000", res)
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestRenderListsWhatItRefused(t *testing.T) {
 	if len(res.Refusals) == 0 {
 		t.Fatal("expected a refusal to report")
 	}
-	src, err := Render(cfg, "prices", "20260921120000", "HEAD", res)
+	src, err := Render(cfg, "prices", "20260921120000", res)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestRenderListsWhatItRefused(t *testing.T) {
 }
 
 func TestRenderRefusesAnEmptyChangeSet(t *testing.T) {
-	if _, err := Render(testConfig(t), "nothing", "20260921120000", "HEAD", &Result{}); err == nil {
+	if _, err := Render(testConfig(t), "nothing", "20260921120000", &Result{}); err == nil {
 		t.Fatal("expected an error")
 	}
 }

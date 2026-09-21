@@ -10,6 +10,7 @@ package dbtest_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -305,5 +306,176 @@ func TestAnUnseededDatabaseIsLeftAlone(t *testing.T) {
 	}
 	if got := scan[int64](t, db, `SELECT count(*) FROM plans`); got != 0 {
 		t.Fatalf("expected an untouched database, got %d plans", got)
+	}
+}
+
+// The subtlest of the lot, and the reason the run time diagnoses a zero row
+// count instead of shrugging at it. bun's migrator records a migration as
+// applied the moment the function returns nil, so an update that quietly
+// matched nothing is a change that will never be attempted again. It has to
+// fail.
+func TestAnUpdateOfAMissingRowFailsInsteadOfBeingRecorded(t *testing.T) {
+	db := testDB(t)
+	seed(t, db)
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, `DELETE FROM features`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM plans WHERE name = 'team'`); err != nil {
+		t.Fatal(err)
+	}
+	set := changeSet()
+	err := fixtureapply.Apply(ctx, db, set, quiet())
+	if err == nil {
+		t.Fatal("a change that could not be made must not report success")
+	}
+	if !strings.Contains(err.Error(), "no row of plans has name=team") {
+		t.Fatalf("the error has to say which row: %v", err)
+	}
+	// And the transaction rolled back, so the insert that came before the
+	// failing update is gone too.
+	if got := scan[int64](t, db, `SELECT count(*) FROM plans WHERE name = 'pro'`); got != 0 {
+		t.Fatalf("expected a rollback, found %d rows named pro", got)
+	}
+}
+
+// Set missing_row to warn and the same run is a warning instead. This is the
+// setting that can lose a change, which is why it is not the default.
+func TestMissingRowCanBeDowngradedToAWarning(t *testing.T) {
+	db := testDB(t)
+	seed(t, db)
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, `DELETE FROM features`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM plans WHERE name = 'team'`); err != nil {
+		t.Fatal(err)
+	}
+	set := changeSet()
+	set.Policy.MissingRow = "warn"
+	var log []string
+	err := fixtureapply.Apply(ctx, db, set,
+		fixtureapply.WithLogger(func(f string, a ...any) { log = append(log, fmt.Sprintf(f, a...)) }))
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	var skipped int
+	for _, line := range log {
+		if strings.Contains(line, "SKIPPED") {
+			skipped++
+		}
+	}
+	if skipped == 0 {
+		t.Fatalf("the skip has to be reported: %v", log)
+	}
+}
+
+// A second run of the same change set finds the database already in the state
+// it wanted. That is not drift and not a failure.
+func TestASecondRunIsBenign(t *testing.T) {
+	db := testDB(t)
+	seed(t, db)
+	ctx := context.Background()
+	set := changeSet()
+	if err := fixtureapply.Apply(ctx, db, set, quiet()); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	var log []string
+	if err := fixtureapply.Apply(ctx, db, set,
+		fixtureapply.WithLogger(func(f string, a ...any) { log = append(log, fmt.Sprintf(f, a...)) })); err != nil {
+		t.Fatalf("second Apply: %v", err)
+	}
+	for _, line := range log {
+		if strings.Contains(line, "SKIPPED") {
+			t.Fatalf("an already-applied change is not a skip worth shouting about: %s", line)
+		}
+	}
+	if !strings.Contains(strings.Join(log, "\n"), "already holds these values") {
+		t.Fatalf("expected the benign wording: %v", log)
+	}
+}
+
+// Somebody changed the row here. The default keeps their change and says so;
+// setting changed_row to error stops the deploy instead.
+func TestAChangedRowIsAWarningOrAnError(t *testing.T) {
+	db := testDB(t)
+	seed(t, db)
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, `UPDATE plans SET price_cents = 3333 WHERE name = 'team'`); err != nil {
+		t.Fatal(err)
+	}
+	var log []string
+	if err := fixtureapply.Apply(ctx, db, changeSet(),
+		fixtureapply.WithLogger(func(f string, a ...any) { log = append(log, fmt.Sprintf(f, a...)) })); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !strings.Contains(strings.Join(log, "\n"), "somebody changed it in this database") {
+		t.Fatalf("the operator has to be told what happened: %v", log)
+	}
+	if got := scan[int64](t, db, `SELECT price_cents FROM plans WHERE name = 'team'`); got != 3333 {
+		t.Fatalf("their change should survive, got %d", got)
+	}
+
+	strict := changeSet()
+	strict.Policy.ChangedRow = "error"
+	err := fixtureapply.Apply(ctx, db, strict, quiet())
+	if err == nil || !strings.Contains(err.Error(), "no longer holds the values") {
+		t.Fatalf("expected the strict policy to stop, got %v", err)
+	}
+}
+
+// The fixture file's id is held by a different row. Inserting anyway either
+// trips the primary key or, with no unique index, leaves two rows nothing can
+// tell apart. The check runs before the statement, so the message names the
+// row rather than arriving as a constraint violation.
+func TestAnInsertWhoseIDIsTakenIsReported(t *testing.T) {
+	db := testDB(t)
+	seed(t, db)
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, `INSERT INTO plans (id, name) VALUES (3, 'something else')`); err != nil {
+		t.Fatal(err)
+	}
+	err := fixtureapply.Apply(ctx, db, changeSet(), quiet())
+	if err == nil || !strings.Contains(err.Error(), "already held by the row") {
+		t.Fatalf("expected the conflict to be named, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "something else") {
+		t.Fatalf("the message has to name the row holding the id: %v", err)
+	}
+}
+
+// A rename is an update of the key columns, guarded by the id as well, so it
+// cannot land on a row that merely carries the old name.
+func TestARenameUpdatesTheKeyColumnUnderItsIDGuard(t *testing.T) {
+	db := testDB(t)
+	seed(t, db)
+	ctx := context.Background()
+	set := changeSet()
+	set.Changes = []fixturechange.Change{
+		{Model: "Plan", Kind: fixturechange.Update, ID: "2",
+			Key: fixturechange.Values{"name": fixturechange.Lit("team")},
+			Old: fixturechange.Values{"name": fixturechange.Lit("team")},
+			New: fixturechange.Values{"name": fixturechange.Lit("crew")}},
+	}
+	if err := fixtureapply.Apply(ctx, db, set, quiet()); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if got := scan[int64](t, db, `SELECT id FROM plans WHERE name = 'crew'`); got != 2 {
+		t.Fatalf("the row kept its id, got %d", got)
+	}
+
+	// On a database where that name belongs to another row, the id guard stops
+	// it rather than renaming the wrong one.
+	db2 := testDB(t)
+	seed(t, db2)
+	if _, err := db2.ExecContext(ctx, `DELETE FROM features`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db2.ExecContext(ctx, `UPDATE plans SET id = 5 WHERE name = 'team'`); err != nil {
+		t.Fatal(err)
+	}
+	err := fixtureapply.Apply(ctx, db2, set, quiet())
+	if err == nil || !strings.Contains(err.Error(), "under id 5 and not 2") {
+		t.Fatalf("expected the id drift to be named, got %v", err)
 	}
 }

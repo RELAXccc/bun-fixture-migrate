@@ -1,0 +1,309 @@
+package fixturemigrate
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
+	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+)
+
+// testTables is the same schema the fixture tests use, as the catalog would
+// report it.
+func testTables() map[string]*dbschema.Table {
+	col := func(pos int, name, typ, def string, nullable bool) dbschema.Column {
+		return dbschema.Column{Name: name, Position: pos, Type: typ, Default: def, Nullable: nullable}
+	}
+	return map[string]*dbschema.Table{
+		"public.currencies": {Schema: "public", Name: "currencies", PrimaryKey: []string{"id"},
+			Uniques: [][]string{{"id"}, {"code"}},
+			Columns: []dbschema.Column{
+				col(1, "id", "int8", "", false),
+				col(2, "code", "text", "", false),
+				col(3, "symbol", "text", "", false),
+			}},
+		"public.plans": {Schema: "public", Name: "plans", PrimaryKey: []string{"id"},
+			Uniques: [][]string{{"id"}, {"name"}},
+			ForeignKeys: []dbschema.ForeignKey{{Columns: []string{"currency_id"},
+				RefSchema: "public", RefTable: "currencies", RefColumns: []string{"id"}}},
+			Columns: []dbschema.Column{
+				col(1, "id", "int8", "nextval('plans_id_seq'::regclass)", false),
+				col(2, "name", "text", "", false),
+				col(3, "currency_id", "int8", "", false),
+				col(4, "price_cents", "int8", "0", false),
+				// The hazard: a non-zero default on a column a fixture row can
+				// legitimately want to be zero.
+				col(5, "seats", "int8", "1", false),
+				col(6, "price_per_seat_cents", "int8", "0", false),
+				col(7, "note", "text", "", true),
+			}},
+		"public.features": {Schema: "public", Name: "features", PrimaryKey: []string{"id"},
+			Uniques: [][]string{{"id"}, {"plan_id", "code"}},
+			ForeignKeys: []dbschema.ForeignKey{{Columns: []string{"plan_id"},
+				RefSchema: "public", RefTable: "plans", RefColumns: []string{"id"}}},
+			Columns: []dbschema.Column{
+				col(1, "id", "int8", "nextval('features_id_seq'::regclass)", false),
+				col(2, "plan_id", "int8", "", false),
+				col(3, "code", "text", "", false),
+				col(4, "quota", "int8", "0", false),
+				col(5, "enabled", "bool", "false", false),
+			}},
+	}
+}
+
+// An export has to reproduce the state it was taken from. This is that, without
+// a database: take a fixture file as the state, write it out again, read it
+// back, and compare the two. Anything the export gets wrong — a lost
+// reference, a number turned into a string, a row order that makes a reference
+// unresolvable — shows up as a difference.
+func TestExportRoundTripsThroughTheFixtureLoader(t *testing.T) {
+	cfg := testConfig(t)
+	state := snap(t, cfg, base, "the database")
+	for _, model := range state.Order {
+		for _, e := range state.Entries[model] {
+			if e.Anchor == "" {
+				e.Anchor = anchorOf(e.Key)
+			}
+		}
+	}
+	data, err := Export(cfg, state, testTables(), []string{"a test"})
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	back := snap(t, cfg, string(data), "the export")
+	res, err := Compute(cfg, state, back)
+	if err != nil {
+		t.Fatalf("Compute: %v\n%s", err, data)
+	}
+	if len(res.Changes) != 0 || len(res.Refusals) != 0 {
+		t.Fatalf("the export does not reproduce its source: %+v / %+v\n%s", res.Changes, res.Refusals, data)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"# a test",
+		"- model: Currency",
+		"    - _id: eur",
+		"      id: 1",
+		"      code: \"EUR\"",
+		"      currency_id: '{{ $.Currency.eur.ID }}'",
+		"      price_cents: 2000",
+		"      enabled: true",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the export is missing %q:\n%s", want, text)
+		}
+	}
+	// Dependency order: nothing may be written before the row it points at.
+	if strings.Index(text, "- model: Plan") < strings.Index(text, "- model: Currency") {
+		t.Errorf("Currency has to come before Plan:\n%s", text)
+	}
+}
+
+// An export that writes a zero into a column whose default is not zero does not
+// describe the database it came from: loading it back stores the default. The
+// export says so in the file, on the line it happened.
+func TestExportMarksTheZeroDefaultHazard(t *testing.T) {
+	cfg := testConfig(t)
+	state := snap(t, cfg, base, "the database")
+	for _, model := range state.Order {
+		for _, e := range state.Entries[model] {
+			e.Anchor = anchorOf(e.Key)
+		}
+	}
+	data, err := Export(cfg, state, testTables(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	// price_cents is 0 all over the file and its default is 0, so there is
+	// nothing wrong with it. Nothing is marked yet.
+	if strings.Contains(text, "ROUND-TRIP HAZARD") {
+		t.Fatalf("a zero against a zero default is not a hazard:\n%s", text)
+	}
+	// seats defaults to 1. A row that really holds 0 cannot be written back.
+	state.Entries["Plan"][1].Cells["seats"] = fixturechange.Lit("0")
+	data, err = Export(cfg, state, testTables(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text = string(data)
+	if got := strings.Count(text, "ROUND-TRIP HAZARD"); got != 1 {
+		t.Fatalf("expected the zero to be marked, got %d:\n%s", got, text)
+	}
+	if !strings.Contains(text, "seats: 0  # ROUND-TRIP HAZARD: the column defaults to 1") {
+		t.Fatalf("the mark belongs on the line it is about:\n%s", text)
+	}
+}
+
+// The same defect seen from the fixture file's side: the file says 0, the
+// database will hold 1, and nothing but this lint says so.
+func TestLintZeroDefaults(t *testing.T) {
+	cfg := testConfig(t)
+	state := snap(t, cfg, replace(t, base, "      seats: 10\n", "      seats: 0\n"), "fixture.yml")
+	LintZeroDefaults(cfg, state, testTables())
+	var found []Finding
+	for _, f := range state.Findings {
+		if f.Kind == FindingZeroDefault {
+			found = append(found, f)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("expected one finding, got %+v", state.Findings)
+	}
+	if !strings.Contains(found[0].Detail, "seats is 0") || !strings.Contains(found[0].Detail, "defaults to 1") {
+		t.Fatalf("the finding has to say what will happen: %q", found[0].Detail)
+	}
+	// price_cents is 0 in the file and defaults to 0, which is fine.
+	if strings.Contains(found[0].Detail, "price_cents") {
+		t.Fatalf("a zero against a zero default is not a hazard: %q", found[0].Detail)
+	}
+}
+
+func TestLintColumnsReportsAColumnTheTableDoesNotHave(t *testing.T) {
+	cfg := testConfig(t)
+	state := snap(t, cfg, replace(t, base, "      seats: 1\n", "      seats: 1\n      trial_days: 14\n"), "fixture.yml")
+	LintColumns(cfg, state, testTables())
+	if len(state.Findings) != 1 || state.Findings[0].Row != "trial_days" {
+		t.Fatalf("expected trial_days to be reported, got %+v", state.Findings)
+	}
+}
+
+func TestYamlScalarKeepsTheTypeItReadsBackAs(t *testing.T) {
+	for _, tc := range []struct{ text, typ, want string }{
+		{"5", "int8", "5"},
+		{"5", "text", `"5"`},
+		{"true", "bool", "true"},
+		{"t", "bool", "true"},
+		{"yes", "text", `"yes"`},
+		{"1.0", "float8", "1.0"},
+		{"", "text", `""`},
+		{"a\"b", "text", `"a\"b"`},
+		{"not a number", "int8", `"not a number"`},
+	} {
+		if got := yamlScalar(tc.text, tc.typ); got != tc.want {
+			t.Errorf("yamlScalar(%q, %q) = %s, want %s", tc.text, tc.typ, got, tc.want)
+		}
+	}
+}
+
+func TestCamelIsTheInverseOfBunsColumnNaming(t *testing.T) {
+	for _, tc := range []struct{ col, field string }{
+		{"id", "ID"}, {"plan_id", "PlanID"}, {"group_name", "GroupName"}, {"code", "Code"},
+	} {
+		if got := camel(tc.col); got != tc.field {
+			t.Errorf("camel(%q) = %q, want %q", tc.col, got, tc.field)
+		}
+		if got := underscore(tc.field); got != tc.col {
+			t.Errorf("underscore(%q) = %q, want %q", tc.field, got, tc.col)
+		}
+	}
+}
+
+func TestAnchorsAreReadableAndUnique(t *testing.T) {
+	taken := map[string]bool{}
+	key := func(v string) fixturechange.Values { return fixturechange.Values{"name": fixturechange.Lit(v)} }
+	if got := uniqueAnchor(anchorOf(key("Team Plan")), "1", taken); got != "team_plan" {
+		t.Fatalf("got %q", got)
+	}
+	if got := uniqueAnchor(anchorOf(key("Team Plan")), "7", taken); got != "team_plan_7" {
+		t.Fatalf("a second row with the same name takes its id, got %q", got)
+	}
+	if got := uniqueAnchor(anchorOf(key("!!!")), "", taken); got != "row" {
+		t.Fatalf("a key with nothing usable in it still needs an anchor, got %q", got)
+	}
+}
+
+// Everything this tool puts into a query as an identifier comes from the
+// configuration or the catalog, and both of them go through here first.
+func TestQuoteIdent(t *testing.T) {
+	for in, want := range map[string]string{
+		"items":   `"items"`,
+		"_x1":     `"_x1"`,
+		"a$b":     `"a$b"`,
+		`a" OR 1`: "",
+		"":        "",
+		"1st":     "",
+		"a b":     "",
+	} {
+		got, err := quoteIdent(in)
+		if want == "" {
+			if err == nil {
+				t.Errorf("quoteIdent(%q) should have failed, got %q", in, got)
+			}
+			continue
+		}
+		if err != nil || got != want {
+			t.Errorf("quoteIdent(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for in, want := range map[string]string{
+		"items":             `"items"`,
+		"master.items":      `"master"."items"`,
+		"a.b.c":             `"a"."b"."c"`,
+		"master.items; DRO": "",
+		".items":            "",
+	} {
+		got, err := quoteQualified(in)
+		if want == "" {
+			if err == nil {
+				t.Errorf("quoteQualified(%q) should have failed, got %q", in, got)
+			}
+			continue
+		}
+		if err != nil || got != want {
+			t.Errorf("quoteQualified(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+}
+
+// A value that YAML would read back as something other than the string it is,
+// or not read back at all, has to be escaped on the way out.
+func TestYamlStringEscapesWhatWouldNotComeBack(t *testing.T) {
+	for in, want := range map[string]string{
+		"plain":      `"plain"`,
+		`say "hi"`:   `"say \"hi\""`,
+		`back\slash`: `"back\\slash"`,
+		"two\nlines": `"two\nlines"`,
+		"tab\there":  `"tab\there"`,
+		"bell\a":     `"bell\x07"`,
+		"€":          `"€"`,
+	} {
+		if got := yamlString(in); got != want {
+			t.Errorf("yamlString(%q) = %s, want %s", in, got, want)
+		}
+	}
+}
+
+// An anchor is written plain where YAML reads it as the string it is, and
+// quoted where it would read as a boolean or a number.
+func TestYamlAnchorQuotesWhatYamlWouldReadAsSomethingElse(t *testing.T) {
+	for in, want := range map[string]string{
+		"eur":   "eur",
+		"api_2": "api_2",
+		"no":    `"no"`,
+		"yes":   `"yes"`,
+		"true":  `"true"`,
+		"null":  `"null"`,
+		"2026":  `"2026"`,
+		"":      `""`,
+	} {
+		if got := yamlAnchor(in); got != want {
+			t.Errorf("yamlAnchor(%q) = %s, want %s", in, got, want)
+		}
+	}
+}
+
+func TestFindingsByKindGroupsAndSorts(t *testing.T) {
+	grouped := FindingsByKind([]Finding{
+		{Kind: FindingZeroDefault, Model: "Plan", Row: "name=team"},
+		{Kind: FindingDuplicateKey, Model: "Feature", Row: "code=sso"},
+		{Kind: FindingDuplicateKey, Model: "Feature", Row: "code=api"},
+	})
+	if len(grouped) != 2 {
+		t.Fatalf("expected two kinds, got %d", len(grouped))
+	}
+	dupes := grouped[FindingDuplicateKey]
+	if len(dupes) != 2 || dupes[0].Row != "code=api" {
+		t.Fatalf("findings of one kind are sorted by model and row: %+v", dupes)
+	}
+}

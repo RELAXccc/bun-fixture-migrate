@@ -1,17 +1,19 @@
-// Package fixturemigrate turns two revisions of a bun dbfixture YAML file into
-// a bun migration that brings an already-seeded database from the old state to
-// the new one.
+// Package fixturemigrate works on the master data a bun application keeps in a
+// dbfixture YAML file: it exports a database into such a file, compares the two,
+// and writes the bun migration that closes the gap.
 //
 // dbfixture only loads a fixture file into an empty database. Once a database
-// has been seeded, editing the YAML changes nothing there, so every edit needs
-// a data migration. This package writes that migration: it diffs the two
-// revisions row by row, using a natural key you configure instead of the
-// row ids, and renders a Go file that hands the difference to
-// fixtureapply.Apply.
+// has been seeded, editing the YAML changes nothing there, so every edit needs a
+// data migration. This package writes that migration, from the diff between two
+// git revisions of the file or from the diff between the database and the file,
+// and it can go the other way and write the file from the database.
 //
-// What it will not do is guess. Renames, deletes of rows other tables may
-// reference, and rows whose natural key is not unique come back as refusals
-// with a reason, and you write those migrations yourself.
+// It knows nothing about your Go models. The fixture file says which models and
+// columns exist, PostgreSQL's catalog says which tables, types, defaults, keys
+// and foreign keys exist, and the configuration file joins the two.
+//
+// What it will not do is guess. Anything ambiguous comes back as a refusal with
+// the model, the row and a reason, and you write that one migration yourself.
 package fixturemigrate
 
 import (
@@ -19,12 +21,13 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
-// Config describes the fixture file and the models in it. It is read from a
-// YAML file by LoadConfig, or built in code.
+// Config describes the fixture file, the database and the models in it. It is
+// read from a YAML file by LoadConfig, or built in code.
 type Config struct {
 	// Fixture is the path of the fixture YAML file, relative to the
 	// configuration file.
@@ -42,18 +45,108 @@ type Config struct {
 	// not been seeded yet and dbfixture will load the new state by itself.
 	// Leave it out only if the migration chain never runs before the seed.
 	SeedGuardTable string `yaml:"seed_guard_table"`
+	// Database is the PostgreSQL DSN the export, check and scaffold commands
+	// read. "env:NAME" reads it from an environment variable, which is how you
+	// keep a password out of the repository. The generate command needs it
+	// only with -from-db.
+	Database string `yaml:"database"`
+	// Schema is the default PostgreSQL schema for tables named without one.
+	// Default "public".
+	Schema string `yaml:"schema"`
+	// Policy holds the decisions that depend on how you run your databases
+	// rather than on what is correct. See Policy.
+	Policy Policy `yaml:"policy"`
 	// Models maps the model name used in the fixture file to its
-	// configuration. Every model in the fixture file must appear here.
+	// configuration. Every model in the fixture file must appear here, and
+	// every model here must have a table.
 	Models map[string]*Model `yaml:"models"`
 }
+
+// Mode is what a policy does when it triggers.
+type Mode string
+
+const (
+	// ModeError fails and, at run time, rolls the migration back.
+	ModeError Mode = "error"
+	// ModeWarn reports and carries on.
+	ModeWarn Mode = "warn"
+	// ModeIgnore does not even look.
+	ModeIgnore Mode = "ignore"
+)
+
+func (m Mode) valid(allowed ...Mode) bool {
+	for _, a := range allowed {
+		if m == a {
+			return true
+		}
+	}
+	return false
+}
+
+// Policy holds the choices that are genuinely yours. Everything not in here is
+// hard-coded, because the alternative would let the tool corrupt a database and
+// a knob that does that is not a feature. Each field is documented in the
+// example configuration with the consequence of changing it.
+type Policy struct {
+	// IDDrift decides what happens when the id in the fixture file is not the
+	// id the database gave the row: the file's id belongs to another row, or
+	// the row lives under a different id. Default "error", because live data
+	// pointing at those ids breaks silently otherwise. Set "ignore" only if
+	// your ids are internal and nothing outside the database names them.
+	IDDrift Mode `yaml:"id_drift"`
+	// MissingRow decides what a generated update or delete does when the row
+	// it should touch is not in the database at all. Default "error".
+	MissingRow Mode `yaml:"missing_row"`
+	// ChangedRow decides what a generated update or delete does when the row is
+	// there but no longer holds the values the base revision had, which is
+	// somebody's hand edit. Default "warn": the row is left alone and their
+	// edit is kept.
+	ChangedRow Mode `yaml:"changed_row"`
+	// ZeroDefault decides what happens when a fixture row writes a type's zero
+	// into a column whose database default is not that zero. bun sends DEFAULT
+	// for such a value, so the database will not hold the zero the file says.
+	// Default "error".
+	ZeroDefault Mode `yaml:"zero_default"`
+	// DuplicateKey decides what happens when two rows of a model share one
+	// natural key in the database, which makes every lookup by that key
+	// ambiguous. Default "error".
+	DuplicateKey Mode `yaml:"duplicate_key"`
+	// Renames decides what a change of a row's natural key under an unchanged
+	// id becomes: "refuse" (default) leaves it to you, "update" writes an
+	// UPDATE of the key columns guarded by the id and the old key.
+	Renames RenamePolicy `yaml:"renames"`
+	// Deletes is the default for Model.Deletes.
+	Deletes DeletePolicy `yaml:"deletes"`
+}
+
+// RenamePolicy is what to do with a row whose natural key changed.
+type RenamePolicy string
+
+const (
+	// RenameRefuse reports the rename and writes nothing for that row.
+	RenameRefuse RenamePolicy = "refuse"
+	// RenameUpdate writes an UPDATE of the key columns.
+	RenameUpdate RenamePolicy = "update"
+)
+
+// DeletePolicy is what to do with a row that left the fixture file.
+type DeletePolicy string
+
+const (
+	// DeleteAllow writes a guarded DELETE.
+	DeleteAllow DeletePolicy = "allow"
+	// DeleteRefuse reports it and writes nothing.
+	DeleteRefuse DeletePolicy = "refuse"
+)
 
 // Model is one model of the fixture file.
 type Model struct {
 	// Table is the SQL table, optionally schema-qualified.
 	Table string `yaml:"table"`
-	// ID is the primary-key column. Default "id". It is never compared and
-	// never updated; it is written on an insert when the fixture row has it,
-	// and it is what a reference to this model resolves to.
+	// ID is the primary-key column. Default "id". It is never compared as an
+	// ordinary column; it is written on an insert when the fixture row has it,
+	// it is what a reference to this model resolves to, and Policy.IDDrift
+	// decides what happens when it disagrees with the database.
 	ID string `yaml:"id"`
 	// Ref is the column a reference to this model matches on. Default "name".
 	Ref string `yaml:"ref"`
@@ -68,28 +161,30 @@ type Model struct {
 	// mutually exclusive foreign-key columns, where which column is set is
 	// part of the row's identity.
 	KeyAnyOf [][]string `yaml:"key_any_of"`
-	// StableID names a column that survives a rename, usually ID or
-	// dbfixture's "_id" anchor. With it the generator can tell a rename from
-	// a delete plus an insert, and refuse it.
-	StableID string `yaml:"stable_id"`
 	// References maps a column to the model it points at. Such a column holds
 	// the target's ID in the database, but the migration carries the target's
 	// Ref value and looks the id up where it runs.
 	References map[string]string `yaml:"references"`
 	// Derived lists columns your application recalculates. They are never
-	// compared and never written.
+	// compared, never written and never exported.
 	Derived []string `yaml:"derived"`
 	// Ignore lists columns that take no part at all, for instance a column
 	// dbfixture fills with a template the generator cannot read.
 	Ignore []string `yaml:"ignore"`
 	// Defaults gives the value a column has when the fixture row leaves it
 	// out. Without an entry an omitted column is treated as "not set", which
-	// compares equal to another omitted column and to nothing else.
+	// compares equal to another omitted column and to nothing else. The
+	// scaffold command fills this in from the database's column defaults.
 	Defaults map[string]string `yaml:"defaults"`
-	// NoDelete refuses deletes of this model's rows. Set it wherever other
-	// tables can point at the row and the generator cannot know what should
+	// Deletes overrides Policy.Deletes for this model. Set "refuse" wherever
+	// other tables can point at the row and the tool cannot know what should
 	// happen to them.
-	NoDelete bool `yaml:"no_delete"`
+	Deletes DeletePolicy `yaml:"deletes"`
+	// Where is an SQL predicate that limits which rows of the table are master
+	// data, for a table that holds other rows too. It is written into every
+	// query the export and check commands run, and it is your text: keep it
+	// out of reach of anything untrusted.
+	Where string `yaml:"where"`
 
 	derived map[string]bool
 	ignored map[string]bool
@@ -122,10 +217,16 @@ func (c *Config) Prepare() error {
 	if c.Migrator == "" {
 		c.Migrator = "Migrations"
 	}
+	if c.Schema == "" {
+		c.Schema = "public"
+	}
+	if err := c.Policy.prepare(); err != nil {
+		return err
+	}
 	if len(c.Models) == 0 {
 		return fmt.Errorf("no models configured")
 	}
-	for _, name := range c.modelNames() {
+	for _, name := range c.ModelNames() {
 		m := c.Models[name]
 		if m == nil {
 			return fmt.Errorf("model %q: empty", name)
@@ -157,13 +258,64 @@ func (c *Config) Prepare() error {
 				return fmt.Errorf("model %q: column %q references unknown model %q", name, col, target)
 			}
 		}
+		if m.Deletes == "" {
+			m.Deletes = c.Policy.Deletes
+		}
+		if m.Deletes != DeleteAllow && m.Deletes != DeleteRefuse {
+			return fmt.Errorf("model %q: deletes is %q, it has to be %q or %q", name, m.Deletes, DeleteAllow, DeleteRefuse)
+		}
 		m.derived = set(m.Derived)
 		m.ignored = set(m.Ignore)
 	}
 	return nil
 }
 
-func (c *Config) modelNames() []string {
+func (p *Policy) prepare() error {
+	type field struct {
+		name    string
+		value   *Mode
+		def     Mode
+		allowed []Mode
+	}
+	for _, f := range []field{
+		{"id_drift", &p.IDDrift, ModeError, []Mode{ModeError, ModeWarn, ModeIgnore}},
+		{"missing_row", &p.MissingRow, ModeError, []Mode{ModeError, ModeWarn}},
+		{"changed_row", &p.ChangedRow, ModeWarn, []Mode{ModeError, ModeWarn}},
+		{"zero_default", &p.ZeroDefault, ModeError, []Mode{ModeError, ModeWarn, ModeIgnore}},
+		{"duplicate_key", &p.DuplicateKey, ModeError, []Mode{ModeError, ModeWarn}},
+	} {
+		if *f.value == "" {
+			*f.value = f.def
+		}
+		if !f.value.valid(f.allowed...) {
+			return fmt.Errorf("policy %s is %q, it has to be one of %s", f.name, *f.value, modeList(f.allowed))
+		}
+	}
+	if p.Renames == "" {
+		p.Renames = RenameRefuse
+	}
+	if p.Renames != RenameRefuse && p.Renames != RenameUpdate {
+		return fmt.Errorf("policy renames is %q, it has to be %q or %q", p.Renames, RenameRefuse, RenameUpdate)
+	}
+	if p.Deletes == "" {
+		p.Deletes = DeleteAllow
+	}
+	if p.Deletes != DeleteAllow && p.Deletes != DeleteRefuse {
+		return fmt.Errorf("policy deletes is %q, it has to be %q or %q", p.Deletes, DeleteAllow, DeleteRefuse)
+	}
+	return nil
+}
+
+func modeList(modes []Mode) string {
+	out := make([]string, 0, len(modes))
+	for _, m := range modes {
+		out = append(out, string(m))
+	}
+	return strings.Join(out, ", ")
+}
+
+// ModelNames lists the configured models in alphabetical order.
+func (c *Config) ModelNames() []string {
 	out := make([]string, 0, len(c.Models))
 	for name := range c.Models {
 		out = append(out, name)
@@ -172,9 +324,9 @@ func (c *Config) modelNames() []string {
 	return out
 }
 
-// model returns the configuration of a model, or an error naming the file the
-// model came from. A model in the fixture file that nobody configured is a
-// mistake, not "nothing to do".
+// model returns the configuration of a model, or an error naming the model. A
+// model in the fixture file that nobody configured is a mistake, not "nothing
+// to do": a silently skipped model is how a change goes missing.
 func (c *Config) model(name string) (*Model, error) {
 	m, ok := c.Models[name]
 	if !ok {
@@ -183,9 +335,79 @@ func (c *Config) model(name string) (*Model, error) {
 	return m, nil
 }
 
+// QualifiedTable is a model's table with the configured schema put in front of
+// it when the table was written without one.
+func (c *Config) QualifiedTable(m *Model) string {
+	if strings.Contains(m.Table, ".") {
+		return m.Table
+	}
+	return c.Schema + "." + m.Table
+}
+
+// DependencyOrder sorts the models so a model comes after everything it points
+// at, which is the order a fixture file has to be written in for dbfixture to
+// resolve its references. A cycle is reported rather than broken: only you can
+// say which of the two rows is written first.
+func (c *Config) DependencyOrder() ([]string, error) {
+	const (
+		white = 0
+		grey  = 1
+		black = 2
+	)
+	state := map[string]int{}
+	var order []string
+	var stack []string
+	var visit func(string) error
+	visit = func(name string) error {
+		switch state[name] {
+		case black:
+			return nil
+		case grey:
+			return fmt.Errorf("the models %s reference each other in a circle; "+
+				"put them in the fixture file by hand, or break the circle with ignore",
+				strings.Join(append(stack, name), " -> "))
+		}
+		state[name] = grey
+		stack = append(stack, name)
+		m := c.Models[name]
+		targets := make([]string, 0, len(m.References))
+		for col, target := range m.References {
+			if m.skip(col) || target == name {
+				continue
+			}
+			targets = append(targets, target)
+		}
+		sort.Strings(targets)
+		for _, target := range targets {
+			if err := visit(target); err != nil {
+				return err
+			}
+		}
+		stack = stack[:len(stack)-1]
+		state[name] = black
+		order = append(order, name)
+		return nil
+	}
+	for _, name := range c.ModelNames() {
+		if err := visit(name); err != nil {
+			return nil, err
+		}
+	}
+	return order, nil
+}
+
 // skip reports whether a column takes no part in the comparison.
 func (m *Model) skip(col string) bool {
 	return col == anchorColumn || col == m.ID || m.ignored[col] || m.derived[col]
+}
+
+// keyColumns is every column that can end up in a natural key.
+func (m *Model) keyColumns() []string {
+	out := append([]string{}, m.Key...)
+	for _, group := range m.KeyAnyOf {
+		out = append(out, group...)
+	}
+	return out
 }
 
 func set(list []string) map[string]bool {

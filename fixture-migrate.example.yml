@@ -1,0 +1,184 @@
+# bun-fixture-migrate, fully commented. "bun-fixture-migrate scaffold" writes
+# most of this from a live database; what is left is the policy block and the
+# handful of things only you know.
+#
+# The example schema: currencies, subscription plans, and the features a plan
+# grants.
+
+# The dbfixture YAML file, relative to this file.
+fixture: fixtures/fixture.yml
+# Where generated migrations go, and the Go package and migrator variable they
+# register with.
+out: internal/migrations
+package: migrations
+migrator: Migrations
+# A table that is never empty in a seeded database. While it is empty a
+# generated migration does nothing at all: that database has not been seeded
+# yet, and dbfixture is about to load the new state by itself. Leave it out
+# only if your migration chain never runs before the seed.
+seed_guard_table: plans
+# Where export, check and generate -from-db connect. "env:NAME" reads the DSN
+# from an environment variable, which is how the password stays out of the
+# repository. PostgreSQL only.
+database: env:DATABASE_URL
+# The schema tables are looked for in when they are written without one.
+schema: public
+
+# The choices that depend on how you run your databases rather than on what is
+# correct. Everything not here is fixed, because the alternative would be a
+# setting that lets this tool corrupt a database.
+policy:
+  # The id in the fixture file is not the id the database gave the row: the
+  # file's id belongs to another row, or the row lives under a different id.
+  #   error  refuse, and at run time roll the migration back (default)
+  #   warn   report it and carry on
+  #   ignore do not look
+  # Leave this at error if anything outside the database names these ids: an
+  # API contract, a saved game, a report, another service. Renumbering a row
+  # under live data that points at it corrupts that data, and nothing says so.
+  id_drift: error
+
+  # A generated update or delete finds no row with that natural key at all.
+  #   error  fail, so the transaction rolls back and bun does not record the
+  #          migration as applied (default)
+  #   warn   log it and carry on
+  # DATA LOSS IF SET WRONG. bun's migrator records a migration the moment the
+  # function returns nil. A change skipped with a warning is never attempted
+  # again: put the row back, deploy once more, and the migration has already
+  # been recorded. Set warn only where a missing row is expected.
+  missing_row: error
+
+  # The row is there, but no longer holds the values the migration was
+  # generated against, because somebody changed it in this database.
+  #   warn   keep their change, apply nothing, say so (default)
+  #   error  fail and roll back
+  # warn is right when an admin UI edits this data in production: their edit is
+  # newer than your file. error is right when the fixture file is the only
+  # writer, and a difference means something has gone wrong.
+  changed_row: warn
+
+  # A fixture row writes a type's zero into a column whose database default is
+  # not that zero.
+  #   error  refuse (default)
+  #   warn   report it
+  #   ignore do not look
+  # bun's INSERT sends DEFAULT rather than the value for a zero in a column
+  # that has a default, so such a row does not load as written: the file says 0
+  # and the database holds the default. This is the check worth having. Turning
+  # it off does not make the problem go away, it makes it quiet.
+  zero_default: error
+
+  # Two rows of one model share a natural key in the database.
+  #   error  refuse (default)
+  #   warn   report it
+  # Every guard and every reference this tool writes matches on that key, so
+  # two rows holding it make the lookup pick one of them at random. Nothing
+  # makes that safe; warn exists so you can see the whole list before fixing it.
+  duplicate_key: error
+
+  # A row kept its id and changed its natural key.
+  #   refuse  report it and write nothing for that row (default)
+  #   update  write an UPDATE of the key columns, guarded by the id and the old
+  #           key, before everything else in the migration
+  # update is safe inside the database: the id does not change, so nothing that
+  # points at the row breaks, and rows whose own key is built from a reference
+  # to it follow along. It is not safe outside the database, where client code,
+  # saved data or another service may know the old name.
+  renames: refuse
+
+  # A row left the fixture file.
+  #   allow   write a guarded DELETE (default)
+  #   refuse  report it
+  # Override it per model, below, wherever other tables point at the row and
+  # only you can say whether they should cascade, be repointed or block it.
+  deletes: allow
+
+# One entry per model of the fixture file. A model in the file that is not
+# listed here stops the tool: a model nobody configured is a mistake, and a
+# silently skipped model is how a change goes missing.
+models:
+  Currency:
+    table: currencies
+    # The primary key. It is never compared as an ordinary column and never
+    # updated; it is written on an insert when the fixture row has one, and it
+    # is what a reference to this model resolves to.
+    id: id
+    # The natural key: what identifies a row when its id means nothing. Every
+    # guard the generated migration writes matches on these columns, so the
+    # table wants a unique index on them.
+    key: [code]
+    # The column another model's reference to this one names it by. Default
+    # "name".
+    ref: code
+
+  Plan:
+    table: plans
+    id: id
+    # The id comes from a sequence, so the migration moves the sequence past
+    # any explicit id it writes. Without that the next ordinary insert collides
+    # with an id the migration already used.
+    serial: true
+    key: [name]
+    # Columns holding another row's id. The migration carries the target's name
+    # and looks the id up where it runs, because ids drift between databases
+    # and names do not.
+    references:
+      currency_id: Currency
+    # Columns your application recalculates after every seed. They are never
+    # compared, never written and never exported.
+    derived:
+      - price_per_seat_cents
+    # Columns that take no part at all, for instance one dbfixture fills with a
+    # template this tool cannot read.
+    ignore:
+      - created_at
+    # What a column means when a fixture row leaves it out. Without an entry an
+    # omitted column is "not set", which compares equal to another omitted
+    # column and to nothing else; a column written on one side and omitted on
+    # the other is refused rather than guessed at. The scaffold fills this in
+    # from the database's column defaults.
+    defaults:
+      price_cents: "0"
+      seats: "1"
+    # Other tables point at a plan, and only you can say what should happen to
+    # them when one goes away.
+    deletes: refuse
+
+  Feature:
+    table: features
+    id: id
+    serial: true
+    # A natural key can be several columns. This one is "the api feature of the
+    # team plan", and plan_id is carried as the plan's name, not its id.
+    key: [plan_id, code]
+    references:
+      plan_id: Plan
+    defaults:
+      quota: "0"
+      enabled: "false"
+
+  # A table whose identity includes which of a few mutually exclusive columns
+  # is set. key_any_of adds, per group, the first column of that group holding
+  # something other than "", 0 or NULL.
+  Limit:
+    table: limits
+    serial: true
+    key: [code]
+    key_any_of:
+      - [plan_id, addon_id]
+    references:
+      plan_id: Plan
+      addon_id: Addon
+    defaults:
+      plan_id: "0"
+      addon_id: "0"
+    # An SQL predicate limiting which rows of the table are master data, for a
+    # table that holds other rows too. It goes into every query export and
+    # check run, as written: it is your SQL, so keep it out of reach of
+    # anything untrusted.
+    where: "source = 'catalog'"
+
+  Addon:
+    table: addons
+    serial: true
+    key: [name]
