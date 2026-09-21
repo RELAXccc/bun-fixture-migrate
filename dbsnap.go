@@ -169,33 +169,37 @@ func readColumns(m *Model, table *dbschema.Table, want []string) ([]string, erro
 	return out, nil
 }
 
-// readRows runs the one SELECT per model. Every column is cast to text in SQL,
-// so a boolean arrives as "true" and a numeric as its own notation rather than
-// as whatever the driver decided; the identifiers come from the configuration
-// and the catalog and are quoted, and a where clause is the operator's own SQL.
-func readRows(ctx context.Context, db bun.IDB, cfg *Config, m *Model, table *dbschema.Table,
-	cols []string) ([]*rawRow, error) {
-
-	selects := make([]string, 0, len(cols)+1)
+// selectQuery is the one SELECT a model needs, and the second result says
+// whether its first column is the primary key.
+//
+// Every column is cast to text in SQL, so a boolean arrives as "true" and a
+// numeric in its own notation rather than as whatever the driver decided. The
+// identifiers come from the configuration and the catalog and are quoted; the
+// where clause is the operator's own SQL and goes in as written. The order is
+// fixed so two runs against the same database read the rows in the same order,
+// which is what makes an exported file stable enough to diff.
+//
+// It is built apart from being run so a test can read it.
+func selectQuery(cfg *Config, m *Model, table *dbschema.Table, cols []string) (string, bool, error) {
 	idQuoted, err := quoteIdent(m.ID)
 	if err != nil {
-		return nil, err
+		return "", false, err
 	}
-	hasID := false
-	if _, ok := table.Column(m.ID); ok {
-		hasID = true
+	selects := make([]string, 0, len(cols)+1)
+	_, hasID := table.Column(m.ID)
+	if hasID {
 		selects = append(selects, "("+idQuoted+")::text")
 	}
 	for _, col := range cols {
 		q, err := quoteIdent(col)
 		if err != nil {
-			return nil, err
+			return "", false, err
 		}
 		selects = append(selects, "("+q+")::text")
 	}
 	qualified, err := quoteQualified(cfg.QualifiedTable(m))
 	if err != nil {
-		return nil, err
+		return "", false, err
 	}
 	query := "SELECT " + strings.Join(selects, ", ") + " FROM " + qualified
 	if m.Where != "" {
@@ -206,14 +210,30 @@ func readRows(ctx context.Context, db bun.IDB, cfg *Config, m *Model, table *dbs
 		orderBy = append(orderBy, idQuoted)
 	}
 	for _, col := range m.Key {
-		if q, err := quoteIdent(col); err == nil {
-			orderBy = append(orderBy, q)
+		q, err := quoteIdent(col)
+		if err != nil {
+			return "", false, fmt.Errorf("key column %w", err)
 		}
+		orderBy = append(orderBy, q)
 	}
 	if len(orderBy) > 0 {
 		query += " ORDER BY " + strings.Join(orderBy, ", ")
 	}
+	return query, hasID, nil
+}
 
+// readRows runs the one SELECT per model.
+func readRows(ctx context.Context, db bun.IDB, cfg *Config, m *Model, table *dbschema.Table,
+	cols []string) ([]*rawRow, error) {
+
+	query, hasID, err := selectQuery(cfg, m, table, cols)
+	if err != nil {
+		return nil, err
+	}
+	width := len(cols)
+	if hasID {
+		width++
+	}
 	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", query, err)
@@ -221,8 +241,8 @@ func readRows(ctx context.Context, db bun.IDB, cfg *Config, m *Model, table *dbs
 	defer rows.Close()
 	var out []*rawRow
 	for rows.Next() {
-		cells := make([]sql.NullString, len(selects))
-		scan := make([]any, len(selects))
+		cells := make([]sql.NullString, width)
+		scan := make([]any, width)
 		for i := range cells {
 			scan[i] = &cells[i]
 		}
