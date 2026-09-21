@@ -1,6 +1,9 @@
 package dbschema
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestLiteralDefault(t *testing.T) {
 	for _, tc := range []struct {
@@ -16,6 +19,10 @@ func TestLiteralDefault(t *testing.T) {
 		{"true", "true", true},
 		{"NULL", "", false},
 		{"'draft'::text", "draft", true},
+		{"'a::b'::text", "a::b", true},
+		{"''::text", "", true},
+		{"-1", "-1", true},
+		{"'{}'::jsonb", "{}", true},
 		{"'it''s'::character varying", "it's", true},
 		{"0::bigint", "0", true},
 		{"now()", "", false},
@@ -81,5 +88,32 @@ func TestForeignKeyOf(t *testing.T) {
 	// A composite key names no single column, so nothing is guessed from it.
 	if fk := tbl.ForeignKeyOf("a"); fk != nil {
 		t.Fatalf("a composite key is not a single-column reference: %+v", fk)
+	}
+}
+
+func TestColumnAndQualified(t *testing.T) {
+	tbl := &Table{Schema: "master", Name: "plans", Columns: []Column{
+		{Name: "id", Position: 1, Type: "int8"},
+		{Name: "name", Position: 2, Type: "text"},
+	}}
+	if c, ok := tbl.Column("name"); !ok || c.Position != 2 {
+		t.Fatalf("Column(name) = %+v, %v", c, ok)
+	}
+	if _, ok := tbl.Column("Name"); ok {
+		t.Fatal("column names are not folded: PostgreSQL's are not either")
+	}
+	if got := tbl.Qualified(); got != "master.plans" {
+		t.Fatalf("Qualified = %q", got)
+	}
+}
+
+// The table order has to be stable, because it decides the order of everything
+// the scaffold writes.
+func TestNamesAreSorted(t *testing.T) {
+	names := Names(map[string]*Table{
+		"public.plans": {}, "public.currencies": {}, "master.items": {},
+	})
+	if strings.Join(names, " ") != "master.items public.currencies public.plans" {
+		t.Fatalf("Names = %v", names)
 	}
 }

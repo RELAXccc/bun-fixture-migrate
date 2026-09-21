@@ -377,6 +377,91 @@ func TestCheckAndFromDatabase(t *testing.T) {
 	}
 }
 
+// A table that holds master data and other rows too. The where clause is the
+// one piece of the configuration that reaches a query as SQL rather than as an
+// identifier, and it decides what the tool considers master data at all: rows
+// outside it are neither exported nor reported as drift.
+func TestWhereLimitsWhatIsMasterData(t *testing.T) {
+	db := itemDB(t)
+	loadFixture(t, db, itemFixture)
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO items (region_id, name, cost, production_max, ratio, active, note)
+		 VALUES (1, 'player-made sword', 3, 1, 1, true, 'not master data')`); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := itemConfig(t)
+	cfg.Models["Item"].Where = "name NOT LIKE 'player-%'"
+	snap := databaseSnapshot(t, db, cfg, fixturemigrate.SnapshotOptions{})
+	var names []string
+	for _, e := range snap.Entries["Item"] {
+		names = append(names, e.Cells["name"].Lit)
+	}
+	if strings.Join(names, ",") != "anvil,rope" {
+		t.Fatalf("the where clause decides what is read: %v", names)
+	}
+
+	// And the row outside it is not drift: without the clause it would be
+	// reported as a row the database has and the file does not.
+	file := fixtureSnapshot(t, cfg, itemFixture, "fixture.yml")
+	limited := databaseSnapshot(t, db, cfg,
+		fixturemigrate.SnapshotOptions{Columns: file.Columns, Order: file.Order})
+	res, err := fixturemigrate.Check(cfg, limited, file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Drifted() {
+		t.Fatalf("expected no drift:\n%s", strings.Join(res.Lines(), "\n"))
+	}
+
+	unlimited := itemConfig(t)
+	res, err = fixturemigrate.Check(unlimited,
+		databaseSnapshot(t, db, unlimited, fixturemigrate.SnapshotOptions{Columns: file.Columns, Order: file.Order}),
+		fixtureSnapshot(t, unlimited, itemFixture, "fixture.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(res.Lines(), "\n"), "player-made sword") {
+		t.Fatal("without the clause the same row is drift, which is the point of having it")
+	}
+}
+
+// Every reference a generated migration carries is resolved with
+// "WHERE <ref> = ?", so two rows sharing one ref value make that lookup
+// ambiguous. A table without a unique index on it is where this happens, and
+// nothing else in a project says so.
+func TestARefValueTwoRowsShareIsReported(t *testing.T) {
+	db := itemDB(t)
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, "ALTER TABLE regions DROP CONSTRAINT regions_code_key"); err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`INSERT INTO regions (id, code, name) VALUES (1, 'EU', 'Europe'), (2, 'US', 'North America'),
+		 (3, 'EU', 'Europe, again')`,
+		`INSERT INTO items (region_id, name, cost, production_max, ratio, active)
+		 VALUES (1, 'anvil', 120, 5, 1.5, true)`,
+	} {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snap := databaseSnapshot(t, db, itemConfig(t), fixturemigrate.SnapshotOptions{})
+	var found *fixturemigrate.Finding
+	for i, f := range snap.Findings {
+		if f.Kind == fixturemigrate.FindingDuplicateKey && strings.Contains(f.Row, "EU") {
+			found = &snap.Findings[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected the shared code to be reported, got %+v", snap.Findings)
+	}
+	if !strings.Contains(found.Detail, "1, 3") || !strings.Contains(found.Detail, "unique index") {
+		t.Fatalf("the finding names the colliding rows and the cure: %s", found.Detail)
+	}
+}
+
 // itemState renders the two tables by their natural keys, so two databases
 // seeded in different ways can be compared.
 func itemState(t *testing.T, db *bun.DB) string {

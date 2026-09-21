@@ -212,3 +212,98 @@ func TestAnchorsAreReadableAndUnique(t *testing.T) {
 		t.Fatalf("a key with nothing usable in it still needs an anchor, got %q", got)
 	}
 }
+
+// Everything this tool puts into a query as an identifier comes from the
+// configuration or the catalog, and both of them go through here first.
+func TestQuoteIdent(t *testing.T) {
+	for in, want := range map[string]string{
+		"items":   `"items"`,
+		"_x1":     `"_x1"`,
+		"a$b":     `"a$b"`,
+		`a" OR 1`: "",
+		"":        "",
+		"1st":     "",
+		"a b":     "",
+	} {
+		got, err := quoteIdent(in)
+		if want == "" {
+			if err == nil {
+				t.Errorf("quoteIdent(%q) should have failed, got %q", in, got)
+			}
+			continue
+		}
+		if err != nil || got != want {
+			t.Errorf("quoteIdent(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for in, want := range map[string]string{
+		"items":             `"items"`,
+		"master.items":      `"master"."items"`,
+		"a.b.c":             `"a"."b"."c"`,
+		"master.items; DRO": "",
+		".items":            "",
+	} {
+		got, err := quoteQualified(in)
+		if want == "" {
+			if err == nil {
+				t.Errorf("quoteQualified(%q) should have failed, got %q", in, got)
+			}
+			continue
+		}
+		if err != nil || got != want {
+			t.Errorf("quoteQualified(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+}
+
+// A value that YAML would read back as something other than the string it is,
+// or not read back at all, has to be escaped on the way out.
+func TestYamlStringEscapesWhatWouldNotComeBack(t *testing.T) {
+	for in, want := range map[string]string{
+		"plain":      `"plain"`,
+		`say "hi"`:   `"say \"hi\""`,
+		`back\slash`: `"back\\slash"`,
+		"two\nlines": `"two\nlines"`,
+		"tab\there":  `"tab\there"`,
+		"bell\a":     `"bell\x07"`,
+		"€":          `"€"`,
+	} {
+		if got := yamlString(in); got != want {
+			t.Errorf("yamlString(%q) = %s, want %s", in, got, want)
+		}
+	}
+}
+
+// An anchor is written plain where YAML reads it as the string it is, and
+// quoted where it would read as a boolean or a number.
+func TestYamlAnchorQuotesWhatYamlWouldReadAsSomethingElse(t *testing.T) {
+	for in, want := range map[string]string{
+		"eur":   "eur",
+		"api_2": "api_2",
+		"no":    `"no"`,
+		"yes":   `"yes"`,
+		"true":  `"true"`,
+		"null":  `"null"`,
+		"2026":  `"2026"`,
+		"":      `""`,
+	} {
+		if got := yamlAnchor(in); got != want {
+			t.Errorf("yamlAnchor(%q) = %s, want %s", in, got, want)
+		}
+	}
+}
+
+func TestFindingsByKindGroupsAndSorts(t *testing.T) {
+	grouped := FindingsByKind([]Finding{
+		{Kind: FindingZeroDefault, Model: "Plan", Row: "name=team"},
+		{Kind: FindingDuplicateKey, Model: "Feature", Row: "code=sso"},
+		{Kind: FindingDuplicateKey, Model: "Feature", Row: "code=api"},
+	})
+	if len(grouped) != 2 {
+		t.Fatalf("expected two kinds, got %d", len(grouped))
+	}
+	dupes := grouped[FindingDuplicateKey]
+	if len(dupes) != 2 || dupes[0].Row != "code=api" {
+		t.Fatalf("findings of one kind are sorted by model and row: %+v", dupes)
+	}
+}
