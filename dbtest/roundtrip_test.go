@@ -9,7 +9,6 @@ package dbtest_test
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"strings"
@@ -19,8 +18,6 @@ import (
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 
 	"github.com/uptrace/bun"
-	"github.com/uptrace/bun/dialect/pgdialect"
-	"github.com/uptrace/bun/driver/pgdriver"
 )
 
 const schema = `
@@ -49,7 +46,7 @@ func connect(t *testing.T) *bun.DB {
 	if dsn == "" {
 		t.Skip("set BUN_FIXTURE_MIGRATE_POSTGRES to a PostgreSQL DSN to run the round trip")
 	}
-	db := bun.NewDB(sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(dsn))), pgdialect.New())
+	db := openDB(t, dsn, nil)
 	t.Cleanup(func() { db.Close() })
 	return db
 }

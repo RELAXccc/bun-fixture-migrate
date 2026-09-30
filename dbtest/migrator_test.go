@@ -45,11 +45,16 @@ import (
 
 func main() {
 	onSuccess := flag.Bool("on-success", false, "WithMarkAppliedOnSuccess(true)")
+	table := flag.String("table", "", "WithTableName")
 	flag.Parse()
 	ctx := context.Background()
 	db := bun.NewDB(sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(os.Getenv("DSN")))), pgdialect.New())
 	defer db.Close()
-	m := migrate.NewMigrator(db, migrations.Migrations, migrate.WithMarkAppliedOnSuccess(*onSuccess))
+	opts := []migrate.MigratorOption{migrate.WithMarkAppliedOnSuccess(*onSuccess)}
+	if *table != "" {
+		opts = append(opts, migrate.WithTableName(*table), migrate.WithLocksTableName(*table+"_locks"))
+	}
+	m := migrate.NewMigrator(db, migrations.Migrations, opts...)
 	if err := m.Init(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "init:", err)
 		os.Exit(2)
@@ -99,9 +104,9 @@ func buildMigrator(t *testing.T, stamp, name string, src []byte) string {
 	return bin
 }
 
-func runMigrator(t *testing.T, bin string, onSuccess bool) (bool, string) {
+func runMigrator(t *testing.T, bin string, onSuccess bool, extra ...string) (bool, string) {
 	t.Helper()
-	args := []string{}
+	args := append([]string{}, extra...)
 	if onSuccess {
 		args = append(args, "-on-success")
 	}
@@ -283,5 +288,44 @@ func TestOnlyTheMigratorsFreshRecordIsTakenBack(t *testing.T) {
 	}
 	if err := apply(db); err == nil || strings.Contains(err.Error(), "bun_migrations") {
 		t.Fatalf("expected the plain failure, got %v", err)
+	}
+}
+
+// A migrator built WithTableName, in mixed case: bun puts the name into its
+// SQL unquoted, so PostgreSQL folds it, and the generated migration has to
+// find the same table to take its record back.
+func TestAFailedMigrationIsNotLeftRecordedInACustomTable(t *testing.T) {
+	connect(t)
+	cfg := itemConfig(t)
+	cfg.Package = "migrations"
+	cfg.MigrationsTable = "Fixture_Migrations"
+	old := fixtureSnapshot(t, cfg, itemFixture, "old")
+	changed := replaceOnce(t, itemFixture, "      cost: 120\n", "      cost: 130\n")
+	res, err := fixturemigrate.Compute(cfg, old, fixtureSnapshot(t, cfg, changed, "new"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const stamp = "20260921120000"
+	src, err := fixturemigrate.Render(cfg, "anvil cost", stamp, res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := buildMigrator(t, stamp, "anvil cost", src)
+	db := itemDB(t)
+	run(t, db, "DROP TABLE IF EXISTS fixture_migrations, fixture_migrations_locks")
+	loadFixture(t, db, itemFixture)
+	run(t, db, "UPDATE items SET name = 'anvil (old)' WHERE name = 'anvil'")
+	if ok, out := runMigrator(t, bin, false, "-table", "Fixture_Migrations"); ok || !strings.Contains(out, "that record was removed") {
+		t.Fatalf("expected the failure and the record taken back:\n%s", out)
+	}
+	if got := scan[int64](t, db, "SELECT count(*) FROM fixture_migrations"); got != 0 {
+		t.Fatalf("%d records left", got)
+	}
+	run(t, db, "UPDATE items SET name = 'anvil' WHERE name = 'anvil (old)'")
+	if ok, out := runMigrator(t, bin, false, "-table", "Fixture_Migrations"); !ok {
+		t.Fatalf("the second run should succeed:\n%s", out)
+	}
+	if got := scan[int64](t, db, "SELECT cost FROM items WHERE name = 'anvil'"); got != 130 {
+		t.Fatalf("cost = %d", got)
 	}
 }

@@ -22,8 +22,6 @@ import (
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 
 	"github.com/uptrace/bun"
-	"github.com/uptrace/bun/dialect/pgdialect"
-	"github.com/uptrace/bun/driver/pgdriver"
 )
 
 type Shop struct {
@@ -76,8 +74,7 @@ func awayFromUTC(t *testing.T) *bun.DB {
 	if dsn == "" {
 		t.Skip("set BUN_FIXTURE_MIGRATE_POSTGRES to a PostgreSQL DSN to run the round trip")
 	}
-	db := bun.NewDB(sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(dsn),
-		pgdriver.WithConnParams(map[string]any{"TimeZone": "America/New_York"}))), pgdialect.New())
+	db := openDB(t, dsn, map[string]string{"TimeZone": "America/New_York"})
 	t.Cleanup(func() { db.Close() })
 	db.RegisterModel((*Shop)(nil))
 	if got := scan[string](t, db, "SHOW TimeZone"); got != "America/New_York" {
