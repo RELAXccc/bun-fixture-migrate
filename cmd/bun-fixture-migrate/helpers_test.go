@@ -139,6 +139,20 @@ func TestPrintPlanSaysWhatHappened(t *testing.T) {
 			t.Errorf("missing %q in:\n%s", want, out.String())
 		}
 	}
+
+	// The error of a migration that failed on one change is that change's
+	// message, which is printed once.
+	out.Reset()
+	printPlan(o, &planReport{Migrations: []plannedMigration{{ID: "2_fixture_a", Kind: "fixture", Result: "fails",
+		Error: "2_fixture_a: Plan name=team update: no row of plans has name=team",
+		Changes: []fixtureapply.Outcome{{Index: 0, Model: "Plan", Key: "name=team", Kind: fixturechange.Update,
+			Status: fixtureapply.StatusFailed, Problem: fixtureapply.ProblemMissingRow, Message: "no row of plans has name=team"}}}}})
+	if n := strings.Count(out.String(), "no row of plans"); n != 1 {
+		t.Errorf("the failure is printed %d times:\n%s", n, out.String())
+	}
+	if strings.Contains(out.String(), "an id an insert drew") {
+		t.Errorf("nothing was inserted:\n%s", out.String())
+	}
 }
 
 func TestPrintSync(t *testing.T) {

@@ -109,6 +109,102 @@ func sameValue(a, b fixturechange.Value) bool {
 	return a.Lit == b.Lit
 }
 
+// undecidedReason is why a value only the column's type can settle stops a
+// change.
+const undecidedReason = "which a column written from a Go string holds as written and any other column as the " +
+	"value it resolves to, and only the column's type says which: with the database configured (and without " +
+	"-no-lint) the tool reads the types and decides. Or write it so both agree: quoted for a string column; " +
+	"for any other the way it resolves, as 1.1, 15, true or 2026-01-01T10:00:00Z"
+
+// writtenAs is a literal column of an entry as resolved and as written; ok is
+// false for a column that is absent, NULL or a reference.
+func writtenAs(m *Model, e *Entry, col string) (resolved, written string, ok bool) {
+	if e == nil {
+		return "", "", false
+	}
+	if col == m.ID {
+		resolved = e.ID
+	} else {
+		v, present := e.Cells[col]
+		if !present || v.IsNull || v.Ref != nil {
+			return "", "", false
+		}
+		resolved = v.Lit
+	}
+	written = resolved
+	if w, ok := e.AsWritten[col]; ok {
+		written = w
+	}
+	return resolved, written, true
+}
+
+// undecidedColumns describes the columns of prev and cur, either of which
+// may be nil, that are still in an entry's AsWritten and that keep reports
+// true for.
+func undecidedColumns(m *Model, prev, cur *Entry, keep func(col, prevResolved, curResolved string) bool) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, e := range []*Entry{prev, cur} {
+		if e == nil {
+			continue
+		}
+		for col := range e.AsWritten {
+			if seen[col] {
+				continue
+			}
+			seen[col] = true
+			pr, pw, okP := writtenAs(m, prev, col)
+			cr, cw, okC := writtenAs(m, cur, col)
+			if !keep(col, pr, cr) {
+				continue
+			}
+			switch {
+			case okP && okC && pw != cw:
+				out = append(out, fmt.Sprintf("%s is written %s before and %s after", col, pw, cw))
+			case okP:
+				out = append(out, fmt.Sprintf("%s is written %s", col, pw))
+			case okC:
+				out = append(out, fmt.Sprintf("%s is written %s", col, cw))
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// undecided refuses a change that carries a value still in an entry's
+// AsWritten: 1.10, 017, 0x1F, True, a timestamp. Canonicalize settles them
+// when the database's columns are at hand; without them the migration would
+// write one of two values, and could write the wrong one.
+func undecided(key string, m *Model, c fixturechange.Change, prev, cur *Entry) (Refusal, bool) {
+	cols := undecidedColumns(m, prev, cur, func(col, _, _ string) bool {
+		_, inKey := c.Key[col]
+		_, inOld := c.Old[col]
+		_, inNew := c.New[col]
+		return inKey || inOld || inNew
+	})
+	if len(cols) == 0 {
+		return Refusal{}, false
+	}
+	return Refusal{c.Model, key, strings.Join(cols, "; ") + ", " + undecidedReason}, true
+}
+
+// respelled refuses a row whose value resolves the same on both sides but is
+// written differently, 1.10 before and 1.1 after: no change for a number
+// column, a change for a string column, and without the column's type there is
+// no telling which.
+func respelled(model string, m *Model, prev, cur *Entry) (Refusal, bool) {
+	cols := undecidedColumns(m, prev, cur, func(col, pr, cr string) bool {
+		_, pw, okP := writtenAs(m, prev, col)
+		_, cw, okC := writtenAs(m, cur, col)
+		return okP && okC && pr == cr && pw != cw
+	})
+	if len(cols) == 0 {
+		return Refusal{}, false
+	}
+	return Refusal{model, cur.KeyStr, strings.Join(cols, "; ") + ", " + undecidedReason}, true
+}
+
 // Compute diffs two snapshots. Both sides are the same shape whether they came
 // from a fixture file or from a database, so this one function serves the diff
 // between two revisions of the file and the diff between the database and the
@@ -176,6 +272,10 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 					res.Refusals = append(res.Refusals, r)
 					continue
 				}
+				if r, ok := undecided(k, m, change, nil, cur[0]); ok {
+					res.Refusals = append(res.Refusals, r)
+					continue
+				}
 				inserts = append(inserts, change)
 				continue
 			}
@@ -184,10 +284,18 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 				res.Refusals = append(res.Refusals, *refusal)
 				continue
 			}
+			if r, ok := respelled(model, m, prev[0], cur[0]); ok {
+				res.Refusals = append(res.Refusals, r)
+				continue
+			}
 			if change == nil {
 				continue
 			}
 			if r, ok := refusedByRename(renamed, *change); ok {
+				res.Refusals = append(res.Refusals, r)
+				continue
+			}
+			if r, ok := undecided(k, m, *change, prev[0], cur[0]); ok {
 				res.Refusals = append(res.Refusals, r)
 				continue
 			}
@@ -216,6 +324,10 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 			change := fixturechange.Change{
 				Model: model, Kind: fixturechange.Delete, Key: prev[0].Key, Old: prev[0].Full(m)}
 			if r, ok := refusedByRename(renamed, change); ok {
+				res.Refusals = append(res.Refusals, r)
+				continue
+			}
+			if r, ok := undecided(k, m, change, prev[0], nil); ok {
 				res.Refusals = append(res.Refusals, r)
 				continue
 			}

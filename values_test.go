@@ -130,6 +130,75 @@ func TestTheFixtureReaderKeepsValuesExact(t *testing.T) {
 	}
 }
 
+// yaml.v3 hands a string field a plain scalar as written, and a number field
+// the number it resolves to: dbfixture stores "017" in a text column and 15 in
+// an integer one. The reader keeps both, and says which values those are.
+func TestTheReaderKeepsWhatAStringFieldGets(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{"Zip": {Table: "zips", Key: []string{"code"}, Ref: "code"}}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	s := snap(t, cfg, `- model: Zip
+  rows:
+    - id: 0x10
+      code: "01234"
+      octal: 017
+      version: 1.10
+      flag: True
+      at: 2026-01-01 10:00:00
+      plain: 15
+      rfc: 2026-01-01T10:00:00Z
+      day: 2026-01-01
+      tags: [1.10, a, 017]
+      same: [1, a]
+`, "fixture.yml")
+	e := s.Entries["Zip"][0]
+	want := map[string]string{"id": "0x10", "octal": "017", "version": "1.10", "flag": "True",
+		"at": "2026-01-01 10:00:00", "tags": `["1.10","a","017"]`}
+	if len(e.AsWritten) != len(want) {
+		t.Errorf("as written: %v", e.AsWritten)
+	}
+	for col, text := range want {
+		if e.AsWritten[col] != text {
+			t.Errorf("%s as written = %q, want %q", col, e.AsWritten[col], text)
+		}
+	}
+	if e.ID != "16" || e.Cells["version"].Lit != "1.1" || e.Cells["tags"].Lit != `[1.1,"a",15]` {
+		t.Errorf("resolved: id %s, %+v", e.ID, e.Cells)
+	}
+}
+
+// Without the column's type, a change carrying such a value would write one of
+// two values into the migration; it is refused, and so is a value only
+// respelled, which is a change for a string column and none for a number.
+func TestAValueOnlyTheColumnTypeSettlesIsNotGuessed(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{"App": {Table: "apps", Key: []string{"name"}}}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	old := "- model: App\n  rows:\n    - name: a\n      version: 1.10\n      size: 3\n"
+	for _, tc := range []struct{ next, refused string }{
+		{strings.Replace(old, "1.10", "1.20", 1), "version is written 1.10 before and 1.20 after"},
+		{strings.Replace(old, "1.10", "1.1", 1), "version is written 1.10 before and 1.1 after"},
+		{old + "    - name: b\n      version: 017\n      size: 1\n", "version is written 017"},
+	} {
+		res := computeWith(t, cfg, old, tc.next)
+		if len(res.Changes) != 0 || len(res.Refusals) != 1 || !strings.Contains(res.Refusals[0].Reason, tc.refused) {
+			t.Errorf("%q: changes %+v, refusals %+v", tc.next, res.Changes, res.Refusals)
+		}
+	}
+	// A change that does not carry it goes through, and a value written the
+	// way it resolves is not in question at all.
+	res := computeWith(t, cfg, old, strings.Replace(old, "size: 3", "size: 4", 1))
+	if len(res.Changes) != 1 || len(res.Refusals) != 0 {
+		t.Fatalf("changes %+v, refusals %+v", res.Changes, res.Refusals)
+	}
+	res = computeWith(t, cfg, old, old+"    - name: b\n      version: \"1.10\"\n      size: 1\n")
+	if len(res.Changes) != 1 || len(res.Refusals) != 0 || res.Changes[0].New["version"].Lit != "1.10" {
+		t.Fatalf("changes %+v, refusals %+v", res.Changes, res.Refusals)
+	}
+}
+
 // A change of a postcode is an update from one exact string to another. Before,
 // both sides lost the leading zero, and the guard looked for a value the
 // database did not hold.
@@ -189,7 +258,7 @@ func TestYamlTimestampIsOneInstant(t *testing.T) {
 func TestExportWritesTimesAsYamlTimestamps(t *testing.T) {
 	for _, tc := range []struct{ typ, in, want string }{
 		{"date", "2026-03-04", "2026-03-04"},
-		{"timestamp", "2026-01-01 10:00:00.5", "2026-01-01 10:00:00.5"},
+		{"timestamp", "2026-01-01 10:00:00.5", "2026-01-01T10:00:00.5Z"},
 		{"timestamptz", "2026-01-01 10:00:00+00", "2026-01-01T10:00:00Z"},
 		{"timestamptz", "2026-01-01 10:00:00+05:30", "2026-01-01T04:30:00Z"},
 		{"timestamptz", "infinity", `"infinity"`},

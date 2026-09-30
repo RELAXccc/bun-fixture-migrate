@@ -110,8 +110,7 @@ include:
   - local: ci/gitlab/bun-fixture-migrate.gitlab-ci.yml
 
 # The templates, as a project would extend them, on the example project and
-# with the command built from this checkout. .example comes last in extends,
-# so its variables win over the template's defaults.
+# with the command built from this checkout.
 .example:
   stage: test
   variables:
@@ -129,8 +128,8 @@ template deploy and check:
   script:
     - (cd examples/basic && go run . migrate)
     - cd "$BFM_DIR"
-    - bun-fixture-migrate status -config "$BFM_CONFIG" -require-applied
-    - bun-fixture-migrate check -config "$BFM_CONFIG"
+    - bun-fixture-migrate status -require-applied
+    - bun-fixture-migrate check
   # Drift is a warning in the template; here the database was just seeded, so
   # anything but a clean check is a failure.
   allow_failure: false

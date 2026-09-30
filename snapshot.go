@@ -25,6 +25,13 @@ type Entry struct {
 	// Cells are the compared columns. A column that is absent here is "not
 	// set", which is not the same as NULL.
 	Cells fixturechange.Values
+	// AsWritten holds, for a fixture row, the columns (the id included) whose
+	// value a string field gets differently from what it resolves to, with
+	// the text the string field gets; see Cell.StringText. Only the column's
+	// type says which of the two the database holds, so Canonicalize picks
+	// one and empties it, and a change carrying a value still in it is
+	// refused rather than guessed at.
+	AsWritten map[string]string
 }
 
 // Full is every column an insert writes or a delete guards on: the compared
@@ -74,6 +81,12 @@ func (s *Snapshot) clone() *Snapshot {
 			c := *e
 			c.Key = copyValues(e.Key)
 			c.Cells = copyValues(e.Cells)
+			if e.AsWritten != nil {
+				c.AsWritten = make(map[string]string, len(e.AsWritten))
+				for col, text := range e.AsWritten {
+					c.AsWritten[col] = text
+				}
+			}
 			copied = append(copied, &c)
 		}
 		out.Entries[model] = copied

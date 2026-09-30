@@ -336,6 +336,18 @@ func simulate(o streams, db *bun.DB, targets []planTarget, lockTimeout time.Dura
 	return tx.Rollback()
 }
 
+// failureShown is true when the migration's error is the message of a change
+// already printed as failed, which it usually is: printing it again under it
+// only doubles the line.
+func failureShown(m plannedMigration) bool {
+	for _, c := range m.Changes {
+		if c.Status == fixtureapply.StatusFailed && c.Message != "" && strings.HasSuffix(m.Error, c.Message) {
+			return true
+		}
+	}
+	return false
+}
+
 func printPlan(o streams, r *planReport) {
 	if len(r.Migrations) == 0 {
 		fmt.Fprintln(o.stdout, "no pending fixture migrations")
@@ -383,7 +395,9 @@ func printPlan(o streams, r *planReport) {
 		}
 		w.Flush()
 		if m.Result == "fails" || m.Result == "inconclusive" {
-			fmt.Fprintf(o.stdout, "  %s\n", m.Error)
+			if !failureShown(m) {
+				fmt.Fprintf(o.stdout, "  %s\n", m.Error)
+			}
 			if len(m.After) > 0 {
 				fmt.Fprintf(o.stdout, "  note: pending before it and not simulated: %s. If they change these "+
 					"tables, the deploy can differ from this plan; plan -with-sql runs SQL migrations too\n",
@@ -397,7 +411,7 @@ func printPlan(o streams, r *planReport) {
 	inserted := false
 	for _, m := range r.Migrations {
 		for _, c := range m.Changes {
-			if c.Status == fixtureapply.StatusApplied && c.Kind != fixturechange.Update {
+			if c.Status == fixtureapply.StatusApplied && c.Kind == fixturechange.Insert {
 				inserted = true
 			}
 		}

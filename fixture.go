@@ -1,8 +1,11 @@
 package fixturemigrate
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -27,6 +30,14 @@ type Cell struct {
 	// then its canonical JSON, which is what a jsonb, json or array column is
 	// compared and written as.
 	Structured bool
+	// StringText is what a Go string field gets from this value when that is
+	// not what the value resolves to, and "" otherwise. yaml.v3 decodes a
+	// plain scalar into a string field as it is written: 1.10 stays "1.10"
+	// there, and 017 stays "017", while an integer or a float field gets 15 or
+	// 1.1. For a sequence it is the JSON array of its elements as written,
+	// which is what a []string field gets. Which one the database holds
+	// depends on the column's type.
+	StringText string
 }
 
 // Row is one fixture row.
@@ -77,7 +88,11 @@ func cellOf(node yaml.Node) (Cell, error) {
 	case node.Tag == "!!null":
 		return Cell{IsNull: true}, nil
 	case node.Kind == yaml.ScalarNode:
-		return Cell{Text: node.Value, Tag: node.ShortTag()}, nil
+		c := Cell{Text: node.Value, Tag: node.ShortTag()}
+		if scalarText(c) != c.Text {
+			c.StringText = c.Text
+		}
+		return c, nil
 	case node.Kind == 0:
 		return Cell{IsNull: true}, nil
 	default:
@@ -85,8 +100,39 @@ func cellOf(node yaml.Node) (Cell, error) {
 		if err != nil {
 			return Cell{}, err
 		}
-		return Cell{Text: text, Structured: true}, nil
+		return Cell{Text: text, Structured: true, StringText: sequenceAsWritten(&node)}, nil
 	}
+}
+
+// sequenceAsWritten is a sequence of scalars as a []string field gets it, as a
+// JSON array, when that differs from the sequence's resolved JSON: "" for a
+// mapping, for a sequence holding anything but plain scalars, and for one
+// whose every element resolves to its own text.
+func sequenceAsWritten(n *yaml.Node) string {
+	if n.Kind != yaml.SequenceNode {
+		return ""
+	}
+	texts := make([]string, 0, len(n.Content))
+	differs := false
+	for _, e := range n.Content {
+		if e.Kind != yaml.ScalarNode || e.ShortTag() == "!!null" {
+			return ""
+		}
+		if scalarText(Cell{Text: e.Value, Tag: e.ShortTag()}) != e.Value {
+			differs = true
+		}
+		texts = append(texts, e.Value)
+	}
+	if !differs {
+		return ""
+	}
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(texts); err != nil {
+		return ""
+	}
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 // Str returns a column's text, "" when the column is absent or null.

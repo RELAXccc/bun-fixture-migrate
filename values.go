@@ -83,8 +83,11 @@ func exportTimestamp(typ, text string) (string, bool) {
 			return t.Format("2006-01-02"), true
 		}
 	case "timestamp":
+		// Written in RFC 3339 with a Z, which is how a YAML timestamp without
+		// a zone resolves anyway: then the value reads back as written, and
+		// nothing has to ask the column's type what 2026-01-01 10:00:00 is.
 		if t, err := time.Parse("2006-01-02 15:04:05.999999999", text); err == nil {
-			return t.Format("2006-01-02 15:04:05.999999999"), true
+			return t.UTC().Format(time.RFC3339Nano), true
 		}
 	case "timestamptz":
 		for _, layout := range []string{"2006-01-02 15:04:05.999999999Z07", "2006-01-02 15:04:05.999999999Z07:00"} {

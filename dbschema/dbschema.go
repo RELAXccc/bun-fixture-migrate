@@ -40,6 +40,9 @@ type Column struct {
 	// array, "E" for an enum, "N" numeric, "S" string, "D" date and time,
 	// "U" user-defined, and so on.
 	Category string
+	// ElemCategory is the category of an array's element type, "" for a
+	// column that is not an array.
+	ElemCategory string
 	// Nullable is true when the column accepts NULL.
 	Nullable bool
 	// Default is the column default exactly as the catalog stores it, "" when
@@ -109,6 +112,18 @@ func (t *Table) Qualified() string { return t.Schema + "." + t.Name }
 // explicit id written into it leaves the sequence behind.
 func (c Column) Serial() bool {
 	return c.Identity || strings.HasPrefix(strings.ToLower(c.Default), "nextval(")
+}
+
+// StringField reports whether a model writes this column from a Go string:
+// a string type, a domain over one, an enum, or an array of any of them. It
+// matters for a fixture value such as 1.10 or 017, which yaml.v3 hands a
+// string field as written and a number field as the number it resolves to.
+func (c Column) StringField() bool {
+	category := c.Category
+	if category == "A" {
+		category = c.ElemCategory
+	}
+	return category == "S" || category == "E"
 }
 
 // ZeroText is the text of this type's Go zero value: the value a bun struct
@@ -246,13 +261,14 @@ func Load(ctx context.Context, db bun.IDB, schemas ...string) (map[string]*Table
 	// any character, so there is no separator a string_agg could use safely.
 	const columnQuery = `
 SELECT n.nspname, c.relname, a.attname, a.attnum, t.typname,
-       format_type(a.atttypid, a.atttypmod), t.typcategory::text, NOT a.attnotnull,
-       COALESCE(pg_get_expr(d.adbin, d.adrelid), ''), a.attidentity <> '', a.attidentity = 'a',
-       a.attgenerated <> ''
+       format_type(a.atttypid, a.atttypmod), t.typcategory::text, COALESCE(et.typcategory::text, ''),
+       NOT a.attnotnull, COALESCE(pg_get_expr(d.adbin, d.adrelid), ''), a.attidentity <> '',
+       a.attidentity = 'a', a.attgenerated <> ''
 FROM pg_attribute a
 JOIN pg_class c ON c.oid = a.attrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_type t ON t.oid = a.atttypid
+LEFT JOIN pg_type et ON et.oid = t.typelem AND t.typcategory = 'A'
 LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
 WHERE n.nspname IN (?) AND c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped
 ORDER BY n.nspname, c.relname, a.attnum`
@@ -260,7 +276,7 @@ ORDER BY n.nspname, c.relname, a.attnum`
 		var schema, table string
 		var col Column
 		if err := rows.Scan(&schema, &table, &col.Name, &col.Position, &col.Type, &col.FullType, &col.Category,
-			&col.Nullable,
+			&col.ElemCategory, &col.Nullable,
 			&col.Default, &col.Identity, &col.IdentityAlways, &col.Generated); err != nil {
 			return err
 		}

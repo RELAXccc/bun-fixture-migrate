@@ -17,12 +17,14 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
 
 	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
 	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
+	"github.com/RELAXccc/bun-fixture-migrate/fixtureapply"
 
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dbfixture"
@@ -138,11 +140,25 @@ func loadFixture(t *testing.T, db *bun.DB, text string) {
 	}
 	// dbfixture writes explicit ids straight past the sequence, so the next
 	// ordinary insert would reuse one. Every seeder has to do this.
-	if _, err := db.ExecContext(context.Background(),
-		"SELECT setval(pg_get_serial_sequence('items', 'id'), GREATEST((SELECT COALESCE(MAX(id), 0) FROM items), 1))"); err != nil {
+	var tables []string
+	if err := db.NewRaw("SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "+
+		"WHERE n.nspname = 'public' AND c.relkind = 'r'").Scan(context.Background(), &tables); err != nil {
+		t.Fatal(err)
+	}
+	var plain []string
+	for _, table := range tables {
+		if identifier.MatchString(table) {
+			plain = append(plain, table)
+		}
+	}
+	if _, err := fixtureapply.SyncSequences(context.Background(), db, plain...); err != nil {
 		t.Fatal(err)
 	}
 }
+
+// identifier is a table name SyncSequences takes; other tests leave tables
+// with names built to break quoting behind.
+var identifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_$]*$`)
 
 func schemaOf(t *testing.T, db *bun.DB) map[string]*dbschema.Table {
 	t.Helper()

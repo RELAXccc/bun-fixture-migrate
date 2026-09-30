@@ -339,8 +339,26 @@ func (ix *index) entry(model string, m *Model, row Row) (*Entry, error) {
 			continue
 		}
 		e.Cells[col] = v
+		if _, isRef := m.References[col]; !isRef && v.Ref == nil && !v.IsNull {
+			e.asWritten(col, row[col])
+		}
+	}
+	if e.ID != "" {
+		e.asWritten(m.ID, row[m.ID])
 	}
 	return e, nil
+}
+
+// asWritten records the text a string field gets from a cell, when it is not
+// the value the cell resolves to.
+func (e *Entry) asWritten(col string, c Cell) {
+	if c.StringText == "" {
+		return
+	}
+	if e.AsWritten == nil {
+		e.AsWritten = map[string]string{}
+	}
+	e.AsWritten[col] = c.StringText
 }
 
 // LintZeroDefaults reports every value in the snapshot that is the column

@@ -67,7 +67,7 @@ func Canonicalize(ctx context.Context, db bun.IDB, cfg *Config, snap *Snapshot, 
 			var values []string
 			seen := map[string]bool{}
 			for _, e := range entries {
-				text, ok := literalOf(e, m, col)
+				text, ok := sourceOf(e, m, col, column)
 				if ok && !seen[text] {
 					seen[text] = true
 					values = append(values, text)
@@ -81,7 +81,9 @@ func Canonicalize(ctx context.Context, db bun.IDB, cfg *Config, snap *Snapshot, 
 				return fmt.Errorf("%s.%s: %w", model, col, err)
 			}
 			for _, e := range entries {
-				text, ok := literalOf(e, m, col)
+				text, ok := sourceOf(e, m, col, column)
+				// The column's type has decided which text the database holds.
+				delete(e.AsWritten, col)
 				if !ok {
 					continue
 				}
@@ -138,6 +140,21 @@ func Canonicalize(ctx context.Context, db bun.IDB, cfg *Config, snap *Snapshot, 
 		snap.reportDuplicates(model)
 	}
 	return nil
+}
+
+// sourceOf is the text a cast of a column of an entry starts from: the value
+// as written when the column is one a Go string field writes and the file
+// wrote the value differently from what it resolves to (1.10, 017, True),
+// because that is what dbfixture stores there; the resolved value otherwise.
+func sourceOf(e *Entry, m *Model, col string, column dbschema.Column) (string, bool) {
+	text, ok := literalOf(e, m, col)
+	if !ok {
+		return "", false
+	}
+	if written, ok := e.AsWritten[col]; ok && column.StringField() {
+		return written, true
+	}
+	return text, true
 }
 
 // literalOf is the text of a column of an entry that a cast applies to: a

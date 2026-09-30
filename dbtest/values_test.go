@@ -195,8 +195,23 @@ func TestAMigrationWritesWhatDbfixtureWould(t *testing.T) {
 		"      big: 1\n      octal: 1\n      price: \"1\"\n      ratio: 1\n      opens: 2020-01-01 00:00:00\n" +
 		"      day: 2020-01-01\n      active: false\n      token: \"00000000-0000-0000-0000-000000000001\"\n"
 	loadFixture(t, db, placeholder)
-	res, err := fixturemigrate.Compute(cfg, fixtureSnapshot(t, cfg, placeholder, "old"),
-		fixtureSnapshot(t, cfg, placeholder+shopRow, "new"))
+	// Without the database, 017, True and a timestamp without a zone are each
+	// two values: what a string field gets and what any other field gets.
+	old, next := fixtureSnapshot(t, cfg, placeholder, "old"), fixtureSnapshot(t, cfg, placeholder+shopRow, "new")
+	res, err := fixturemigrate.Compute(cfg, old, next)
+	if err != nil || len(res.Changes) != 0 || len(res.Refusals) != 1 ||
+		!strings.Contains(res.Refusals[0].Reason, "octal is written 017") {
+		t.Fatalf("%v %+v %+v", err, res.Changes, res.Refusals)
+	}
+	// With it, as generate reads it, the column types decide.
+	readOnlyDo(t, db, func(tx bun.Tx, tables map[string]*dbschema.Table) {
+		for _, s := range []*fixturemigrate.Snapshot{old, next} {
+			if err := fixturemigrate.Canonicalize(ctx, tx, cfg, s, tables); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	res, err = fixturemigrate.Compute(cfg, old, next)
 	if err != nil || len(res.Refusals) != 0 {
 		t.Fatalf("%v %+v", err, res.Refusals)
 	}
@@ -213,6 +228,120 @@ func TestAMigrationWritesWhatDbfixtureWould(t *testing.T) {
 	// The caller's session is left as it was.
 	if got := scan[string](t, db, "SHOW TimeZone"); got != "America/New_York" {
 		t.Fatalf("TimeZone is now %s", got)
+	}
+}
+
+type Release struct {
+	bun.BaseModel `bun:"table:releases"`
+
+	ID      int64    `bun:"id,pk"`
+	Name    string   `bun:"name,notnull,unique"`
+	Version string   `bun:"version,notnull"`
+	Zip     string   `bun:"zip,notnull"`
+	Flag    string   `bun:"flag,notnull"`
+	At      string   `bun:"at,notnull"`
+	Octal   int64    `bun:"octal,notnull"`
+	Ratio   float64  `bun:"ratio,notnull"`
+	Tags    []string `bun:"tags,array"`
+	Nums    []int64  `bun:"nums,array"`
+}
+
+const releaseRow = `    - id: 1
+      name: a
+      version: 1.10
+      zip: 01234
+      flag: True
+      at: 2026-01-01 10:00:00
+      octal: 017
+      ratio: 1.50
+      tags: [1.10, x, 017]
+      nums: [017, 2]
+`
+
+// yaml.v3 hands a string field a plain scalar as it is written and a number
+// field the number it resolves to, so dbfixture stores 1.10 as "1.10" in a
+// text column and 017 as 15 in an integer one. Before, the tool took every
+// plain scalar by what it resolves to: it saw drift in a database seeded
+// from the file itself, and a migration wrote 1.1 where dbfixture wrote 1.10.
+func TestAStringColumnHoldsTheValueAsWritten(t *testing.T) {
+	db := connect(t)
+	db.RegisterModel((*Release)(nil))
+	ctx := context.Background()
+	cfg := &fixturemigrate.Config{Schema: "public",
+		Models: map[string]*fixturemigrate.Model{"Release": {Table: "releases", Key: []string{"name"}}}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	reset := func() {
+		t.Helper()
+		if _, err := db.NewDropTable().Model((*Release)(nil)).IfExists().Exec(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.NewCreateTable().Model((*Release)(nil)).Exec(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state := func() string {
+		t.Helper()
+		return scan[string](t, db, `SELECT concat_ws('|', version, zip, flag, at, octal, ratio, tags::text, nums::text)
+			FROM releases WHERE name = 'a'`)
+	}
+	file := "- model: Release\n  rows:\n" + releaseRow
+	reset()
+	loadFixture(t, db, file)
+	const want = "1.10|01234|True|2026-01-01 10:00:00|15|1.5|{1.10,x,017}|{15,2}"
+	if got := state(); got != want {
+		t.Fatalf("this documents what dbfixture stores; if it changed, so did the premise\n got %s\nwant %s", got, want)
+	}
+
+	canonical := func(snaps ...*fixturemigrate.Snapshot) {
+		t.Helper()
+		readOnlyDo(t, db, func(tx bun.Tx, tables map[string]*dbschema.Table) {
+			for _, s := range snaps {
+				if err := fixturemigrate.Canonicalize(ctx, tx, cfg, s, tables); err != nil {
+					t.Fatal(err)
+				}
+				if len(s.Findings) != 0 {
+					t.Fatalf("findings: %+v", s.Findings)
+				}
+			}
+		})
+	}
+
+	// The database seeded from the file agrees with the file.
+	head := fixtureSnapshot(t, cfg, file, "fixture.yml")
+	canonical(head)
+	database := databaseSnapshot(t, db, cfg, fixturemigrate.SnapshotOptions{Columns: head.Columns, Order: head.Order})
+	check, err := fixturemigrate.Check(cfg, database, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if check.Drifted() {
+		t.Fatalf("the database is the file:\n%s", strings.Join(check.Lines(), "\n"))
+	}
+
+	// A migration from one version to the next writes what dbfixture would
+	// have loaded from the new file.
+	next := strings.NewReplacer("version: 1.10", "version: 1.20", "zip: 01234", "zip: 01235",
+		"tags: [1.10, x, 017]", "tags: [1.20, x, 017]").Replace(file)
+	old, head := fixtureSnapshot(t, cfg, file, "old"), fixtureSnapshot(t, cfg, next, "new")
+	canonical(old, head)
+	res, err := fixturemigrate.Compute(cfg, old, head)
+	if err != nil || len(res.Refusals) != 0 || len(res.Changes) != 1 {
+		t.Fatalf("%v %+v %+v", err, res.Changes, res.Refusals)
+	}
+	if got := res.Changes[0].New["version"].Lit; got != "1.20" {
+		t.Fatalf("the migration would write version %q", got)
+	}
+	set := fixturechange.Set{Name: "release", Tables: res.Tables, Changes: res.Changes}
+	if err := fixtureapply.Apply(ctx, db, set, quiet()); err != nil {
+		t.Fatal(err)
+	}
+	migrated := state()
+	reset()
+	loadFixture(t, db, next)
+	if seeded := state(); migrated != seeded {
+		t.Fatalf("the migration wrote something else than dbfixture\nmigrated %s\n  seeded %s", migrated, seeded)
 	}
 }
 
