@@ -1,6 +1,12 @@
 name: test
 
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  # Weekly, so a change on bun's master branch shows up here even while this
+  # repository is quiet.
+  schedule:
+    - cron: "17 5 * * 1"
 
 jobs:
   test:
@@ -37,6 +43,50 @@ jobs:
         working-directory: dbtest
       # The database suite holds no shared state between tests, but it is the
       # only place the run time is exercised at all, so it runs under -race too.
+      - run: go test -race ./...
+        working-directory: dbtest
+        env:
+          BUN_FIXTURE_MIGRATE_POSTGRES: postgres://postgres:pg@127.0.0.1:5432/postgres?sslmode=disable
+
+  # The same suite against bun's master branch. Every premise this tool rests
+  # on -- the DEFAULT bun writes for a zero and for a null, what the migrator
+  # records when a migration fails, how dbfixture reads a file -- has a test,
+  # so a change upstream fails one of them here before it ships in a release.
+  # It is allowed to fail because the cause is outside this repository; a red
+  # run is still the signal to read.
+  bun-master:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: pg
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: use bun master
+        run: |
+          bun="github.com/uptrace/bun@master github.com/uptrace/bun/dialect/pgdialect@master github.com/uptrace/bun/driver/pgdriver@master"
+          go get $bun
+          go mod tidy
+          cd dbtest
+          go get $bun github.com/uptrace/bun/dbfixture@master
+          go mod tidy
+          grep uptrace go.mod
+
+      - run: go vet ./...
+      - run: go test -race ./...
+      - run: go vet ./...
+        working-directory: dbtest
       - run: go test -race ./...
         working-directory: dbtest
         env:
