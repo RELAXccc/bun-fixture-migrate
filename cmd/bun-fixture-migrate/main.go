@@ -12,6 +12,8 @@
 //	           no migration covers yet
 //	plan       run the pending fixture migrations against a database inside a
 //	           transaction that is rolled back, and report what each change did
+//	sync       bring a database to the fixture file directly, without a
+//	           migration file: a developer's, a test run's, a staging copy
 //
 // Exit codes: 0 when there was nothing to do or the work was done, 1 on an
 // error, 2 when something was refused and nothing was written, 3 when check,
@@ -49,6 +51,7 @@ const usage = `bun-fixture-migrate <command> [flags]
   baseline   record the fixture file as migrated, without writing a migration
   status     list the migrations, what a database applied, what nothing covers
   plan       dry-run the pending fixture migrations against a database
+  sync       bring a development or test database to the fixture file
   version    print the version of this binary
 
 Run "bun-fixture-migrate <command> -h" for the flags of one command.`
@@ -85,6 +88,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		"baseline": baseline,
 		"status":   status,
 		"plan":     plan,
+		"sync":     syncCmd,
 	}
 	var err error
 	switch cmd, ok := commands[args[0]]; {

@@ -5,6 +5,7 @@ package dbtest_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -377,5 +378,32 @@ func TestADeleteDoesNotCascadeThroughItsOwnTable(t *testing.T) {
 	err := fixtureapply.Apply(context.Background(), db, set, quiet())
 	if err == nil || !strings.Contains(err.Error(), "1 row of del_categories point at") {
 		t.Fatalf("expected the child to stop the delete: %v", err)
+	}
+}
+
+// Sync from Go, the way a development server or a test's setup calls it.
+func TestSyncFromGo(t *testing.T) {
+	db := itemDB(t)
+	cfg := itemConfig(t)
+	ctx := context.Background()
+	files := []fixturemigrate.FixtureFile{{Path: "fixture.yml", Data: []byte(itemFixture)}}
+
+	res, err := fixturemigrate.Sync(ctx, db, cfg, files, fixturemigrate.SyncOptions{DryRun: true})
+	if err != nil || res.Applied || len(res.Diff.Changes) != 4 {
+		t.Fatalf("dry run: %v %+v", err, res)
+	}
+	if got := scan[int64](t, db, "SELECT count(*) FROM items"); got != 0 {
+		t.Fatal("a dry run changed the database")
+	}
+	if res, err = fixturemigrate.Sync(ctx, db, cfg, files, fixturemigrate.SyncOptions{}); err != nil || !res.Applied {
+		t.Fatalf("sync: %v %+v", err, res)
+	}
+	if res, err = fixturemigrate.Sync(ctx, db, cfg, files, fixturemigrate.SyncOptions{}); err != nil ||
+		res.Applied || len(res.Diff.Changes) != 0 {
+		t.Fatalf("a second sync has nothing to do: %v %+v", err, res)
+	}
+	renamed := []fixturemigrate.FixtureFile{{Data: []byte(strings.Replace(itemFixture, `name: "rope"`, `name: "cord"`, 1))}}
+	if _, err := fixturemigrate.Sync(ctx, db, cfg, renamed, fixturemigrate.SyncOptions{}); !errors.Is(err, fixturemigrate.ErrSyncRefused) {
+		t.Fatalf("a rename is refused: %v", err)
 	}
 }

@@ -201,8 +201,10 @@ type Model struct {
 	// Defaults gives the value a column has when the fixture row leaves it
 	// out. Without an entry an omitted column is treated as "not set", which
 	// compares equal to another omitted column and to nothing else. The
-	// scaffold command fills this in from the database's column defaults.
-	Defaults map[string]string `yaml:"defaults"`
+	// scaffold command fills this in from the database's column defaults. A
+	// YAML null (~) means NULL, which is what a column added to the table
+	// later holds in the rows written before it.
+	Defaults Defaults `yaml:"defaults"`
 	// Deletes overrides Policy.Deletes for this model. Set "refuse" wherever
 	// other tables can point at the row and the tool cannot know what should
 	// happen to them.
@@ -215,6 +217,35 @@ type Model struct {
 
 	derived map[string]bool
 	ignored map[string]bool
+}
+
+// Defaults maps a column to the value a fixture row that leaves it out stands
+// for. NullDefault is NULL.
+type Defaults map[string]string
+
+// NullDefault is how Defaults holds NULL, which a YAML null (~) in the
+// configuration file decodes to.
+const NullDefault = "\x00NULL"
+
+// UnmarshalYAML reads a mapping of scalars, a null as NullDefault.
+func (d *Defaults) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind != yaml.MappingNode {
+		return fmt.Errorf("line %d: defaults has to be a mapping of columns to values", n.Line)
+	}
+	out := Defaults{}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		key, value := n.Content[i], n.Content[i+1]
+		switch {
+		case value.ShortTag() == "!!null":
+			out[key.Value] = NullDefault
+		case value.Kind == yaml.ScalarNode:
+			out[key.Value] = value.Value
+		default:
+			return fmt.Errorf("line %d: the default of %s is not a single value", value.Line, key.Value)
+		}
+	}
+	*d = out
+	return nil
 }
 
 // LoadConfig reads a configuration file and fills in the defaults.

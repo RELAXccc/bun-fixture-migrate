@@ -29,6 +29,9 @@ type planReport struct {
 
 type plannedMigration struct {
 	ID string `json:"id"`
+	// Kind is "fixture" for a change set, "sql" for a SQL migration run
+	// with -with-sql.
+	Kind string `json:"kind"`
 	// Result is "succeeds", "fails", "unseeded", "not reached", or
 	// "inconclusive" when the plan itself could not finish: a lock it waited
 	// for too long, a cancelled query, a lost connection. That is no verdict
@@ -45,6 +48,77 @@ type planTarget struct {
 	id    string
 	set   fixturechange.Set
 	after []string
+	// sql is the .up.sql file of a SQL migration, "" for a change set.
+	sql string
+}
+
+// upSQL is the .up.sql file of a SQL migration, "" for any other.
+func upSQL(m fixturemigrate.MigrationFile) string {
+	for _, f := range m.Files {
+		if strings.HasSuffix(f, ".up.sql") {
+			return f
+		}
+	}
+	return ""
+}
+
+// runSQLMigration runs a bun SQL migration inside the plan's transaction,
+// split the way bun splits it: at every "--bun:split" line, blank lines
+// dropped, any other "--bun:" directive refused. It runs in a savepoint of its
+// own, so a failure leaves the rest of the report readable.
+func runSQLMigration(o streams, tx bun.Tx, path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	queries, err := splitSQL(data)
+	if err != nil {
+		return fmt.Errorf("%s: %w", filepath.Base(path), err)
+	}
+	return tx.RunInTx(o.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		for _, q := range queries {
+			// Raw: the file's SQL may hold a "?" bun would take for a
+			// placeholder, and the migrator runs it as written.
+			if _, err := tx.Tx.ExecContext(ctx, q); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// splitSQL is bun's reading of a SQL migration (migrate/migration.go).
+func splitSQL(data []byte) ([]string, error) {
+	var queries []string
+	var query strings.Builder
+	for _, line := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
+		if directive, ok := strings.CutPrefix(line, "--bun:"); ok {
+			if directive != "split" {
+				return nil, fmt.Errorf("bun: unknown directive: %q", directive)
+			}
+			if query.Len() > 0 {
+				queries = append(queries, query.String())
+				query.Reset()
+			}
+			continue
+		}
+		if strings.TrimSpace(line) != "" {
+			query.WriteString(line + "\n")
+		}
+	}
+	if query.Len() > 0 {
+		queries = append(queries, query.String())
+	}
+	return queries, nil
+}
+
+// sqlState is the SQLSTATE of a PostgreSQL error, "" for any other error.
+func sqlState(err error) string {
+	var pgErr pgdriver.Error
+	if errors.As(err, &pgErr) {
+		return pgErr.Field('C')
+	}
+	return ""
 }
 
 // inconclusive reports an error that stopped the plan rather than one the
@@ -92,6 +166,7 @@ func plan(o streams, args []string) error {
 		strict      = fs.Bool("strict", false, "fail when a change would be skipped as well as when one would fail")
 		lockTimeout = fs.Duration("lock-timeout", 5*time.Second, "give up on a row another session holds a lock on after this long")
 		asJSON      = fs.Bool("json", false, "write the report as JSON")
+		withSQL     = fs.Bool("with-sql", false, "also run the pending SQL migrations (.up.sql) in bun's order")
 	)
 	s, err := common(o, fs, args)
 	if err != nil {
@@ -151,6 +226,11 @@ func plan(o streams, args []string) error {
 		}
 		for _, m := range ms.List {
 			if _, ok := applied[m.Name]; ok {
+				continue
+			}
+			if up := upSQL(m); m.Fixture == nil && *withSQL && up != "" {
+				targets = append(targets, planTarget{id: m.ID(), sql: up,
+					after: append([]string{}, report.NotSimulated...)})
 				continue
 			}
 			if m.Fixture == nil {
@@ -217,7 +297,22 @@ func simulate(o streams, db *bun.DB, targets []planTarget, lockTimeout time.Dura
 			report.Migrations = append(report.Migrations, pm)
 			continue
 		}
-		pm.Result = "succeeds"
+		pm.Result, pm.Kind = "succeeds", "fixture"
+		if t.sql != "" {
+			pm.Kind = "sql"
+			if err := runSQLMigration(o, tx, t.sql); err != nil {
+				pm.Result, pm.Error, failed = "fails", err.Error(), true
+				if inconclusive(err) || sqlState(err) == "25001" {
+					pm.Result = "inconclusive"
+				}
+				if sqlState(err) == "25001" {
+					pm.Error += " -- it cannot run inside a transaction, so plan cannot simulate it or " +
+						"what follows it; plan without -with-sql"
+				}
+			}
+			report.Migrations = append(report.Migrations, pm)
+			continue
+		}
 		err := fixtureapply.Apply(o.ctx, tx, t.set,
 			fixtureapply.WithDryRun(),
 			fixtureapply.WithLogger(func(string, ...any) {}),
@@ -245,17 +340,22 @@ func printPlan(o streams, r *planReport) {
 	if len(r.Migrations) == 0 {
 		fmt.Fprintln(o.stdout, "no pending fixture migrations")
 	}
+
 	for i, m := range r.Migrations {
 		if i > 0 {
 			fmt.Fprintln(o.stdout)
 		}
+		kind := ""
+		if m.Kind == "sql" {
+			kind = " (SQL)"
+		}
 		switch m.Result {
 		case "succeeds":
-			fmt.Fprintf(o.stdout, "%s: would succeed\n", m.ID)
+			fmt.Fprintf(o.stdout, "%s%s: would succeed\n", m.ID, kind)
 		case "unseeded":
 			fmt.Fprintf(o.stdout, "%s: would do nothing, the database is not seeded yet\n", m.ID)
 		case "fails":
-			fmt.Fprintf(o.stdout, "%s: would FAIL\n", m.ID)
+			fmt.Fprintf(o.stdout, "%s%s: would FAIL\n", m.ID, kind)
 		case "inconclusive":
 			fmt.Fprintf(o.stdout, "%s: could not be planned\n", m.ID)
 		default:
@@ -285,8 +385,9 @@ func printPlan(o streams, r *planReport) {
 		if m.Result == "fails" || m.Result == "inconclusive" {
 			fmt.Fprintf(o.stdout, "  %s\n", m.Error)
 			if len(m.After) > 0 {
-				fmt.Fprintf(o.stdout, "  note: %s run before it and were not simulated; if they change "+
-					"these tables, the deploy can differ from this plan\n", strings.Join(m.After, ", "))
+				fmt.Fprintf(o.stdout, "  note: pending before it and not simulated: %s. If they change these "+
+					"tables, the deploy can differ from this plan; plan -with-sql runs SQL migrations too\n",
+					strings.Join(m.After, ", "))
 			}
 		}
 	}

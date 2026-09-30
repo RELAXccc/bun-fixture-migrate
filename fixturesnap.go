@@ -110,6 +110,9 @@ func (ix *index) cell(m *Model, col string, row Row) (Cell, bool) {
 		return c, true
 	}
 	if def, ok := m.Defaults[col]; ok {
+		if def == NullDefault {
+			return Cell{IsNull: true}, true
+		}
 		return Cell{Text: def}, true
 	}
 	return Cell{}, false

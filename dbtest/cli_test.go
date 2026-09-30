@@ -340,3 +340,85 @@ func readFileT(t *testing.T, path string) string {
 	}
 	return string(data)
 }
+
+// A pending schema migration adds a column a pending fixture migration
+// writes. Without -with-sql the plan says the fixture migration fails, which
+// it would, alone; with it, both run in bun's order and succeed, and the
+// schema is left as it was.
+func TestPlanRunsPendingSQLMigrations(t *testing.T) {
+	db := itemDB(t)
+	run(t, db, "DROP TABLE IF EXISTS bun_migrations")
+	loadFixture(t, db, itemFixture)
+	c := buildCLI(t)
+	// The rows written before the column existed hold NULL in it.
+	c.write("fixture-migrate.yml", strings.Replace(cliConfig, "    key: [name]\n",
+		"    key: [name]\n    defaults:\n      color: ~\n", 1))
+	c.must(0, "baseline")
+	c.write("migrations/20000101000000_add_color.up.sql", "ALTER TABLE items ADD COLUMN color text;\n")
+	c.write("fixtures/fixture.yml", replaceOnce(t, itemFixture, "      cost: 120\n", "      cost: 120\n      color: red\n"))
+	c.must(0, "generate", "-name", "color", "-no-lint")
+
+	if out := c.must(3, "plan"); !strings.Contains(out, `column "color" does not exist`) ||
+		!strings.Contains(out, "pending before it and not simulated: 20000101000000_add_color") {
+		t.Fatalf("plan without -with-sql:\n%s", out)
+	}
+	out := c.must(0, "plan", "-with-sql")
+	if !strings.Contains(out, "20000101000000_add_color (SQL): would succeed") ||
+		!strings.Contains(out, "_fixture_color: would succeed") {
+		t.Fatalf("plan -with-sql:\n%s", out)
+	}
+	if got := scan[int64](t, db, "SELECT count(*) FROM information_schema.columns WHERE table_name = 'items' AND column_name = 'color'"); got != 0 {
+		t.Fatal("the plan left the column behind")
+	}
+
+	// A migration that fails is a failure; one that cannot run in a
+	// transaction makes the plan inconclusive.
+	c.write("migrations/20000101000000_add_color.up.sql", "ALTER TABLE items ADD COLUMN color nosuchtype;\n")
+	if out := c.must(3, "plan", "-with-sql"); !strings.Contains(out, "20000101000000_add_color (SQL): would FAIL") {
+		t.Fatalf("a failing SQL migration:\n%s", out)
+	}
+	c.write("migrations/20000101000000_add_color.up.sql", "CREATE INDEX CONCURRENTLY items_color ON items (name);\n")
+	if out := c.must(1, "plan", "-with-sql"); !strings.Contains(out, "cannot run inside a transaction") {
+		t.Fatalf("a migration that cannot run in a transaction:\n%s", out)
+	}
+}
+
+// sync, the way a developer's or a test run's database is brought to the
+// fixture file: shown first, then made, then nothing left.
+func TestSyncBringsADatabaseToTheFile(t *testing.T) {
+	db := itemDB(t)
+	c := buildCLI(t)
+	// An empty database is seeded.
+	out := c.must(0, "sync")
+	if !strings.Contains(out, "would apply Item name=anvil insert") || !strings.Contains(out, "run it again with -yes") {
+		t.Fatalf("sync without -yes:\n%s", out)
+	}
+	if got := scan[int64](t, db, "SELECT count(*) FROM items"); got != 0 {
+		t.Fatal("sync without -yes changed the database")
+	}
+	c.must(0, "sync", "-yes")
+	fresh := itemDB(t)
+	loadFixture(t, fresh, itemFixture)
+	if got, want := itemState(t, db), itemState(t, fresh); got != want {
+		t.Fatalf("sync did not seed what dbfixture seeds\n got %s\nwant %s", got, want)
+	}
+	c.must(0, "check")
+	if out := c.must(0, "sync"); !strings.Contains(out, "already holds") {
+		t.Fatalf("a second sync:\n%s", out)
+	}
+
+	// Drift is repaired.
+	run(t, db, "UPDATE items SET cost = 999 WHERE name = 'anvil'", "INSERT INTO items (id, region_id, name, cost, "+
+		"production_max, ratio, active) VALUES (50, 1, 'stray', 1, 1, 1, true)")
+	c.must(0, "sync", "-yes")
+	c.must(0, "check")
+
+	// A difference the generator would refuse changes nothing.
+	c.write("fixtures/fixture.yml", strings.Replace(itemFixture, `name: "anvil"`, `name: "anvil2"`, 1))
+	if out := c.must(2, "sync", "-yes"); !strings.Contains(out, "refused") {
+		t.Fatalf("a rename:\n%s", out)
+	}
+	if got := scan[int64](t, db, "SELECT count(*) FROM items WHERE name = 'anvil'"); got != 1 {
+		t.Fatal("a refused sync changed the database")
+	}
+}

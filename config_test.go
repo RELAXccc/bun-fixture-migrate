@@ -156,3 +156,23 @@ func TestTheExampleConfigurationLoads(t *testing.T) {
 		t.Fatalf("the example models have to sort: %v", err)
 	}
 }
+
+// A column added to a table later holds NULL in the rows written before it;
+// ~ in defaults says so.
+func TestADefaultCanBeNull(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.yml")
+	if err := os.WriteFile(path, []byte("models:\n  Plan:\n    table: plans\n    defaults:\n      color: ~\n      quota: 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Models["Plan"].Defaults["color"] != NullDefault || cfg.Models["Plan"].Defaults["quota"] != "0" {
+		t.Fatalf("%q", cfg.Models["Plan"].Defaults)
+	}
+	s := snap(t, cfg, "- model: Plan\n  rows:\n    - name: a\n", "f")
+	if v := s.Entries["Plan"][0].Cells["color"]; !v.IsNull {
+		t.Fatalf("an omitted color is NULL, got %+v", v)
+	}
+}
