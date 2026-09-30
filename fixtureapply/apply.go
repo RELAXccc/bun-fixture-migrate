@@ -10,17 +10,23 @@
 // reference is resolved to a real id before the statement runs, so a missing or
 // ambiguous target fails the migration instead of writing NULL.
 //
-// A guard that matches nothing is not success. bun's migrator marks a migration
-// applied the moment the function returns nil, so a statement that quietly
-// matched no row is a change that will never be attempted again: fix the
-// database, deploy once more, and the migration is already recorded. Every zero
-// row count is therefore diagnosed and, unless the change set's policy says
-// otherwise, turned into an error that rolls the transaction back.
+// A guard that matches nothing is not success. bun's migrator records a
+// migration as applied once its function returns nil, so a statement that
+// quietly matched no row is a change that will never be attempted again: fix
+// the database, deploy once more, and the migration is already recorded. Every
+// zero row count is therefore diagnosed and, unless the change set's policy
+// says otherwise, turned into an error that rolls the transaction back.
+//
+// Failing is only half of it. Unless the migrator was built
+// WithMarkAppliedOnSuccess(true), bun records the migration before running it
+// and keeps the record when it fails, so a failed change set would be recorded
+// as done all the same. Apply takes that record back; see Apply.
 //
 // Identifiers are never taken from user input at run time: table and column
 // names come from the generated file and must be plain SQL identifiers, which
-// Validate checks before any statement is built. Values are always bound
-// parameters.
+// Validate checks before any statement is built. Values never become part of
+// the SQL text this package writes: they are passed as arguments, which bun
+// quotes and escapes with the dialect's rules.
 package fixtureapply
 
 import (
@@ -29,9 +35,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 
@@ -42,7 +51,9 @@ import (
 type Option func(*options)
 
 type options struct {
-	logf func(format string, args ...any)
+	logf      func(format string, args ...any)
+	report    func(Outcome)
+	migration string
 }
 
 // WithLogger replaces log.Printf as the destination of the per-row report.
@@ -52,24 +63,206 @@ func WithLogger(logf func(format string, args ...any)) Option {
 	return func(o *options) { o.logf = logf }
 }
 
+// WithReport hands every change's outcome to fn as it happens, in the order
+// the changes run. It is what a dry run reads; the log lines are for people.
+func WithReport(fn func(Outcome)) Option {
+	return func(o *options) { o.report = fn }
+}
+
+// WithMigrationName names the bun migration Apply is running as: the
+// timestamp at the front of the migration's file name, which is what bun
+// stores in its migrations table. Apply reads it off the call stack the way
+// bun's own Register does, so a generated migration never needs this; a
+// hand-written one that calls Apply through a helper outside the migration
+// file does.
+func WithMigrationName(name string) Option {
+	return func(o *options) { o.migration = name }
+}
+
 func newOptions(opts []Option) options {
-	o := options{logf: log.Printf}
+	o := options{logf: log.Printf, report: func(Outcome) {}}
 	for _, fn := range opts {
 		fn(&o)
 	}
 	return o
 }
 
+// Status is what became of one change.
+type Status string
+
+const (
+	// StatusApplied is a change that was made.
+	StatusApplied Status = "applied"
+	// StatusUnchanged is a change the database already held, which is what a
+	// second run of the same migration finds.
+	StatusUnchanged Status = "unchanged"
+	// StatusSkipped is a change that could not be made and that the policy
+	// allowed to be passed over with a warning.
+	StatusSkipped Status = "skipped"
+	// StatusFailed is a change that could not be made and failed the whole
+	// set, which rolls it back.
+	StatusFailed Status = "failed"
+	// StatusUnseeded is the whole set passed over because the seed guard
+	// table is empty. Index is -1.
+	StatusUnseeded Status = "unseeded"
+)
+
+// Problem names why a change could not be made.
+type Problem string
+
+const (
+	// ProblemMissingRow is an update or a delete whose row is not there.
+	ProblemMissingRow Problem = "missing row"
+	// ProblemChangedRow is a row that no longer holds what the change was
+	// generated against: somebody edited it in this database.
+	ProblemChangedRow Problem = "changed row"
+	// ProblemIDDrift is a row under a different id from the one the change
+	// was generated for, or an id another row holds.
+	ProblemIDDrift Problem = "id drift"
+	// ProblemError is a statement that failed outright.
+	ProblemError Problem = "error"
+)
+
+// Outcome is what happened to one change of a set.
+type Outcome struct {
+	// Set is the change set's Name.
+	Set string `json:"set"`
+	// Index is the change's position in Set.Changes, -1 for an outcome about
+	// the whole set.
+	Index int    `json:"index"`
+	Model string `json:"model,omitempty"`
+	// Kind is what the change did; for Revert, what the inverted change did.
+	Kind fixturechange.Kind `json:"kind,omitempty"`
+	// Key is the natural key, as "col=value,col=value".
+	Key    string `json:"key,omitempty"`
+	Status Status `json:"status"`
+	// Rows is the row count of an applied change.
+	Rows int64 `json:"rows,omitempty"`
+	// Problem is set when the change could not be made.
+	Problem Problem `json:"problem,omitempty"`
+	// Message is the explanation a person reads.
+	Message string `json:"message,omitempty"`
+}
+
 // Apply runs a change set in one transaction.
+//
+// When it fails it returns an error, which rolls the transaction back and
+// fails the migration. Under bun's migrator that is not enough on its own:
+// unless the migrator was built WithMarkAppliedOnSuccess(true), bun inserts
+// the migration's record before calling it and leaves the record there when
+// it fails, and a recorded migration never runs again. Fix the database,
+// deploy once more, and nothing happens.
+//
+// So a failing Apply that finds itself running under bun's migrator deletes
+// that record: the newest row of the migrations table, if it carries this
+// migration's name and was written within the hour. Nothing older, nothing
+// else, and nothing at all when the migrator records on success, because then
+// there is no such row. The error says whether it did. The name is the one bun
+// derived from the migration's file name, read off the call stack the same way
+// bun's Register reads it; see WithMigrationName for the case where that
+// cannot work.
 func Apply(ctx context.Context, db bun.IDB, set fixturechange.Set, opts ...Option) error {
-	return db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		return run(ctx, tx, set, false, newOptions(opts))
+	o := newOptions(opts)
+	err := db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		return run(ctx, tx, set, false, o)
 	})
+	if err == nil {
+		return nil
+	}
+	if o.migration == "" {
+		o.migration = migrationFromStack()
+	}
+	return unrecord(ctx, db, set, o, err)
+}
+
+// bunMigrationFile is bun's own pattern for a migration file name
+// (migrate/migrations.go, fnameRE): the digits are the name bun records.
+var bunMigrationFile = regexp.MustCompile(`^(\d{1,14})_([0-9a-z_\-]+)\.`)
+
+// migrationFromStack finds the migration file Apply was called from, the way
+// bun's Register finds the file it was called from: the first frame outside
+// this package whose file is named like a migration. It answers only when bun's
+// migrator is further up the stack, so Apply called from a test or a tool
+// never goes looking for a record to take back.
+func migrationFromStack() string {
+	var pcs [64]uintptr
+	n := runtime.Callers(2, pcs[:])
+	frames := runtime.CallersFrames(pcs[:n])
+	name := ""
+	for {
+		f, more := frames.Next()
+		if strings.Contains(f.Function, "/bun/migrate.") {
+			return name
+		}
+		if name == "" && !strings.Contains(f.Function, "/fixtureapply.") {
+			if m := bunMigrationFile.FindStringSubmatch(filepath.Base(f.File)); m != nil {
+				name = m[1]
+			}
+		}
+		if !more {
+			return ""
+		}
+	}
+}
+
+// unrecord deletes the record bun's migrator made of this migration before
+// running it, and returns the failure with a note saying what it did.
+func unrecord(ctx context.Context, db bun.IDB, set fixturechange.Set, o options, failure error) error {
+	// Only the migrator's own connection pool. Inside somebody else's
+	// transaction a failing statement would poison it, and the migrator never
+	// hands a migration anything but the *bun.DB.
+	bdb, ok := db.(*bun.DB)
+	if !ok || o.migration == "" {
+		return failure
+	}
+	table := set.MigrationsTable
+	if table == "" {
+		table = fixturechange.DefaultMigrationsTable
+	}
+	quoted, err := quoteIdent(table)
+	if err != nil {
+		return failure
+	}
+	// The migration may have failed because the context ended; the record
+	// still has to go, or the next deploy skips this migration.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+
+	var exists bool
+	if err := bdb.QueryRowContext(ctx, "SELECT to_regclass(?) IS NOT NULL", quoted).Scan(&exists); err != nil {
+		return fmt.Errorf("%w\n\nwhether bun recorded %s as applied could not be checked (%v): if %s holds a row "+
+			"named %s, delete it, or the migration will not run again", failure, o.migration, err, table, o.migration)
+	}
+	if !exists {
+		return failure
+	}
+	res, err := bdb.ExecContext(ctx, fmt.Sprintf(
+		"DELETE FROM %s WHERE name = ? AND id = (SELECT max(id) FROM %s) "+
+			"AND migrated_at > clock_timestamp() - interval '1 hour'", quoted, quoted), o.migration)
+	if err != nil {
+		return fmt.Errorf("%w\n\nbun may have recorded %s as applied before running it, and the record could not "+
+			"be removed (%v): delete the row named %s from %s, or the migration will not run again",
+			failure, o.migration, err, o.migration, table)
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		return failure
+	}
+	o.logf("%s: bun had recorded migration %s as applied before running it; the record was removed, "+
+		"so it runs again once this is fixed", set.Name, o.migration)
+	return fmt.Errorf("%w\n\nbun had recorded migration %s as applied before running it (the migrator was not "+
+		"built WithMarkAppliedOnSuccess(true)); that record was removed, so the migration runs again once "+
+		"this is fixed", failure, o.migration)
 }
 
 // Revert undoes a change set: the list backwards, every change inverted. An
 // insert becomes a delete guarded by the values it wrote, an update swaps old
 // and new, a delete becomes an insert of the row it removed.
+//
+// It takes no record back. When it fails under a migrator that unrecords
+// before running (bun's default), the migration is left looking unapplied
+// while its changes are still in the database; that is harmless, because the
+// next migrate runs Apply again and every change it finds already made is
+// "unchanged".
 func Revert(ctx context.Context, db bun.IDB, set fixturechange.Set, opts ...Option) error {
 	return db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		return run(ctx, tx, set, true, newOptions(opts))
@@ -138,6 +331,11 @@ func Validate(set fixturechange.Set) error {
 	if set.SeedGuardTable != "" {
 		if _, err := quoteIdent(set.SeedGuardTable); err != nil {
 			return fmt.Errorf("seed guard table %w", err)
+		}
+	}
+	if set.MigrationsTable != "" {
+		if _, err := quoteIdent(set.MigrationsTable); err != nil {
+			return fmt.Errorf("migrations table %w", err)
 		}
 	}
 	for i, c := range set.Changes {
@@ -209,7 +407,9 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 			return err
 		}
 		if !seeded {
-			o.logf("%s: %s is empty, nothing to do (the fixture loader seeds this database)", set.Name, set.SeedGuardTable)
+			msg := set.SeedGuardTable + " is empty, nothing to do (the fixture loader seeds this database)"
+			o.logf("%s: %s", set.Name, msg)
+			o.report(Outcome{Set: set.Name, Index: -1, Status: StatusUnseeded, Message: msg})
 			return nil
 		}
 	}
@@ -230,22 +430,30 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 			c = invert(c)
 		}
 		where := fmt.Sprintf("%s: %s %s %s", set.Name, c.Model, keyLabel(c.Key), c.Kind)
+		out := Outcome{Set: set.Name, Index: i, Model: c.Model, Kind: c.Kind, Key: keyLabel(c.Key)}
 		res, err := r.exec(ctx, c)
 		if err != nil {
+			out.Status, out.Problem, out.Message = StatusFailed, ProblemError, err.Error()
+			o.report(out)
 			return fmt.Errorf("%s: %w", where, err)
 		}
-		if res.problem == "" {
+		out.Rows, out.Message = res.rows, res.message
+		switch {
+		case res.problem == "":
+			out.Status = StatusApplied
 			o.logf("%s: applied (%s)", where, rowCount(res.rows))
-			continue
-		}
-		if res.problem == problemBenign {
+		case res.problem == problemBenign:
+			out.Status = StatusUnchanged
 			o.logf("%s: %s", where, res.message)
-			continue
-		}
-		if modeFor(set.Policy, res.problem) == fixturechange.ModeError {
+		case modeFor(set.Policy, res.problem) == fixturechange.ModeError:
+			out.Status, out.Problem = StatusFailed, res.problem.exported()
+			o.report(out)
 			return fmt.Errorf("%s: %s", where, res.message)
+		default:
+			out.Status, out.Problem = StatusSkipped, res.problem.exported()
+			o.logf("%s: SKIPPED. %s", where, res.message)
 		}
-		o.logf("%s: SKIPPED. %s", where, res.message)
+		o.report(out)
 	}
 	return r.syncSequences(ctx)
 }
@@ -262,6 +470,18 @@ const (
 	problemChanged problem = "changed"
 	problemIDDrift problem = "id drift"
 )
+
+func (p problem) exported() Problem {
+	switch p {
+	case problemMissing:
+		return ProblemMissingRow
+	case problemChanged:
+		return ProblemChangedRow
+	case problemIDDrift:
+		return ProblemIDDrift
+	}
+	return ""
+}
 
 // modeFor is what the change set's policy says about one problem. An unset
 // policy field is the strict reading: a change that could not be made fails the

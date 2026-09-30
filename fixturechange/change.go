@@ -107,8 +107,19 @@ type Set struct {
 	// the fixture loader will insert the new state by itself and the migration
 	// must keep its hands off.
 	SeedGuardTable string
-	Tables         Tables
-	Changes        []Change
+	// MigrationsTable is the table bun's migrator records applied migrations
+	// in: "bun_migrations" unless the migrator was built WithTableName. Empty
+	// means DefaultMigrationsTable.
+	//
+	// It is here because of one line in migrate.Migrator.Migrate: unless the
+	// migrator was built WithMarkAppliedOnSuccess(true), it records a migration
+	// as applied before it runs it, and leaves the record in place when the
+	// migration fails. A change set that failed and rolled back would then be
+	// recorded as done and never attempted again. fixtureapply.Apply removes
+	// that one record when it fails, and only that one; see Apply.
+	MigrationsTable string
+	Tables          Tables
+	Changes         []Change
 	// Policy is what the migration does when the database is not in the state
 	// the change set was generated against. The generator writes the values
 	// from the configuration file into it, so the migration carries its own
@@ -116,6 +127,10 @@ type Set struct {
 	// what an old migration does.
 	Policy Policy
 }
+
+// DefaultMigrationsTable is the table bun's migrator uses when it was not built
+// WithTableName.
+const DefaultMigrationsTable = "bun_migrations"
 
 // Mode is what a policy does when it triggers. The empty Mode is the strict
 // reading of whichever policy carries it, so a Policy nobody filled in fails on

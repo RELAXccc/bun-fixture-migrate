@@ -1,0 +1,287 @@
+package dbtest_test
+
+// A generated migration, compiled and run by bun's own migrator.
+//
+// Everything else in this module calls fixtureapply directly. That cannot show
+// the one thing that decides whether a failed migration is ever retried: what
+// migrate.Migrator records. Unless it is built WithMarkAppliedOnSuccess(true),
+// bun inserts a migration's record before running it and leaves it there when
+// the migration fails, and a recorded migration never runs again. The
+// generated file has to leave the migrations table telling the truth in both
+// modes, and the only way to know is to build it and run it.
+
+import (
+	"bytes"
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
+	"github.com/RELAXccc/bun-fixture-migrate/fixtureapply"
+	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+
+	"github.com/uptrace/bun"
+)
+
+const migratorMain = `package main
+
+import (
+	"context"
+	"database/sql"
+	"flag"
+	"fmt"
+	"os"
+
+	"github.com/RELAXccc/bun-fixture-migrate/dbtest/migratorcheck/migrations"
+
+	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/dialect/pgdialect"
+	"github.com/uptrace/bun/driver/pgdriver"
+	"github.com/uptrace/bun/migrate"
+)
+
+func main() {
+	onSuccess := flag.Bool("on-success", false, "WithMarkAppliedOnSuccess(true)")
+	flag.Parse()
+	ctx := context.Background()
+	db := bun.NewDB(sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(os.Getenv("DSN")))), pgdialect.New())
+	defer db.Close()
+	m := migrate.NewMigrator(db, migrations.Migrations, migrate.WithMarkAppliedOnSuccess(*onSuccess))
+	if err := m.Init(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "init:", err)
+		os.Exit(2)
+	}
+	if _, err := m.Migrate(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "migrate:", err)
+		os.Exit(1)
+	}
+}
+`
+
+const migratorPackage = `package migrations
+
+import "github.com/uptrace/bun/migrate"
+
+var Migrations = migrate.NewMigrations()
+`
+
+// buildMigrator writes the generated file into a migrations package next to a
+// main that runs bun's migrator, builds it, and returns the binary.
+func buildMigrator(t *testing.T, stamp, name string, src []byte) string {
+	t.Helper()
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("no Go toolchain to build with")
+	}
+	// Inside this module, so it resolves bun and the library through the
+	// module's own go.mod with no network.
+	dir := "migratorcheck"
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	for path, content := range map[string][]byte{
+		"main.go":                  []byte(migratorMain),
+		"migrations/migrations.go": []byte(migratorPackage),
+		filepath.Join("migrations", fixturemigrate.FileName(stamp, name)): src,
+	} {
+		full := filepath.Join(dir, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bin := filepath.Join(t.TempDir(), "migrator")
+	if out, err := exec.Command("go", "build", "-o", bin, "./"+dir).CombinedOutput(); err != nil {
+		t.Fatalf("the generated migration does not build: %v\n%s\n%s", err, out, src)
+	}
+	return bin
+}
+
+func runMigrator(t *testing.T, bin string, onSuccess bool) (bool, string) {
+	t.Helper()
+	args := []string{}
+	if onSuccess {
+		args = append(args, "-on-success")
+	}
+	cmd := exec.Command(bin, args...)
+	cmd.Env = append(os.Environ(), "DSN="+os.Getenv("BUN_FIXTURE_MIGRATE_POSTGRES"))
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	err := cmd.Run()
+	if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 {
+		return false, out.String()
+	}
+	if err != nil {
+		t.Fatalf("the migrator did not run: %v\n%s", err, out.String())
+	}
+	return true, out.String()
+}
+
+// The migration fails against a database somebody edited, is not left
+// recorded, and runs once the database is put right. In both of bun's modes.
+func TestAFailedMigrationIsNotLeftRecorded(t *testing.T) {
+	connect(t) // skips without a database, before anything is built
+	cfg := itemConfig(t)
+	cfg.Package = "migrations"
+	old := fixtureSnapshot(t, cfg, itemFixture, "HEAD:fixture.yml")
+	changed := replaceOnce(t, itemFixture, "      cost: 120\n", "      cost: 130\n")
+	res, err := fixturemigrate.Compute(cfg, old, fixtureSnapshot(t, cfg, changed, "fixture.yml"))
+	if err != nil || len(res.Refusals) != 0 {
+		t.Fatalf("Compute: %v %+v", err, res.Refusals)
+	}
+	const stamp = "20260921120000"
+	src, err := fixturemigrate.Render(cfg, "anvil cost", stamp, res)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	bin := buildMigrator(t, stamp, "anvil cost", src)
+
+	for _, onSuccess := range []bool{false, true} {
+		mode := "bun's default (records before running)"
+		if onSuccess {
+			mode = "WithMarkAppliedOnSuccess(true)"
+		}
+		t.Run(mode, func(t *testing.T) {
+			db := itemDB(t)
+			ctx := context.Background()
+			if _, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS bun_migrations, bun_migration_locks"); err != nil {
+				t.Fatal(err)
+			}
+			loadFixture(t, db, itemFixture)
+			// Somebody renamed the anvil in this database, so the update
+			// cannot find its row and missing_row fails the migration.
+			if _, err := db.ExecContext(ctx, "UPDATE items SET name = 'anvil (old)' WHERE name = 'anvil'"); err != nil {
+				t.Fatal(err)
+			}
+
+			ok, out := runMigrator(t, bin, onSuccess)
+			if ok {
+				t.Fatalf("the migration should have failed:\n%s", out)
+			}
+			if !strings.Contains(out, "no row of items has name=anvil") {
+				t.Fatalf("the failure has to say what is wrong:\n%s", out)
+			}
+			if got := scan[int64](t, db, "SELECT count(*) FROM bun_migrations"); got != 0 {
+				t.Fatalf("a failed migration is recorded as applied (%d rows), so it will never run again:\n%s", got, out)
+			}
+			if !onSuccess && !strings.Contains(out, "that record was removed") {
+				t.Fatalf("the error has to say the record was taken back:\n%s", out)
+			}
+
+			// Put the row back and deploy again: the migration runs now.
+			if _, err := db.ExecContext(ctx, "UPDATE items SET name = 'anvil' WHERE name = 'anvil (old)'"); err != nil {
+				t.Fatal(err)
+			}
+			if ok, out := runMigrator(t, bin, onSuccess); !ok {
+				t.Fatalf("the second run should succeed:\n%s", out)
+			}
+			if got := scan[int64](t, db, "SELECT cost FROM items WHERE name = 'anvil'"); got != 130 {
+				t.Fatalf("the migration did not run the second time: cost = %d", got)
+			}
+			if got := scan[string](t, db, "SELECT name FROM bun_migrations"); got != stamp {
+				t.Fatalf("recorded as %q, want %q", got, stamp)
+			}
+		})
+	}
+}
+
+// What a failing Apply takes back is bounded: the newest record of the table,
+// carrying this migration's name, written within the hour, and only through
+// the migrator's own *bun.DB. Anything else stays, because anything else is
+// not the record bun made a moment ago for this run.
+func TestOnlyTheMigratorsFreshRecordIsTakenBack(t *testing.T) {
+	db := testDB(t)
+	seed(t, db)
+	ctx := context.Background()
+	const name = "20260921120000"
+	failing := fixturechange.Set{
+		Name:   name + "_fixture_x",
+		Tables: tables(),
+		Changes: []fixturechange.Change{{Model: "Plan", Kind: fixturechange.Update,
+			Key: fixturechange.Values{"name": fixturechange.Lit("gone")},
+			Old: fixturechange.Values{"price_cents": fixturechange.Lit("1")},
+			New: fixturechange.Values{"price_cents": fixturechange.Lit("2")}}},
+	}
+
+	reset := func(rows ...string) {
+		t.Helper()
+		for _, stmt := range append([]string{
+			"DROP TABLE IF EXISTS bun_migrations",
+			"CREATE TABLE bun_migrations (id bigserial PRIMARY KEY, name varchar, group_id bigint, " +
+				"migrated_at timestamptz NOT NULL DEFAULT current_timestamp)",
+		}, rows...) {
+			if _, err := db.ExecContext(ctx, stmt); err != nil {
+				t.Fatalf("%s: %v", stmt, err)
+			}
+		}
+	}
+	count := func() int64 { return scan[int64](t, db, "SELECT count(*) FROM bun_migrations WHERE name = ?", name) }
+	apply := func(idb bun.IDB) error {
+		return fixtureapply.Apply(ctx, idb, failing, quiet(), fixtureapply.WithMigrationName(name))
+	}
+
+	// The case it exists for: bun has just recorded this migration.
+	reset("INSERT INTO bun_migrations (name, group_id) VALUES ('20260101000000', 1)",
+		"INSERT INTO bun_migrations (name, group_id) VALUES ('"+name+"', 2)")
+	err := apply(db)
+	if err == nil || !strings.Contains(err.Error(), "that record was removed") {
+		t.Fatalf("expected the failure and the note, got %v", err)
+	}
+	if count() != 0 {
+		t.Fatal("the fresh record should be gone")
+	}
+	if got := scan[int64](t, db, "SELECT count(*) FROM bun_migrations"); got != 1 {
+		t.Fatalf("the other migration's record has to stay, %d rows left", got)
+	}
+
+	for _, c := range []struct {
+		why  string
+		rows []string
+		idb  func() bun.IDB
+	}{
+		{"it is not the newest record",
+			[]string{"INSERT INTO bun_migrations (name, group_id) VALUES ('" + name + "', 1)",
+				"INSERT INTO bun_migrations (name, group_id) VALUES ('20260922000000', 2)"},
+			func() bun.IDB { return db }},
+		{"it was written more than an hour ago",
+			[]string{"INSERT INTO bun_migrations (name, group_id, migrated_at) VALUES ('" + name +
+				"', 1, now() - interval '2 hours')"},
+			func() bun.IDB { return db }},
+	} {
+		reset(c.rows...)
+		if err := apply(c.idb()); err == nil || strings.Contains(err.Error(), "record was removed") {
+			t.Fatalf("%s: %v", c.why, err)
+		}
+		if count() != 1 {
+			t.Fatalf("%s: the record must stay", c.why)
+		}
+	}
+
+	// Inside a caller's transaction nothing is deleted: a failing statement
+	// there would poison the caller's transaction, and the migrator never
+	// calls a migration that way.
+	reset("INSERT INTO bun_migrations (name, group_id) VALUES ('" + name + "', 1)")
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := apply(tx); err == nil {
+		t.Fatal("expected the failure")
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if count() != 1 {
+		t.Fatal("a caller's transaction is not the migrator's")
+	}
+
+	// No migrations table at all: the failure is returned as it is.
+	if _, err := db.ExecContext(ctx, "DROP TABLE bun_migrations"); err != nil {
+		t.Fatal(err)
+	}
+	if err := apply(db); err == nil || strings.Contains(err.Error(), "bun_migrations") {
+		t.Fatalf("expected the plain failure, got %v", err)
+	}
+}

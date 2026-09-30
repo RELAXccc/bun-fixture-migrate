@@ -92,6 +92,9 @@ func TestValidateRejects(t *testing.T) {
 		"policy nobody can read": {
 			fixturechange.Set{Tables: tables(), Policy: fixturechange.Policy{MissingRow: "warm"}},
 			"policy MissingRow"},
+		"migrations table that is not an identifier": {
+			fixturechange.Set{Tables: tables(), MigrationsTable: "bun_migrations; DROP TABLE plans"},
+			"migrations table"},
 		"policy that is not offered for this field": {
 			fixturechange.Set{Tables: tables(), Policy: fixturechange.Policy{MissingRow: fixturechange.ModeIgnore}},
 			"policy MissingRow"},
@@ -253,6 +256,33 @@ func TestRowCount(t *testing.T) {
 	for n, want := range map[int64]string{0: "0 rows", 1: "1 row", 2: "2 rows"} {
 		if got := rowCount(n); got != want {
 			t.Errorf("rowCount(%d) = %q, want %q", n, got, want)
+		}
+	}
+}
+
+// Outside bun's migrator there is no record to take back, so Apply called from
+// a test, a tool or a dry run must not go looking for one, whatever the file
+// calling it is named.
+func TestTheMigrationNameIsOnlyReadUnderTheMigrator(t *testing.T) {
+	if got := migrationFromStack(); got != "" {
+		t.Fatalf("no migrator on this stack, got %q", got)
+	}
+}
+
+func TestBunsMigrationFilePattern(t *testing.T) {
+	for file, want := range map[string]string{
+		"20260921120000_fixture_plan_prices.go": "20260921120000",
+		"1_init.up.sql":                         "1",
+		"20260921120000_Fixture.go":             "",
+		"migrations.go":                         "",
+		"20260921120000.go":                     "",
+	} {
+		got := ""
+		if m := bunMigrationFile.FindStringSubmatch(file); m != nil {
+			got = m[1]
+		}
+		if got != want {
+			t.Errorf("%s: %q, want %q", file, got, want)
 		}
 	}
 }
