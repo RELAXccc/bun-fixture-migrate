@@ -52,7 +52,8 @@ vulncheck:
   stage: lint
   image: golang:1
   script:
-    - go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+    # Unpinned on purpose: govulncheck has to understand the Go it runs under.
+    - go install golang.org/x/vuln/cmd/govulncheck@latest
     - for m in . examples/basic; do (cd "$m" && "$GOPATH/bin/govulncheck" ./...); done
 
 unit:
