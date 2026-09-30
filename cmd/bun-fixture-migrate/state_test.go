@@ -161,6 +161,12 @@ func TestStatusFailsOnAChangeNoMigrationMakes(t *testing.T) {
 		report.State == nil || !strings.HasSuffix(report.State.Migration, "_fixture_prices") {
 		t.Fatalf("%+v", report)
 	}
+	// An empty list is [], which a program can range over without a check.
+	for _, field := range []string{`"uncovered": []`, `"refused": []`, `"problems": []`, `"notes": []`} {
+		if !strings.Contains(out, field) {
+			t.Errorf("no %s in\n%s", field, out)
+		}
+	}
 }
 
 // Two migrations bun would record under one name: one of them never runs.

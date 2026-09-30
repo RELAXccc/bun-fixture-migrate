@@ -26,8 +26,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.24"
 
@@ -60,6 +60,17 @@ jobs:
             (cd "$m" && staticcheck ./...)
           done
 
+  # govulncheck reports the standard library of the Go it runs under, and only
+  # supported Go releases get security fixes. So it runs under the current
+  # one, which is what a binary should be built with; go 1.24 in go.mod is the
+  # oldest Go the code builds with, not a recommendation.
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
       - name: govulncheck
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
@@ -74,8 +85,8 @@ jobs:
         go: ["1.24", "stable"]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ matrix.go }}
       - run: go test -race -coverprofile=coverage.out ./...
@@ -122,8 +133,8 @@ jobs:
         options: >-
           --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.24"
       # The suite holds no shared state between tests, but it is the only
@@ -150,8 +161,8 @@ jobs:
     env:
       DATABASE_URL: postgres://postgres:pg@127.0.0.1:5432/postgres?sslmode=disable
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.24"
 
@@ -221,8 +232,8 @@ jobs:
         options: >-
           --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: stable
 

@@ -189,7 +189,7 @@ func plan(o streams, args []string) error {
 	}
 
 	var targets []planTarget
-	report := &planReport{}
+	report := &planReport{Migrations: []plannedMigration{}, NotSimulated: []string{}}
 	if len(files) > 0 {
 		for _, path := range files {
 			src, err := os.ReadFile(path)

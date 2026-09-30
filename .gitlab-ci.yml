@@ -45,6 +45,13 @@ lint:
     - for m in . dbtest examples/basic; do (cd "$m" && go vet ./...); done
     - go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
     - for m in . dbtest examples/basic; do (cd "$m" && "$GOPATH/bin/staticcheck" ./...); done
+
+# govulncheck reports the standard library of the Go it runs under, and only
+# supported releases get fixes, so it runs under the current one.
+vulncheck:
+  stage: lint
+  image: golang:1
+  script:
     - go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
     - for m in . examples/basic; do (cd "$m" && "$GOPATH/bin/govulncheck" ./...); done
 

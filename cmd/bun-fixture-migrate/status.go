@@ -133,6 +133,18 @@ func status(o streams, args []string) error {
 	}
 
 	if *asJSON {
+		// A program reads an empty list as [], not as null.
+		for _, list := range []*[]string{&r.Uncovered, &r.Refused, &r.Problems, &r.Notes} {
+			if *list == nil {
+				*list = []string{}
+			}
+		}
+		if r.Migrations == nil {
+			r.Migrations = []migrationInfo{}
+		}
+		if r.Database != nil && r.Database.NotInDirectory == nil {
+			r.Database.NotInDirectory = []string{}
+		}
 		if err := writeJSON(o.stdout, r); err != nil {
 			return err
 		}
