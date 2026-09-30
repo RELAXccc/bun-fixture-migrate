@@ -28,13 +28,15 @@ func TestRenderIsValidGoAndGofmtClean(t *testing.T) {
 	if string(formatted) != string(src) {
 		t.Fatal("the generated file is not gofmt-clean")
 	}
-	text := string(src)
+	// gofmt aligns a run of fields, so the spacing depends on the neighbours.
+	text := strings.Join(strings.Fields(string(src)), " ")
 	for _, want := range []string{
 		"package migrations",
 		"Migrations.MustRegister",
 		"fixtureapply.Apply(ctx, db, fixtureChanges20260921120000PlanPrices)",
 		"fixtureapply.Revert(ctx, db, fixtureChanges20260921120000PlanPrices)",
 		`SeedGuardTable: "plans"`,
+		`MigrationsTable: "bun_migrations"`,
 		`"Plan": {Name: "plans", ID: "id"}`,
 		`fixturechange.Lit("2500")`,
 	} {

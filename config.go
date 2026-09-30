@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -40,6 +41,16 @@ type Config struct {
 	// Migrator is the *migrate.Migrations variable the generated file
 	// registers with. Default "Migrations".
 	Migrator string `yaml:"migrator"`
+	// MigrationsTable is the table your migrator records applied migrations
+	// in. Default "bun_migrations", which is bun's own default; set it if the
+	// migrator is built with migrate.WithTableName. A failing generated
+	// migration deletes the record bun made of it before running it, and the
+	// status and plan commands read which migrations were applied from here.
+	MigrationsTable string `yaml:"migrations_table"`
+	// State is the state file: the fixture file as the generated migrations
+	// leave a database. generate diffs against it and rewrites it, relative to
+	// the configuration file. Default "<out>/fixture_state.yml".
+	State string `yaml:"state"`
 	// SeedGuardTable names a table that is never empty in a seeded database.
 	// While it is empty the migration does nothing, because the database has
 	// not been seeded yet and dbfixture will load the new state by itself.
@@ -225,6 +236,15 @@ func (c *Config) Prepare() error {
 	}
 	if c.Schema == "" {
 		c.Schema = "public"
+	}
+	if c.MigrationsTable == "" {
+		c.MigrationsTable = "bun_migrations"
+	}
+	if _, err := quoteQualified(c.MigrationsTable); err != nil {
+		return fmt.Errorf("migrations_table: %w", err)
+	}
+	if c.State == "" && c.Out != "" {
+		c.State = filepath.Join(c.Out, "fixture_state.yml")
 	}
 	if err := c.Policy.prepare(); err != nil {
 		return err

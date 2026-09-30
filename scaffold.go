@@ -271,6 +271,9 @@ fixture: fixtures/fixture.yml
 out: internal/migrations
 package: migrations
 migrator: Migrations
+# The table your migrator records applied migrations in; set it if you build
+# the migrator with migrate.WithTableName.
+migrations_table: bun_migrations
 # A table that is never empty in a seeded database. While it is empty, a
 # generated migration does nothing at all: that database has not been seeded
 # yet, and dbfixture is about to load the new state by itself. Remove this only

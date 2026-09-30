@@ -7,6 +7,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -65,6 +66,11 @@ const newFixture = `- model: Currency
 // into a temporary directory and returns the paths of the two.
 func project(t *testing.T, head, base string) (configPath, basePath string) {
 	t.Helper()
+	return projectWith(t, config, head, base)
+}
+
+func projectWith(t *testing.T, config, head, base string) (configPath, basePath string) {
+	t.Helper()
 	dir := t.TempDir()
 	write := func(rel, content string) string {
 		path := filepath.Join(dir, rel)
@@ -87,7 +93,7 @@ func project(t *testing.T, head, base string) (configPath, basePath string) {
 func call(t *testing.T, args ...string) (int, string, string) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
-	code := run(args, &stdout, &stderr)
+	code := run(context.Background(), args, &stdout, &stderr)
 	return code, stdout.String(), stderr.String()
 }
 
@@ -100,13 +106,14 @@ func TestGenerateAgainstAFileNeedsNoDatabase(t *testing.T) {
 	if !strings.HasPrefix(stdout, "Plan: 1 update\n") {
 		t.Fatalf("expected the summary first:\n%s", stdout)
 	}
+	flat := strings.Join(strings.Fields(stdout), " ")
 	for _, want := range []string{
 		"package migrations",
 		`SeedGuardTable: "plans"`,
 		`fixturechange.Lit("2000")`,
 		`fixturechange.Lit("2500")`,
 	} {
-		if !strings.Contains(stdout, want) {
+		if !strings.Contains(flat, want) {
 			t.Fatalf("the migration is missing %q:\n%s", want, stdout)
 		}
 	}
@@ -124,8 +131,9 @@ func TestGenerateWritesTheFileItNames(t *testing.T) {
 	}
 	dir := filepath.Join(filepath.Dir(cfg), "migrations")
 	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("expected one generated file, got %v (%v)", entries, err)
+	// The migration and the state file it leaves behind.
+	if err != nil || len(entries) != 2 || entries[1].Name() != "fixture_state.yml" {
+		t.Fatalf("expected the migration and the state file, got %v (%v)", entries, err)
 	}
 	name := entries[0].Name()
 	if !strings.HasSuffix(name, "_fixture_plan_prices.go") {
@@ -172,7 +180,7 @@ func TestARefusedDifferenceIsExitCodeTwo(t *testing.T) {
 func TestTwoBaseStatesAreRefused(t *testing.T) {
 	cfg, base := project(t, newFixture, oldFixture)
 	code, _, stderr := call(t, "generate", "-config", cfg, "-old", base, "-from-db", "-name", "x")
-	if code != 1 || !strings.Contains(stderr, "two different base states") {
+	if code != 1 || !strings.Contains(stderr, "different base states") {
 		t.Fatalf("exit %d: %s", code, stderr)
 	}
 }

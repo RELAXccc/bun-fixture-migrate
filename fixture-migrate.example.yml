@@ -12,6 +12,17 @@ fixture: fixtures/fixture.yml
 out: internal/migrations
 package: migrations
 migrator: Migrations
+# The table your migrator records applied migrations in: bun's default unless
+# you build the migrator with migrate.WithTableName. A generated migration that
+# fails deletes the record bun made of it before running it, so it runs again
+# once the database is fixed; status and plan read what was applied from here.
+migrations_table: bun_migrations
+# The state file: the fixture file as the generated migrations leave a
+# database. generate diffs against it, not against git, and rewrites it with
+# every migration, so an edit committed without a migration is still found and
+# generating twice never writes a change twice. Commit it. Default
+# <out>/fixture_state.yml.
+state: internal/migrations/fixture_state.yml
 # A table that is never empty in a seeded database. While it is empty a
 # generated migration does nothing at all: that database has not been seeded
 # yet, and dbfixture is about to load the new state by itself. Leave it out

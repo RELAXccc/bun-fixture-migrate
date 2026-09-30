@@ -1,0 +1,284 @@
+package main
+
+import (
+	"errors"
+	"flag"
+	"fmt"
+	"sort"
+	"strings"
+	"text/tabwriter"
+	"time"
+
+	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
+
+	"github.com/uptrace/bun"
+)
+
+type statusReport struct {
+	Fixture string `json:"fixture"`
+	// State is nil when the configuration has no state file.
+	State *stateInfo `json:"state"`
+	// Base is what Uncovered was worked out against, "" when there was
+	// nothing to work it out against.
+	Base string `json:"base"`
+	// Uncovered is what the fixture file changes that no migration makes,
+	// one line per model; Refused is what generate would refuse of it.
+	Uncovered []string `json:"uncovered"`
+	Refused   []string `json:"refused"`
+	// Directory is the migrations directory, "" when none is configured.
+	Directory  string          `json:"directory"`
+	Migrations []migrationInfo `json:"migrations"`
+	// Database is nil when no database was asked.
+	Database *databaseInfo `json:"database"`
+	Problems []string      `json:"problems"`
+	Notes    []string      `json:"notes"`
+}
+
+type stateInfo struct {
+	Path      string `json:"path"`
+	Exists    bool   `json:"exists"`
+	Migration string `json:"migration,omitempty"`
+}
+
+type migrationInfo struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Fixture bool   `json:"fixture"`
+	// Changes counts the changes of a fixture migration.
+	Changes int `json:"changes,omitempty"`
+	// Applied is nil for a migration the database has not applied, and for
+	// every migration when no database was asked.
+	Applied *appliedInfo `json:"applied"`
+}
+
+type appliedInfo struct {
+	Group int64     `json:"group"`
+	At    time.Time `json:"at"`
+}
+
+type databaseInfo struct {
+	Table       string `json:"table"`
+	TableExists bool   `json:"table_exists"`
+	// NotInDirectory are migrations the table records that the directory
+	// does not have: another package's, or a file that was deleted.
+	NotInDirectory []string `json:"not_in_directory"`
+}
+
+// status says where the fixture file, the migrations and a database stand.
+func status(o streams, args []string) error {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	var (
+		offline  = fs.Bool("offline", false, "do not connect to the database even when one is configured")
+		required = fs.Bool("require-applied", false, "fail unless the database has applied every migration in the directory")
+		asJSON   = fs.Bool("json", false, "write the report as JSON")
+	)
+	s, err := common(o, fs, args)
+	if err != nil {
+		return err
+	}
+	if *required && (*offline || s.cfg.Database == "") {
+		return fmt.Errorf("-require-applied needs the database")
+	}
+	r := &statusReport{Fixture: s.cfg.Fixture, Directory: s.outDir}
+	if err := s.uncovered(r); err != nil {
+		return err
+	}
+
+	var ms *fixturemigrate.Migrations
+	if s.outDir != "" {
+		if ms, err = fixturemigrate.ReadMigrations(s.outDir); err != nil {
+			return fmt.Errorf("the migrations directory: %w", err)
+		}
+		r.Problems = append(r.Problems, ms.Problems...)
+		for _, m := range ms.List {
+			info := migrationInfo{ID: m.ID(), Name: m.Name, Fixture: m.Fixture != nil}
+			if m.Fixture != nil {
+				info.Changes = len(m.Fixture.Changes)
+			}
+			r.Migrations = append(r.Migrations, info)
+		}
+	} else {
+		r.Notes = append(r.Notes, "no out directory in the configuration, so no migrations to list")
+	}
+
+	if !*offline && s.cfg.Database != "" {
+		db, err := s.connect(o.ctx)
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+		var applied map[string]fixturemigrate.Applied
+		info := &databaseInfo{Table: s.cfg.MigrationsTable}
+		err = readOnly(o.ctx, db, func(tx bun.Tx) error {
+			applied, info.TableExists, err = fixturemigrate.ReadApplied(o.ctx, tx, s.cfg.MigrationsTable)
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		r.Database = info
+		inDir := map[string]bool{}
+		for i, m := range r.Migrations {
+			inDir[m.Name] = true
+			if a, ok := applied[m.Name]; ok {
+				r.Migrations[i].Applied = &appliedInfo{Group: a.GroupID, At: a.MigratedAt}
+			}
+		}
+		for name := range applied {
+			if !inDir[name] {
+				info.NotInDirectory = append(info.NotInDirectory, name)
+			}
+		}
+		sort.Strings(info.NotInDirectory)
+	}
+
+	if *asJSON {
+		if err := writeJSON(o.stdout, r); err != nil {
+			return err
+		}
+	} else {
+		printStatus(o, r)
+	}
+
+	var failures []string
+	if n := len(r.Uncovered) + len(r.Refused); n > 0 {
+		failures = append(failures, "the fixture file has changes no migration makes")
+	}
+	if len(r.Problems) > 0 {
+		failures = append(failures, plural(len(r.Problems), "problem")+" in the migrations directory")
+	}
+	if *required {
+		pending := 0
+		for _, m := range r.Migrations {
+			if m.Applied == nil {
+				pending++
+			}
+		}
+		if pending > 0 {
+			failures = append(failures, plural(pending, "migration")+" not applied")
+		}
+	}
+	if len(failures) > 0 {
+		return exitError{3, strings.Join(failures, "; ")}
+	}
+	return nil
+}
+
+// uncovered works out what the fixture file changes against the state the
+// migrations leave a database in: the same base generate would use.
+func (s *setup) uncovered(r *statusReport) error {
+	_, head, err := s.readFixture()
+	if err != nil {
+		return err
+	}
+	var data []byte
+	if s.statePath != "" {
+		r.State = &stateInfo{Path: s.statePath}
+		state, err := fixturemigrate.ReadState(s.statePath)
+		switch {
+		case err == nil:
+			r.State.Exists, r.State.Migration = true, state.Migration
+			data, r.Base = state.Fixture, "the state file"
+		case errors.Is(err, fixturemigrate.ErrNoState):
+		default:
+			r.Problems = append(r.Problems, err.Error())
+			return nil
+		}
+	}
+	if data == nil {
+		gitData, err := gitShow(s.fixturePath, "HEAD")
+		if err != nil {
+			r.Notes = append(r.Notes, "no state file and no git history to compare the fixture file with, "+
+				"so what it changes is unknown; run baseline once the databases hold it")
+			return nil
+		}
+		data, r.Base = gitData, "HEAD"
+	}
+	old, err := s.fixtureSnapshot(data, r.Base)
+	if err != nil {
+		return err
+	}
+	res, err := fixturemigrate.Compute(s.cfg, old, head)
+	if err != nil {
+		return err
+	}
+	r.Uncovered = res.Summary()
+	for _, ref := range res.Refusals {
+		r.Refused = append(r.Refused, ref.String())
+	}
+	return nil
+}
+
+func printStatus(o streams, r *statusReport) {
+	w := tabwriter.NewWriter(o.stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(w, "fixture file\t%s\n", r.Fixture)
+	switch {
+	case r.State == nil:
+		fmt.Fprintf(w, "state file\tnone configured\n")
+	case !r.State.Exists:
+		fmt.Fprintf(w, "state file\t%s does not exist yet\n", r.State.Path)
+	default:
+		fmt.Fprintf(w, "state file\t%s, written by %s\n", r.State.Path, r.State.Migration)
+	}
+	switch {
+	case r.Base == "":
+	case len(r.Uncovered)+len(r.Refused) == 0:
+		fmt.Fprintf(w, "not migrated\tnothing: every change since %s has a migration\n", r.Base)
+	default:
+		label := "not migrated"
+		for _, line := range append(append([]string{}, r.Uncovered...), r.Refused...) {
+			fmt.Fprintf(w, "%s\t%s\n", label, line)
+			label = ""
+		}
+		fmt.Fprintf(w, "\trun: bun-fixture-migrate generate -name <what changed>\n")
+	}
+	w.Flush()
+
+	if r.Directory != "" {
+		where := "no database asked"
+		if r.Database != nil {
+			where = "applied according to " + r.Database.Table
+			if !r.Database.TableExists {
+				where = r.Database.Table + " does not exist: nothing was ever migrated there"
+			}
+		}
+		fmt.Fprintf(o.stdout, "\nmigrations in %s, %s\n", r.Directory, where)
+		w = tabwriter.NewWriter(o.stdout, 0, 4, 2, ' ', 0)
+		if len(r.Migrations) == 0 {
+			fmt.Fprintln(w, "  none")
+		}
+		for _, m := range r.Migrations {
+			state, detail := "-", ""
+			if r.Database != nil {
+				state = "pending"
+			}
+			if m.Applied != nil {
+				state = "applied"
+				detail = fmt.Sprintf("group %d, %s", m.Applied.Group, m.Applied.At.UTC().Format("2006-01-02 15:04:05"))
+			}
+			kind := ""
+			if m.Fixture {
+				kind = "fixture, " + plural(m.Changes, "change")
+			}
+			line := fmt.Sprintf("  %s\t%s\t%s", state, m.ID, kind)
+			if detail != "" {
+				line += "\t" + detail
+			}
+			fmt.Fprintln(w, strings.TrimRight(line, "\t"))
+		}
+		w.Flush()
+		if r.Database != nil && len(r.Database.NotInDirectory) > 0 {
+			fmt.Fprintf(o.stdout, "recorded in %s, not in this directory: %s\n",
+				r.Database.Table, strings.Join(r.Database.NotInDirectory, ", "))
+		}
+	}
+	if len(r.Problems) > 0 {
+		fmt.Fprintln(o.stdout, "\nproblems")
+		for _, p := range r.Problems {
+			fmt.Fprintln(o.stdout, "  "+p)
+		}
+	}
+	for _, n := range r.Notes {
+		fmt.Fprintln(o.stdout, "\nnote: "+n)
+	}
+}

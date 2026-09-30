@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"go/format"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/RELAXccc/bun-fixture-migrate/fixtureapply"
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
@@ -12,6 +14,31 @@ import (
 
 // Stamp is the layout of the timestamp in a migration file name.
 const Stamp = "20060102150405"
+
+// NextStamp is the timestamp for a new migration: now, or one second past the
+// newest migration already there, whichever is later.
+//
+// bun runs pending migrations in name order, and a fixture migration is
+// generated against the state every migration before it leaves: the previous
+// fixture migration, and the schema migration that added the column it
+// writes. A clock that is behind, or a migration somebody dated ahead, would
+// otherwise put the new one first. It also never hands out a name already
+// taken, which bun would record as one migration and run only once.
+func NextStamp(now time.Time, existing []string) string {
+	stamp := now.UTC().Format(Stamp)
+	for _, name := range existing {
+		if len(name) != len(Stamp) || name < stamp {
+			continue
+		}
+		if t, err := time.Parse(Stamp, name); err == nil {
+			stamp = t.Add(time.Second).Format(Stamp)
+			continue
+		}
+		n, _ := strconv.ParseInt(name, 10, 64)
+		stamp = fmt.Sprintf("%014d", n+1)
+	}
+	return stamp
+}
 
 // FileName is the name of the generated file: the timestamp, "fixture" and
 // the slug of name, so it sorts into the migration chain where it belongs.
@@ -57,10 +84,11 @@ func Render(cfg *Config, name, stamp string, res *Result) ([]byte, error) {
 		return nil, fmt.Errorf("nothing to write")
 	}
 	set := fixturechange.Set{
-		Name:           strings.TrimSuffix(FileName(stamp, name), ".go"),
-		SeedGuardTable: cfg.SeedGuardTable,
-		Tables:         res.Tables,
-		Changes:        res.Changes,
+		Name:            strings.TrimSuffix(FileName(stamp, name), ".go"),
+		SeedGuardTable:  cfg.SeedGuardTable,
+		MigrationsTable: cfg.MigrationsTable,
+		Tables:          res.Tables,
+		Changes:         res.Changes,
 		Policy: fixturechange.Policy{
 			MissingRow: fixturechange.Mode(cfg.Policy.MissingRow),
 			ChangedRow: fixturechange.Mode(cfg.Policy.ChangedRow),
@@ -91,8 +119,10 @@ func Render(cfg *Config, name, stamp string, res *Result) ([]byte, error) {
 	b.WriteString("// natural key, an update or a delete only touches a row that still holds the\n")
 	b.WriteString("// old values, and an insert only runs when no row with that key exists.\n")
 	b.WriteString("// A guard that matches nothing is diagnosed rather than ignored, and unless\n")
-	b.WriteString("// Policy says otherwise it fails the migration, so bun does not record a\n")
-	b.WriteString("// migration that did not happen.\n")
+	b.WriteString("// Policy says otherwise it fails the migration. A failed migration is not\n")
+	b.WriteString("// left recorded as applied: if bun recorded it before running it, which it\n")
+	b.WriteString("// does unless the migrator is built WithMarkAppliedOnSuccess(true), Apply\n")
+	b.WriteString("// removes that record from MigrationsTable so the migration runs again.\n")
 
 	b.WriteString("func init() {\n")
 	fmt.Fprintf(&b, "\t%s.MustRegister(func(ctx context.Context, db *bun.DB) error {\n", cfg.Migrator)
@@ -105,6 +135,9 @@ func Render(cfg *Config, name, stamp string, res *Result) ([]byte, error) {
 	fmt.Fprintf(&b, "\tName: %q,\n", set.Name)
 	if set.SeedGuardTable != "" {
 		fmt.Fprintf(&b, "\tSeedGuardTable: %q,\n", set.SeedGuardTable)
+	}
+	if set.MigrationsTable != "" {
+		fmt.Fprintf(&b, "\tMigrationsTable: %q,\n", set.MigrationsTable)
 	}
 	b.WriteString("\tTables: fixturechange.Tables{\n")
 	for _, model := range sortedKeys(res.Tables) {
