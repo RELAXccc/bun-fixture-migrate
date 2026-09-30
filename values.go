@@ -1,10 +1,16 @@
 package fixturemigrate
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"math/big"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // A value's text is what gets compared and what a migration writes, so it has
@@ -214,4 +220,94 @@ func sameScalar(a, b string) bool {
 	ca, okA := canonicalDecimal(a)
 	cb, okB := canonicalDecimal(b)
 	return okA && okB && ca == cb
+}
+
+// yamlJSON writes a YAML mapping or sequence as JSON, one way: keys sorted
+// the way encoding/json sorts a map's, no spaces, every scalar by its YAML
+// type -- an integer exactly, a timestamp as RFC 3339 -- so two spellings of
+// the same structure compare equal. It is what a jsonb column and an array
+// column are compared and written as; PostgreSQL turns the JSON into either.
+func yamlJSON(n *yaml.Node) (string, error) {
+	var b strings.Builder
+	if err := writeYAMLJSON(&b, n); err != nil {
+		return "", err
+	}
+	return b.String(), nil
+}
+
+func writeYAMLJSON(b *strings.Builder, n *yaml.Node) error {
+	switch n.Kind {
+	case yaml.DocumentNode:
+		if len(n.Content) != 1 {
+			return fmt.Errorf("an empty document")
+		}
+		return writeYAMLJSON(b, n.Content[0])
+	case yaml.AliasNode:
+		return writeYAMLJSON(b, n.Alias)
+	case yaml.MappingNode:
+		type pair struct {
+			key   string
+			value *yaml.Node
+		}
+		pairs := make([]pair, 0, len(n.Content)/2)
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			key := n.Content[i]
+			if key.Kind != yaml.ScalarNode || key.ShortTag() == "!!merge" {
+				return fmt.Errorf("line %d: a mapping key JSON cannot hold", key.Line)
+			}
+			pairs = append(pairs, pair{scalarText(Cell{Text: key.Value, Tag: key.ShortTag()}), n.Content[i+1]})
+		}
+		sort.Slice(pairs, func(i, j int) bool { return pairs[i].key < pairs[j].key })
+		b.WriteByte('{')
+		for i, p := range pairs {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(jsonString(p.key))
+			b.WriteByte(':')
+			if err := writeYAMLJSON(b, p.value); err != nil {
+				return err
+			}
+		}
+		b.WriteByte('}')
+	case yaml.SequenceNode:
+		b.WriteByte('[')
+		for i, item := range n.Content {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			if err := writeYAMLJSON(b, item); err != nil {
+				return err
+			}
+		}
+		b.WriteByte(']')
+	case yaml.ScalarNode:
+		text := scalarText(Cell{Text: n.Value, Tag: n.ShortTag()})
+		switch n.ShortTag() {
+		case "!!null":
+			b.WriteString("null")
+		case "!!bool", "!!int":
+			b.WriteString(text)
+		case "!!float":
+			if _, ok := canonicalDecimal(text); !ok {
+				return fmt.Errorf("line %d: %s has no JSON spelling", n.Line, n.Value)
+			}
+			b.WriteString(text)
+		default:
+			b.WriteString(jsonString(text))
+		}
+	default:
+		return fmt.Errorf("line %d: a YAML node JSON cannot hold", n.Line)
+	}
+	return nil
+}
+
+// jsonString quotes a string for JSON, without encoding/json's escaping of
+// <, > and &, which is for HTML and would only make the text harder to read.
+func jsonString(s string) string {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	enc.Encode(s)
+	return strings.TrimSuffix(b.String(), "\n")
 }

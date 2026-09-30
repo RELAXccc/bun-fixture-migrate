@@ -90,6 +90,9 @@ func Export(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table, head
 				if err != nil {
 					return nil, err
 				}
+				if structured(column) && !v.IsNull && v.Ref == nil {
+					text = v.Lit
+				}
 				write(col, text, hazardComment(v, column))
 			}
 		}
@@ -147,6 +150,14 @@ func exportValue(cfg *Config, model, col string, v fixturechange.Value, column d
 			model, col, v.Lit)
 	}
 	return yamlScalar(v.Lit, column.Type), nil
+}
+
+// structured reports a column whose values are JSON as the tool reads them:
+// json and jsonb, and arrays, which are read as JSON arrays. JSON is YAML, so
+// the value is written as it is, a flow mapping or sequence dbfixture decodes
+// into a map, a struct or a slice.
+func structured(c dbschema.Column) bool {
+	return c.Type == "json" || c.Type == "jsonb" || c.Category == "A"
 }
 
 // hazardComment is the warning that goes next to a value the fixture loader

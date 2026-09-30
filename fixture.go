@@ -3,7 +3,6 @@ package fixturemigrate
 import (
 	"fmt"
 	"regexp"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -24,9 +23,9 @@ type Cell struct {
 	Tag string
 	// IsNull is true for an explicit YAML null.
 	IsNull bool
-	// Structured is true when the value was a mapping or a sequence. The
-	// generator cannot turn one into a column value and says so if such a
-	// column takes part in a diff.
+	// Structured is true when the value was a mapping or a sequence. Text is
+	// then its canonical JSON, which is what a jsonb, json or array column is
+	// compared and written as.
 	Structured bool
 }
 
@@ -82,11 +81,11 @@ func cellOf(node yaml.Node) (Cell, error) {
 	case node.Kind == 0:
 		return Cell{IsNull: true}, nil
 	default:
-		out, err := yaml.Marshal(&node)
+		text, err := yamlJSON(&node)
 		if err != nil {
 			return Cell{}, err
 		}
-		return Cell{Text: strings.TrimSpace(string(out)), Structured: true}, nil
+		return Cell{Text: text, Structured: true}, nil
 	}
 }
 

@@ -123,8 +123,13 @@ func (ix *index) value(model, col string, row Row) (fixturechange.Value, bool, e
 		return fixturechange.Value{}, false, nil
 	}
 	if cell.Structured {
-		return fixturechange.Value{}, false, fmt.Errorf(
-			"%s.%s is a mapping or a sequence; this tool only handles scalar columns, put it in ignore", model, col)
+		// A mapping or a sequence is a jsonb, json or array value, carried as
+		// its JSON. It cannot be a reference.
+		if _, isRef := m.References[col]; isRef {
+			return fixturechange.Value{}, false, fmt.Errorf(
+				"%s.%s is a reference and holds a mapping or a sequence", model, col)
+		}
+		return fixturechange.Lit(cell.Text), true, nil
 	}
 	if cell.IsNull {
 		return fixturechange.Null(), true, nil

@@ -158,10 +158,10 @@ func literalOf(e *Entry, m *Model, col string) (string, bool) {
 // value too long for the column compare equal to one that fits.
 func castType(c dbschema.Column) string {
 	switch c.Type {
-	case "varchar":
-		return "varchar"
-	case "bpchar":
-		return "bpchar"
+	case "varchar", "bpchar":
+		return c.Type
+	case "_varchar", "_bpchar":
+		return c.Type[1:] + "[]"
 	}
 	return c.FullType
 }
@@ -196,8 +196,15 @@ func castValues(ctx context.Context, db bun.IDB, column dbschema.Column,
 
 func castInto(ctx context.Context, db bun.IDB, column dbschema.Column, values []string, canon map[string]string) error {
 	rowsSQL := strings.TrimSuffix(strings.Repeat("(?::text),", len(values)), ",")
-	query := "SELECT t.v, " + readExpr(column.Type, "t.v::"+castType(column)) +
-		" FROM (VALUES " + rowsSQL + ") AS t(v)"
+	expr := readExpr(column, "t.v::"+castType(column))
+	if column.Category == "A" {
+		// A YAML sequence arrives as a JSON array; a string in PostgreSQL's
+		// own array syntax is taken as that.
+		expr = "CASE WHEN left(ltrim(t.v), 1) = '[' THEN " +
+			readExpr(column, "ARRAY(SELECT jsonb_array_elements_text(t.v::jsonb))::"+castType(column)) +
+			" ELSE " + expr + " END"
+	}
+	query := "SELECT t.v, " + expr + " FROM (VALUES " + rowsSQL + ") AS t(v)"
 	args := make([]any, len(values))
 	for i, v := range values {
 		args[i] = v

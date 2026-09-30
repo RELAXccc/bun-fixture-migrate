@@ -190,7 +190,7 @@ func selectQuery(cfg *Config, m *Model, table *dbschema.Table, cols []string) (s
 	selects := make([]string, 0, len(cols)+1)
 	idColumn, hasID := table.Column(m.ID)
 	if hasID {
-		selects = append(selects, readExpr(idColumn.Type, idQuoted))
+		selects = append(selects, readExpr(idColumn, idQuoted))
 	}
 	for _, col := range cols {
 		q, err := quoteIdent(col)
@@ -198,7 +198,7 @@ func selectQuery(cfg *Config, m *Model, table *dbschema.Table, cols []string) (s
 			return "", false, err
 		}
 		column, _ := table.Column(col)
-		selects = append(selects, readExpr(column.Type, q))
+		selects = append(selects, readExpr(column, q))
 	}
 	qualified, err := quoteQualified(cfg.QualifiedTable(m))
 	if err != nil {
@@ -228,13 +228,17 @@ func selectQuery(cfg *Config, m *Model, table *dbschema.Table, cols []string) (s
 // readExpr is how a column is read as text. PostgreSQL's own text is the
 // value for nearly every type, in the session's fixed settings; json keeps
 // the spelling it was written in, so it is read through jsonb, which has one;
-// money's text depends on the locale, so it is read as the number it is.
-func readExpr(typ, expr string) string {
-	switch typ {
-	case "json":
+// money's text depends on the locale, so it is read as the number it is; and
+// an array is read as JSON, which is what a YAML sequence in the fixture file
+// becomes, and what an export writes back as one.
+func readExpr(c dbschema.Column, expr string) string {
+	switch {
+	case c.Type == "json":
 		return "(" + expr + ")::jsonb::text"
-	case "money":
+	case c.Type == "money":
 		return "(" + expr + ")::numeric::text"
+	case c.Category == "A":
+		return "to_jsonb(" + expr + ")::text"
 	}
 	return "(" + expr + ")::text"
 }

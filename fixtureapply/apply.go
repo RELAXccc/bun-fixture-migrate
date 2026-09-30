@@ -447,7 +447,8 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 		}
 	}
 
-	r := &runner{tx: tx, set: set, refs: map[string]string{}, resync: map[string]bool{}}
+	r := &runner{tx: tx, set: set, refs: map[string]string{}, resync: map[string]bool{},
+		types: map[string]map[string]colType{}}
 	order := make([]int, len(set.Changes))
 	for i := range order {
 		order[i] = i
@@ -596,6 +597,70 @@ type runner struct {
 	// resync collects the models that got an explicit id written into a
 	// sequence-backed table.
 	resync map[string]bool
+	// types holds, per model, the types of its table's columns, read once.
+	types map[string]map[string]colType
+}
+
+// colType is what a comparison needs to know about a column's type.
+type colType struct {
+	// cast is the type a value is cast to before it is compared: the
+	// column's own, without a length for the character types, since an
+	// explicit cast to varchar(3) truncates without a word.
+	cast string
+	// base is the name of the type, or of a domain's base type.
+	base string
+	// array is true for an array type.
+	array bool
+	// equality is true when the type has an = operator of its own. json,
+	// xml, point and the other geometric types do not, and neither, in
+	// pg_operator's terms, do arrays and enums, which compare through anyarray
+	// and anyenum.
+	equality bool
+}
+
+// colTypes reads the column types of a model's table, once per run.
+func (r *runner) colTypes(ctx context.Context, model string) (map[string]colType, error) {
+	if types, ok := r.types[model]; ok {
+		return types, nil
+	}
+	table, err := quoteIdent(r.set.Tables[model].Name)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.tx.QueryContext(ctx, `
+SELECT a.attname, format_type(a.atttypid, a.atttypmod), format_type(a.atttypid, NULL), bt.typname,
+       bt.typcategory = 'A',
+       EXISTS (SELECT 1 FROM pg_operator o WHERE o.oprname = '=' AND o.oprleft = bt.oid AND o.oprright = bt.oid)
+FROM pg_attribute a
+JOIN pg_type t ON t.oid = a.atttypid
+JOIN pg_type bt ON bt.oid = CASE WHEN t.typbasetype <> 0 THEN t.typbasetype ELSE t.oid END
+WHERE a.attrelid = ?::regclass AND a.attnum > 0 AND NOT a.attisdropped`, table)
+	if err != nil {
+		return nil, fmt.Errorf("read the column types of %s: %w", r.set.Tables[model].Name, err)
+	}
+	defer rows.Close()
+	types := map[string]colType{}
+	for rows.Next() {
+		var name, full, bare string
+		var ct colType
+		if err := rows.Scan(&name, &full, &bare, &ct.base, &ct.array, &ct.equality); err != nil {
+			return nil, err
+		}
+		ct.cast = full
+		switch ct.base {
+		case "varchar", "bpchar", "_varchar", "_bpchar":
+			ct.cast = bare
+		}
+		types[name] = ct
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	r.types[model] = types
+	return types, nil
 }
 
 func (r *runner) exec(ctx context.Context, c fixturechange.Change) (outcome, error) {
@@ -635,7 +700,7 @@ func (r *runner) insert(ctx context.Context, c fixturechange.Change, t fixturech
 	var args []any
 	explicitID := false
 	for _, col := range sortedColumns(c.New) {
-		expr, a, err := r.value(ctx, c.New[col])
+		expr, a, err := r.value(ctx, c.Model, col, c.New[col])
 		if err != nil {
 			return outcome{}, err
 		}
@@ -654,7 +719,7 @@ func (r *runner) insert(ctx context.Context, c fixturechange.Change, t fixturech
 	// exists under a different id is somebody else's row, not ours to insert
 	// again: keying on the id as well is how a second copy appears, and then
 	// every later lookup by name finds two.
-	where, whereArgs, err := r.match(ctx, c.Key)
+	where, whereArgs, err := r.match(ctx, c.Model, c.Key)
 	if err != nil {
 		return outcome{}, err
 	}
@@ -678,7 +743,7 @@ func (r *runner) update(ctx context.Context, c fixturechange.Change, t fixturech
 	var sets []string
 	var args []any
 	for _, col := range sortedColumns(c.New) {
-		expr, a, err := r.value(ctx, c.New[col])
+		expr, a, err := r.value(ctx, c.Model, col, c.New[col])
 		if err != nil {
 			return outcome{}, err
 		}
@@ -730,7 +795,7 @@ func (r *runner) delete(ctx context.Context, c fixturechange.Change, t fixturech
 func (r *runner) diagnose(ctx context.Context, c fixturechange.Change, t fixturechange.Table, table string,
 	wanted fixturechange.Values) (outcome, error) {
 
-	byKey, err := r.count(ctx, table, c.Key)
+	byKey, err := r.count(ctx, c.Model, table, c.Key)
 	if err != nil {
 		return outcome{}, err
 	}
@@ -744,7 +809,7 @@ func (r *runner) diagnose(ctx context.Context, c fixturechange.Change, t fixture
 			t.Name, keyLabel(c.Key))}, nil
 	}
 	if len(wanted) > 0 {
-		already, err := r.count(ctx, table, c.Key, wanted)
+		already, err := r.count(ctx, c.Model, table, c.Key, wanted)
 		if err != nil {
 			return outcome{}, err
 		}
@@ -753,12 +818,12 @@ func (r *runner) diagnose(ctx context.Context, c fixturechange.Change, t fixture
 		}
 	}
 	if c.ID != "" {
-		withID, err := r.count(ctx, table, c.Key, fixturechange.Values{t.ID: fixturechange.Lit(c.ID)})
+		withID, err := r.count(ctx, c.Model, table, c.Key, fixturechange.Values{t.ID: fixturechange.Lit(c.ID)})
 		if err != nil {
 			return outcome{}, err
 		}
 		if withID == 0 {
-			ids, err := r.idsFor(ctx, table, t, c.Key)
+			ids, err := r.idsFor(ctx, c.Model, table, t, c.Key)
 			if err != nil {
 				return outcome{}, err
 			}
@@ -778,7 +843,7 @@ func (r *runner) diagnose(ctx context.Context, c fixturechange.Change, t fixture
 func (r *runner) diagnoseInsert(ctx context.Context, c fixturechange.Change, t fixturechange.Table,
 	table string) (outcome, error) {
 
-	same, err := r.count(ctx, table, c.Key, withoutColumn(c.New, t.ID))
+	same, err := r.count(ctx, c.Model, table, c.Key, withoutColumn(c.New, t.ID))
 	if err != nil {
 		return outcome{}, err
 	}
@@ -796,7 +861,7 @@ func (r *runner) diagnoseInsert(ctx context.Context, c fixturechange.Change, t f
 func (r *runner) idTakenByAnotherRow(ctx context.Context, c fixturechange.Change, t fixturechange.Table,
 	table, id string) (string, error) {
 
-	keyWhere, keyArgs, err := r.match(ctx, c.Key)
+	keyWhere, keyArgs, err := r.match(ctx, c.Model, c.Key)
 	if err != nil {
 		return "", err
 	}
@@ -830,10 +895,10 @@ func (r *runner) idTakenByAnotherRow(ctx context.Context, c fixturechange.Change
 	return t.ID + " = " + found, nil
 }
 
-func (r *runner) idsFor(ctx context.Context, table string, t fixturechange.Table,
+func (r *runner) idsFor(ctx context.Context, model, table string, t fixturechange.Table,
 	key fixturechange.Values) ([]string, error) {
 
-	where, args, err := r.match(ctx, key)
+	where, args, err := r.match(ctx, model, key)
 	if err != nil {
 		return nil, err
 	}
@@ -861,8 +926,8 @@ func (r *runner) idsFor(ctx context.Context, table string, t fixturechange.Table
 	return out, rows.Close()
 }
 
-func (r *runner) count(ctx context.Context, table string, sets ...fixturechange.Values) (int64, error) {
-	where, args, err := r.matchAll(ctx, sets...)
+func (r *runner) count(ctx context.Context, model, table string, sets ...fixturechange.Values) (int64, error) {
+	where, args, err := r.matchAll(ctx, model, sets...)
 	if err != nil {
 		return 0, err
 	}
@@ -900,25 +965,25 @@ func (r *runner) guard(ctx context.Context, c fixturechange.Change, t fixturecha
 	if c.ID != "" {
 		sets = append(sets, fixturechange.Values{t.ID: fixturechange.Lit(c.ID)})
 	}
-	return r.matchAll(ctx, sets...)
+	return r.matchAll(ctx, c.Model, sets...)
 }
 
 // match renders "col IS NOT DISTINCT FROM <value>" for every column, joined by
 // AND. IS NOT DISTINCT FROM rather than = so a NULL compares like any other
 // value.
-func (r *runner) match(ctx context.Context, values fixturechange.Values) (string, []any, error) {
+func (r *runner) match(ctx context.Context, model string, values fixturechange.Values) (string, []any, error) {
 	var parts []string
 	var args []any
 	for _, col := range sortedColumns(values) {
-		expr, a, err := r.value(ctx, values[col])
+		expr, a, err := r.value(ctx, model, col, values[col])
 		if err != nil {
 			return "", nil, err
 		}
-		q, err := quoteIdent(col)
+		part, err := r.compare(ctx, model, col, expr)
 		if err != nil {
 			return "", nil, err
 		}
-		parts = append(parts, q+" IS NOT DISTINCT FROM "+expr)
+		parts = append(parts, part)
 		args = append(args, a...)
 	}
 	if len(parts) == 0 {
@@ -927,14 +992,14 @@ func (r *runner) match(ctx context.Context, values fixturechange.Values) (string
 	return strings.Join(parts, " AND "), args, nil
 }
 
-func (r *runner) matchAll(ctx context.Context, sets ...fixturechange.Values) (string, []any, error) {
+func (r *runner) matchAll(ctx context.Context, model string, sets ...fixturechange.Values) (string, []any, error) {
 	var parts []string
 	var args []any
 	for _, values := range sets {
 		if len(values) == 0 {
 			continue
 		}
-		part, a, err := r.match(ctx, values)
+		part, a, err := r.match(ctx, model, values)
 		if err != nil {
 			return "", nil, err
 		}
@@ -951,11 +1016,24 @@ func (r *runner) matchAll(ctx context.Context, sets ...fixturechange.Values) (st
 // looked up now, not turned into a subselect: a subselect that finds nothing
 // yields NULL, and the statement around it would happily write that NULL as a
 // foreign key, or match a row whose column is NULL, and report a row affected.
-func (r *runner) value(ctx context.Context, v fixturechange.Value) (string, []any, error) {
+//
+// A literal is text, which PostgreSQL reads as the column's type. The one
+// exception is an array column given a JSON array, which is how a YAML
+// sequence arrives: its elements are unpacked and cast to the array's type.
+func (r *runner) value(ctx context.Context, model, col string, v fixturechange.Value) (string, []any, error) {
 	switch {
 	case v.IsNull:
 		return "NULL", nil, nil
 	case v.Ref == nil:
+		if strings.HasPrefix(strings.TrimSpace(v.Lit), "[") {
+			types, err := r.colTypes(ctx, model)
+			if err != nil {
+				return "", nil, err
+			}
+			if ct, ok := types[col]; ok && ct.array {
+				return "ARRAY(SELECT jsonb_array_elements_text(?::jsonb))::" + ct.cast, []any{v.Lit}, nil
+			}
+		}
 		return "?", []any{v.Lit}, nil
 	}
 	id, err := r.resolve(ctx, *v.Ref)
@@ -963,6 +1041,33 @@ func (r *runner) value(ctx context.Context, v fixturechange.Value) (string, []an
 		return "", nil, err
 	}
 	return "?", []any{id}, nil
+}
+
+// compare is "col IS NOT DISTINCT FROM value", typed. The value is cast to
+// the column's type first, so it compares as what the column would hold:
+// 1.005 in a numeric(10,2) is 1.01, an upper-case uuid is the lower-case one.
+// A json column compares through jsonb, and a type without an equality of its
+// own through the text of both sides; for json, xml or point the bare
+// comparison is an error, and it would fail the migration at deploy time.
+func (r *runner) compare(ctx context.Context, model, col, value string) (string, error) {
+	q, err := quoteIdent(col)
+	if err != nil {
+		return "", err
+	}
+	types, err := r.colTypes(ctx, model)
+	if err != nil {
+		return "", err
+	}
+	ct, ok := types[col]
+	switch {
+	case !ok:
+		return q + " IS NOT DISTINCT FROM " + value, nil
+	case ct.base == "json":
+		return q + "::jsonb IS NOT DISTINCT FROM (" + value + ")::jsonb", nil
+	case ct.equality:
+		return q + " IS NOT DISTINCT FROM (" + value + ")::" + ct.cast, nil
+	}
+	return q + "::text IS NOT DISTINCT FROM ((" + value + ")::" + ct.cast + ")::text", nil
 }
 
 func (r *runner) resolve(ctx context.Context, ref fixturechange.Ref) (string, error) {

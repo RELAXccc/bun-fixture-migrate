@@ -208,3 +208,40 @@ func TestExportWritesTimesAsYamlTimestamps(t *testing.T) {
 		}
 	}
 }
+
+func TestYamlJSONIsOneSpelling(t *testing.T) {
+	json := func(src string) (string, error) {
+		var node yaml.Node
+		if err := yaml.Unmarshal([]byte(src), &node); err != nil {
+			t.Fatal(err)
+		}
+		return yamlJSON(node.Content[0])
+	}
+	for src, want := range map[string]string{
+		"{b: 1, a: 2}":                    `{"a":2,"b":1}`,
+		"{a: 1.50, b: 017, c: 0x1F}":      `{"a":1.5,"b":15,"c":31}`,
+		`{s: "a <b> & c", n: ~, t: true}`: `{"n":null,"s":"a <b> & c","t":true}`,
+		`[x, "01", 1, [a]]`:               `["x","01",1,["a"]]`,
+		"{when: 2026-01-01 10:00:00}":     `{"when":"2026-01-01T10:00:00Z"}`,
+		"{1: one}":                        `{"1":"one"}`,
+		"[]":                              `[]`,
+		"{}":                              `{}`,
+		"{a: &x [1], b: *x}":              `{"a":[1],"b":[1]}`,
+	} {
+		got, err := json(src)
+		if err != nil || got != want {
+			t.Errorf("%s: %s (%v), want %s", src, got, err, want)
+		}
+	}
+	for _, src := range []string{"[.nan]", "{a: .inf}", "{[1]: x}"} {
+		if got, err := json(src); err == nil {
+			t.Errorf("%s: %s, JSON cannot hold it", src, got)
+		}
+	}
+	// Two spellings of one structure are one text.
+	a, _ := json("{rollout: 50, regions: [eu, us]}")
+	b, _ := json("regions:\n  - eu\n  - us\nrollout: 50.0\n")
+	if a != b {
+		t.Fatalf("%s != %s", a, b)
+	}
+}
