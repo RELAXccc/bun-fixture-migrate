@@ -321,6 +321,7 @@ func lint(o streams, db *bun.DB, cfg *fixturemigrate.Config, snap *fixturemigrat
 	before := len(snap.Findings)
 	fixturemigrate.LintColumns(cfg, snap, tables)
 	fixturemigrate.LintZeroDefaults(cfg, snap, tables)
+	fixturemigrate.LintNullDefaults(cfg, snap, tables)
 	mode, findings := cfg.Worst(snap.Findings[before:])
 	if len(findings) == 0 {
 		return nil
@@ -377,6 +378,7 @@ func export(o streams, args []string) error {
 		return err
 	}
 	fixturemigrate.LintZeroDefaults(s.cfg, snap, tables)
+	fixturemigrate.LintNullDefaults(s.cfg, snap, tables)
 	mode, findings := s.cfg.Worst(snap.Findings)
 
 	header := []string{
@@ -439,6 +441,7 @@ func check(o streams, args []string) error {
 	}
 	fixturemigrate.LintColumns(s.cfg, head, tables)
 	fixturemigrate.LintZeroDefaults(s.cfg, head, tables)
+	fixturemigrate.LintNullDefaults(s.cfg, head, tables)
 	database, err := databaseSnapshot(db, s.cfg, head)
 	if err != nil {
 		return err

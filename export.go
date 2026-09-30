@@ -135,6 +135,14 @@ func exportValue(cfg *Config, model, col string, v fixturechange.Value, column d
 		}
 		return fmt.Sprintf("'{{ $.%s.%s.%s }}'", v.Ref.Model, anchor, camel(target.ID)), nil
 	}
+	// dbfixture evaluates any string holding "{{ ... }}" as a template when it
+	// loads the file, whatever the column, so this value cannot be written
+	// down in a way that loads back as itself.
+	if anyTemplate.MatchString(v.Lit) {
+		return "", fmt.Errorf("%s.%s holds %q, which dbfixture would evaluate as a template when it loads the "+
+			"file instead of storing it; the export cannot reproduce it: change the value, or ignore the column",
+			model, col, v.Lit)
+	}
 	return yamlScalar(v.Lit, column.Type), nil
 }
 
@@ -143,7 +151,15 @@ func exportValue(cfg *Config, model, col string, v fixturechange.Value, column d
 // column that has one, so this exact line, loaded back, produces something
 // else.
 func hazardComment(v fixturechange.Value, column dbschema.Column) string {
-	if v.Ref != nil || v.IsNull {
+	if v.IsNull {
+		def, ok := column.NonNullDefault()
+		if !ok {
+			return ""
+		}
+		return fmt.Sprintf("ROUND-TRIP HAZARD: the column defaults to %s and bun writes DEFAULT for a nil pointer "+
+			"or a nullzero field, so loading this file stores %s here, not NULL", def, def)
+	}
+	if v.Ref != nil {
 		return ""
 	}
 	zero, known := column.ZeroText()

@@ -110,6 +110,9 @@ const (
 	// FindingZeroDefault is a zero written into a column whose database
 	// default is something else, which bun does not write.
 	FindingZeroDefault FindingKind = "zero against a default"
+	// FindingNullDefault is an explicit null written into a column that has a
+	// default, which bun turns into DEFAULT for a pointer or nullzero field.
+	FindingNullDefault FindingKind = "null against a default"
 	// FindingUnknownColumn is a column in the fixture file that the table does
 	// not have.
 	FindingUnknownColumn FindingKind = "unknown column"

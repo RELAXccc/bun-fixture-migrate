@@ -68,6 +68,17 @@ policy:
   # it off does not make the problem go away, it makes it quiet.
   zero_default: error
 
+  # A fixture row writes an explicit null (~) into a column that has a default.
+  #   error  refuse (default)
+  #   warn   report it
+  #   ignore do not look
+  # bun sends DEFAULT rather than NULL for a nil pointer, and for a zero in a
+  # nullzero field, which is how a nullable column is usually modelled. So the
+  # file says null and the database holds the default. Only a field such as
+  # sql.NullString without either tag writes the NULL; set warn or ignore if
+  # that is how your models spell nullable columns.
+  null_default: error
+
   # Two rows of one model share a natural key in the database.
   #   error  refuse (default)
   #   warn   report it

@@ -307,3 +307,81 @@ func TestFindingsByKindGroupsAndSorts(t *testing.T) {
 		t.Fatalf("findings of one kind are sorted by model and row: %+v", dupes)
 	}
 }
+
+// A value dbfixture would read as a template does not load back as itself.
+func TestExportRefusesAValueDbfixtureWouldEvaluate(t *testing.T) {
+	cfg := testConfig(t)
+	state := snap(t, cfg, base, "the database")
+	for _, e := range state.Entries["Currency"] {
+		e.Cells["symbol"] = fixturechange.Lit("{{ now }}")
+	}
+	_, err := Export(cfg, state, testTables(), nil)
+	if err == nil || !strings.Contains(err.Error(), "Currency.symbol") {
+		t.Fatalf("expected the value to be refused, got %v", err)
+	}
+}
+
+// nullTables is testTables with a default on the nullable note column.
+func nullTables() map[string]*dbschema.Table {
+	tables := testTables()
+	for i, c := range tables["public.plans"].Columns {
+		if c.Name == "note" {
+			tables["public.plans"].Columns[i].Default = "'none'::text"
+		}
+	}
+	return tables
+}
+
+func TestLintNullDefaults(t *testing.T) {
+	cfg := testConfig(t)
+	text := replace(t, base, "      seats: 10\n", "      seats: 10\n      note: ~\n")
+	state := snap(t, cfg, text, "fixture.yml")
+	LintNullDefaults(cfg, state, testTables())
+	if len(state.Findings) != 0 {
+		t.Fatalf("a null into a column without a default is stored as NULL: %+v", state.Findings)
+	}
+	LintNullDefaults(cfg, state, nullTables())
+	if len(state.Findings) != 1 || state.Findings[0].Kind != FindingNullDefault {
+		t.Fatalf("expected the null to be reported, got %+v", state.Findings)
+	}
+	if !strings.Contains(state.Findings[0].Detail, "note is null, but the column defaults to none") {
+		t.Fatalf("the finding has to say what will happen: %q", state.Findings[0].Detail)
+	}
+	if cfg.FindingMode(FindingNullDefault) != ModeError {
+		t.Fatal("the null default is strict by default")
+	}
+}
+
+func TestExportMarksTheNullDefaultHazard(t *testing.T) {
+	cfg := testConfig(t)
+	state := snap(t, cfg, replace(t, base, "      seats: 10\n", "      seats: 10\n      note: ~\n"), "the database")
+	for _, model := range state.Order {
+		for _, e := range state.Entries[model] {
+			e.Anchor = anchorOf(e.Key)
+		}
+	}
+	data, err := Export(cfg, state, nullTables(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "note: ~  # ROUND-TRIP HAZARD: the column defaults to none") {
+		t.Fatalf("the null has to be marked on its line:\n%s", data)
+	}
+}
+
+// A generated column cannot be written by anybody, so a fixture file that
+// writes one does not load.
+func TestLintColumnsReportsAGeneratedColumn(t *testing.T) {
+	cfg := testConfig(t)
+	tables := testTables()
+	for i, c := range tables["public.plans"].Columns {
+		if c.Name == "seats" {
+			tables["public.plans"].Columns[i].Generated = true
+		}
+	}
+	state := snap(t, cfg, base, "fixture.yml")
+	LintColumns(cfg, state, tables)
+	if len(state.Findings) != 1 || !strings.Contains(state.Findings[0].Detail, "generates it") {
+		t.Fatalf("expected seats to be reported, got %+v", state.Findings)
+	}
+}

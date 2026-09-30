@@ -36,6 +36,31 @@ func TestLiteralDefault(t *testing.T) {
 	}
 }
 
+// What an INSERT that says DEFAULT puts into the column, for the null half of
+// the round-trip hazard. A NULL default and a generation expression are not
+// defaults of that kind.
+func TestNonNullDefault(t *testing.T) {
+	for _, tc := range []struct {
+		col  Column
+		want string
+		has  bool
+	}{
+		{Column{}, "", false},
+		{Column{Default: "NULL::text"}, "", false},
+		{Column{Default: "NULL"}, "", false},
+		{Column{Default: "'none'::text"}, "none", true},
+		{Column{Default: "0"}, "0", true},
+		{Column{Default: "now()"}, "now()", true},
+		{Column{Default: "nextval('t_x_seq'::regclass)"}, "nextval('t_x_seq'::regclass)", true},
+		{Column{Default: "(price * 2)", Generated: true}, "", false},
+	} {
+		got, ok := tc.col.NonNullDefault()
+		if ok != tc.has || got != tc.want {
+			t.Errorf("NonNullDefault(%+v) = %q, %v; want %q, %v", tc.col, got, ok, tc.want, tc.has)
+		}
+	}
+}
+
 // The round-trip hazard: a column whose default is not the type's zero cannot
 // hold that zero through a bun insert, because bun writes DEFAULT instead.
 func TestZeroIsNotDefault(t *testing.T) {

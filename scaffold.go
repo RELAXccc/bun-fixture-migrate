@@ -153,6 +153,12 @@ func Scaffold(tables map[string]*dbschema.Table, only []string, schema string) [
 				"    # not produce 0 in the database. policy.zero_default decides what happens\n" +
 				"    # when one does: " + strings.Join(hazards, ", ") + "\n")
 		}
+		if hazards := nullHazardColumns(t, id); len(hazards) > 0 {
+			b.WriteString("    # These nullable columns have a default. bun writes DEFAULT, not NULL,\n" +
+				"    # for a nil pointer or a nullzero field, so a fixture row saying ~ here\n" +
+				"    # will not produce NULL in the database. policy.null_default decides what\n" +
+				"    # happens when one does: " + strings.Join(hazards, ", ") + "\n")
+		}
 	}
 	return []byte(b.String())
 }
@@ -203,6 +209,22 @@ func hazardColumns(t *dbschema.Table) []string {
 		if hazard, stored := c.ZeroIsNotDefault(); hazard {
 			zero, _ := c.ZeroText()
 			out = append(out, fmt.Sprintf("%s defaults to %s, its zero is %s", c.Name, stored, zeroLabel(zero)))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// nullHazardColumns are the nullable columns with a default: a ~ in a fixture
+// row loads as the default there, through a pointer or a nullzero field.
+func nullHazardColumns(t *dbschema.Table, id string) []string {
+	var out []string
+	for _, c := range t.Columns {
+		if c.Name == id || !c.Nullable {
+			continue
+		}
+		if def, ok := c.NonNullDefault(); ok {
+			out = append(out, fmt.Sprintf("%s defaults to %s", c.Name, def))
 		}
 	}
 	sort.Strings(out)
@@ -302,6 +324,17 @@ policy:
   # and the database holds the default. This is the check worth having. Turning
   # it off does not make the problem go away, it makes it quiet.
   zero_default: error
+
+  # A fixture row writes an explicit null (~) into a column that has a default.
+  #   error  refuse (default)
+  #   warn   report it
+  #   ignore do not look
+  # bun sends DEFAULT rather than NULL for a nil pointer, and for a zero in a
+  # nullzero field, which is how a nullable column is usually modelled. So the
+  # file says null and the database holds the default. Only a field such as
+  # sql.NullString without either tag writes the NULL; set warn or ignore if
+  # that is how your models spell nullable columns.
+  null_default: error
 
   # Two rows of one model share a natural key in the database.
   #   error  refuse (default)

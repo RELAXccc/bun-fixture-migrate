@@ -8,43 +8,84 @@ import (
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 )
 
-// index lets one fixture document resolve the references inside it.
+// index lets one fixture document resolve the references inside it, the way
+// dbfixture resolves them while it loads the file.
+//
+// dbfixture evaluates a row's templates when it reaches the row, against the
+// rows it has inserted so far, and registers each row under its "_id" -- or,
+// for a row without one whose model has a single primary key, under "pk" and
+// that key ("pk3") -- replacing whatever was registered under that name
+// before. So a template names the latest row above it with that anchor, and a
+// template naming a row further down fails to load. byAnchor is filled in the
+// same order, which is what makes a file this tool accepts a file dbfixture
+// can load.
 type index struct {
-	cfg      *Config
-	rows     map[string][]Row
+	cfg *Config
+	// byAnchor holds the rows read so far, per model, by anchor.
 	byAnchor map[string]map[string]Row
-	byID     map[string]map[string]Row
+	// defined holds every anchor of the file, so a forward reference can be
+	// told apart from a reference to nothing.
+	defined map[string]map[string]bool
+	// byID holds every row of the file by its id, for a reference column that
+	// holds a plain id. That is the database's lookup, not dbfixture's, and it
+	// does not depend on the order.
+	byID map[string]map[string]Row
 }
 
 func newIndex(cfg *Config, doc Doc) *index {
 	ix := &index{
 		cfg:      cfg,
-		rows:     map[string][]Row{},
 		byAnchor: map[string]map[string]Row{},
+		defined:  map[string]map[string]bool{},
 		byID:     map[string]map[string]Row{},
 	}
 	for _, dm := range doc {
-		ix.rows[dm.Name] = append(ix.rows[dm.Name], dm.Rows...)
-		if ix.byAnchor[dm.Name] == nil {
-			ix.byAnchor[dm.Name] = map[string]Row{}
+		if ix.defined[dm.Name] == nil {
+			ix.defined[dm.Name] = map[string]bool{}
 			ix.byID[dm.Name] = map[string]Row{}
+			ix.byAnchor[dm.Name] = map[string]Row{}
 		}
+		m := cfg.Models[dm.Name]
 		for _, row := range dm.Rows {
-			if a := row.Str(anchorColumn); a != "" {
-				if _, dup := ix.byAnchor[dm.Name][a]; !dup {
-					ix.byAnchor[dm.Name][a] = row
-				}
+			if a := ix.anchorOf(m, row); a != "" {
+				ix.defined[dm.Name][a] = true
 			}
-			if m := cfg.Models[dm.Name]; m != nil {
-				if id := normalize(row.Str(m.ID)); id != "" && id != "0" {
-					if _, dup := ix.byID[dm.Name][id]; !dup {
-						ix.byID[dm.Name][id] = row
-					}
+			if m == nil {
+				continue
+			}
+			if id := normalize(row.Str(m.ID)); id != "" && id != "0" {
+				if _, dup := ix.byID[dm.Name][id]; !dup {
+					ix.byID[dm.Name][id] = row
 				}
 			}
 		}
 	}
 	return ix
+}
+
+// anchorOf is the name dbfixture registers a row under: its "_id", else "pk"
+// and its primary key when the row sets one. A row that leaves a serial key to
+// the database gets its "pk" name from the id the database hands out, which
+// nothing reading the file can know.
+func (ix *index) anchorOf(m *Model, row Row) string {
+	if a := row.Str(anchorColumn); a != "" {
+		return a
+	}
+	if m == nil {
+		return ""
+	}
+	if id := normalize(row.Str(m.ID)); id != "" && id != "0" && !row[m.ID].IsNull {
+		return "pk" + id
+	}
+	return ""
+}
+
+// loaded registers a row the way dbfixture does after inserting it: later
+// rows can name it now, and it replaces an earlier row of the same anchor.
+func (ix *index) loaded(model string, m *Model, row Row) {
+	if a := ix.anchorOf(m, row); a != "" {
+		ix.byAnchor[model][a] = row
+	}
 }
 
 // cell returns a column of a row, falling back to the configured default. The
@@ -81,6 +122,14 @@ func (ix *index) value(model, col string, row Row) (fixturechange.Value, bool, e
 		v, err := ix.resolveTemplate(model, col, text, match, target, isRef)
 		return v, err == nil, err
 	}
+	// Any other template is evaluated by dbfixture at load time, so the
+	// database never holds this text. Comparing it, or writing it into a
+	// migration, would be comparing and writing something that is not there.
+	if anyTemplate.MatchString(text) {
+		return fixturechange.Value{}, false, fmt.Errorf(
+			"%s.%s is %s, a template dbfixture evaluates when it loads the file and this tool cannot; "+
+				"the database does not hold this text, so put %s in ignore", model, col, text, col)
+	}
 	if !isRef {
 		return fixturechange.Lit(normalize(text)), true, nil
 	}
@@ -103,6 +152,11 @@ func (ix *index) resolveTemplate(model, col, text string, match []string, target
 	}
 	trow, ok := ix.byAnchor[tmodel][anchor]
 	if !ok {
+		if ix.defined[tmodel][anchor] {
+			return fixturechange.Value{}, fmt.Errorf(
+				"%s.%s: %s names a row of %s that the file only defines further down; dbfixture loads the "+
+					"file top to bottom and cannot load this: move that row above this one", model, col, text, tmodel)
+		}
 		return fixturechange.Value{}, fmt.Errorf("%s.%s: %s names no row of %s", model, col, text, tmodel)
 	}
 	column := underscore(field)
@@ -210,6 +264,7 @@ func FixtureSnapshot(cfg *Config, doc Doc, source string) (*Snapshot, error) {
 				return nil, err
 			}
 			snap.Entries[dm.Name] = append(snap.Entries[dm.Name], e)
+			ix.loaded(dm.Name, m, row)
 		}
 	}
 	for _, model := range snap.Order {
@@ -313,6 +368,52 @@ func LintZeroDefaults(cfg *Config, snap *Snapshot, tables map[string]*dbschema.T
 	}
 }
 
+// LintNullDefaults reports every explicit null in the snapshot written into a
+// column that has a default.
+//
+// It is the same line of bun as LintZeroDefaults, read from the other end:
+// marshalsToDefault is true for a nil pointer as well as for a zero in a
+// nullzero or default-tagged field, and a pointer or nullzero is how a bun
+// model spells a nullable column. So "note: ~" on a column with a default
+// loads as that default, and an export that writes ~ there does not reproduce
+// the database it came from. Only a field of a type such as sql.NullString,
+// with neither tag, writes the NULL; this check cannot see the Go type, which
+// is why it has a policy of its own.
+func LintNullDefaults(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table) {
+	for _, model := range snap.Order {
+		m := cfg.Models[model]
+		if m == nil {
+			continue
+		}
+		table := tables[cfg.QualifiedTable(m)]
+		if table == nil {
+			continue
+		}
+		for _, e := range snap.Entries[model] {
+			for _, col := range sortedColumns(e.Cells) {
+				if !e.Cells[col].IsNull {
+					continue
+				}
+				column, ok := table.Column(col)
+				if !ok {
+					continue
+				}
+				def, ok := column.NonNullDefault()
+				if !ok {
+					continue
+				}
+				snap.Findings = append(snap.Findings, Finding{
+					Kind: FindingNullDefault, Model: model, Row: e.KeyStr,
+					Detail: fmt.Sprintf(
+						"%s is null, but the column defaults to %s and bun writes DEFAULT for a nil pointer or a "+
+							"nullzero field, so the database will hold %s and not NULL: write the value you mean, "+
+							"or drop the column default", col, def, def),
+				})
+			}
+		}
+	}
+}
+
 // LintColumns reports every column of the fixture file the table does not have.
 // Without it the mistake surfaces when the generated migration runs, which is
 // the worst moment for it to surface.
@@ -331,10 +432,19 @@ func LintColumns(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table)
 			continue
 		}
 		for _, col := range snap.Columns[model] {
-			if _, ok := table.Column(col); !ok {
+			column, ok := table.Column(col)
+			if !ok {
 				snap.Findings = append(snap.Findings, Finding{
 					Kind: FindingUnknownColumn, Model: model, Row: col,
 					Detail: "the fixture file writes this column, " + table.Qualified() + " does not have it",
+				})
+				continue
+			}
+			if column.Generated {
+				snap.Findings = append(snap.Findings, Finding{
+					Kind: FindingUnknownColumn, Model: model, Row: col,
+					Detail: "the fixture file writes this column, but " + table.Qualified() +
+						" generates it and nothing can write into it: put it in derived",
 				})
 			}
 		}

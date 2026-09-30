@@ -107,6 +107,12 @@ type Policy struct {
 	// for such a value, so the database will not hold the zero the file says.
 	// Default "error".
 	ZeroDefault Mode `yaml:"zero_default"`
+	// NullDefault decides what happens when a fixture row writes an explicit
+	// null into a column that has a default. bun sends DEFAULT for a nil
+	// pointer and for a zero in a nullzero field, which is how a nullable
+	// column is usually modelled, so the database will hold the default and
+	// not NULL. Default "error".
+	NullDefault Mode `yaml:"null_default"`
 	// DuplicateKey decides what happens when two rows of a model share one
 	// natural key in the database, which makes every lookup by that key
 	// ambiguous. Default "error".
@@ -282,6 +288,7 @@ func (p *Policy) prepare() error {
 		{"missing_row", &p.MissingRow, ModeError, []Mode{ModeError, ModeWarn}},
 		{"changed_row", &p.ChangedRow, ModeWarn, []Mode{ModeError, ModeWarn}},
 		{"zero_default", &p.ZeroDefault, ModeError, []Mode{ModeError, ModeWarn, ModeIgnore}},
+		{"null_default", &p.NullDefault, ModeError, []Mode{ModeError, ModeWarn, ModeIgnore}},
 		{"duplicate_key", &p.DuplicateKey, ModeError, []Mode{ModeError, ModeWarn}},
 	} {
 		if *f.value == "" {

@@ -7,7 +7,7 @@
 // it does not have to: the catalog holds everything an export or a schema check
 // needs, and the configuration file supplies the rest.
 //
-// PostgreSQL only. The queries are written against pg_catalog.
+// PostgreSQL only, 12 or later. The queries are written against pg_catalog.
 package dbschema
 
 import (
@@ -39,6 +39,9 @@ type Column struct {
 	Default string
 	// Identity is true for a GENERATED ... AS IDENTITY column.
 	Identity bool
+	// Generated is true for a GENERATED ALWAYS AS (...) STORED column. Its
+	// Default is the generation expression, and nothing can write into it.
+	Generated bool
 }
 
 // Table is one table.
@@ -120,22 +123,10 @@ func (c Column) ZeroText() (string, bool) {
 // to find out what it does is how a tool with read intentions writes something.
 func (c Column) LiteralDefault() (string, bool) {
 	d := strings.TrimSpace(c.Default)
-	if d == "" || c.Serial() {
+	if d == "" || c.Serial() || c.Generated {
 		return "", false
 	}
-	// Strip the cast the catalog appends: "'x'::text", "0::bigint".
-	for {
-		i := strings.LastIndex(d, "::")
-		if i < 0 {
-			break
-		}
-		rest := d[i+2:]
-		if strings.ContainsAny(rest, "'()") || strings.TrimSpace(rest) == "" {
-			break
-		}
-		d = strings.TrimSpace(d[:i])
-	}
-	d = strings.Trim(d, "()")
+	d = stripCasts(d)
 	switch strings.ToUpper(d) {
 	case "NULL":
 		return "", false
@@ -151,6 +142,46 @@ func (c Column) LiteralDefault() (string, bool) {
 		return d, true
 	}
 	return "", false
+}
+
+// stripCasts removes the casts the catalog appends to a default, "'x'::text",
+// "0::bigint", and the parentheses around a negative number.
+func stripCasts(d string) string {
+	for {
+		i := strings.LastIndex(d, "::")
+		if i < 0 {
+			break
+		}
+		rest := d[i+2:]
+		if strings.ContainsAny(rest, "'()") || strings.TrimSpace(rest) == "" {
+			break
+		}
+		d = strings.TrimSpace(d[:i])
+	}
+	return strings.Trim(d, "()")
+}
+
+// NonNullDefault is what the database puts into this column when an INSERT
+// says DEFAULT: the literal value for a plain default ("1", "x"), the
+// expression as the catalog stores it otherwise ("now()"). The second result
+// is false for a column without a default, one whose default is NULL, and a
+// generated column, whose stored expression is not a default at all.
+//
+// It is the other half of bun's round-trip hazard: bun writes DEFAULT for a
+// nil pointer, and for a zero in a nullzero or default-tagged field, so an
+// explicit null in a fixture row becomes this and not NULL.
+func (c Column) NonNullDefault() (string, bool) {
+	d := strings.TrimSpace(c.Default)
+	if d == "" || c.Generated {
+		return "", false
+	}
+	if lit, ok := c.LiteralDefault(); ok {
+		return lit, true
+	}
+	if strings.EqualFold(stripCasts(d), "NULL") {
+		return "", false
+	}
+	return d, true
 }
 
 // ZeroIsNotDefault reports whether writing this column's zero value produces
@@ -194,7 +225,7 @@ func Load(ctx context.Context, db bun.IDB, schemas ...string) (map[string]*Table
 	// any character, so there is no separator a string_agg could use safely.
 	const columnQuery = `
 SELECT n.nspname, c.relname, a.attname, a.attnum, t.typname, NOT a.attnotnull,
-       COALESCE(pg_get_expr(d.adbin, d.adrelid), ''), a.attidentity <> ''
+       COALESCE(pg_get_expr(d.adbin, d.adrelid), ''), a.attidentity <> '', a.attgenerated <> ''
 FROM pg_attribute a
 JOIN pg_class c ON c.oid = a.attrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -206,7 +237,7 @@ ORDER BY n.nspname, c.relname, a.attnum`
 		var schema, table string
 		var col Column
 		if err := rows.Scan(&schema, &table, &col.Name, &col.Position, &col.Type, &col.Nullable,
-			&col.Default, &col.Identity); err != nil {
+			&col.Default, &col.Identity, &col.Generated); err != nil {
 			return err
 		}
 		t := tables[schema+"."+table]

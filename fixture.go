@@ -90,8 +90,15 @@ func cellOf(node yaml.Node) (Cell, error) {
 func (r Row) Str(col string) string { return r[col].Text }
 
 // template matches a whole-value dbfixture reference, "{{ $.Model.row.Field }}".
-// Anything else, including a template that calls a function, is left as text.
-var template = regexp.MustCompile(`^\{\{\s*\$\.([A-Za-z_][A-Za-z0-9_]*)\.([^.\s{}]+)\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}$`)
+// The delimiters are dbfixture's own: it only evaluates a value holding
+// "{{ " and " }}" with the spaces (dbfixture/fixture.go, tplRE), so
+// "{{$.Model.row.ID}}" is not a template to it and is not one here.
+var template = regexp.MustCompile(`^\{\{ \s*\$\.([A-Za-z_][A-Za-z0-9_]*)\.([^.\s{}]+)\.([A-Za-z_][A-Za-z0-9_]*)\s* \}\}$`)
+
+// anyTemplate is dbfixture's test for "evaluate this value as a template"
+// (tplRE). A value it matches never reaches the database as written: dbfixture
+// replaces it with whatever the template produces.
+var anyTemplate = regexp.MustCompile(`\{\{ .+ \}\}`)
 
 // normalize makes two spellings of the same number compare equal ("1.0" and
 // "1"). Everything else is returned trimmed.
