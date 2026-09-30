@@ -203,21 +203,35 @@ func kindIdent(k fixturechange.Kind) string {
 // a whole inserted row on a single line is not something anyone reviews.
 func renderValues(v fixturechange.Values) string {
 	parts := make([]string, 0, len(v))
+	width := 0
 	for _, col := range sortedColumns(v) {
 		val := v[col]
+		var part string
 		switch {
 		case val.IsNull:
-			parts = append(parts, fmt.Sprintf("%q: fixturechange.Null()", col))
+			part = fmt.Sprintf("%q: fixturechange.Null()", col)
 		case val.Ref != nil:
-			parts = append(parts, fmt.Sprintf("%q: fixturechange.RefTo(%q, %q)", col, val.Ref.Model, val.Ref.Key))
+			part = fmt.Sprintf("%q: fixturechange.RefTo(%s, %s)", col, goString(val.Ref.Model), goString(val.Ref.Key))
 		default:
-			parts = append(parts, fmt.Sprintf("%q: fixturechange.Lit(%q)", col, val.Lit))
+			part = fmt.Sprintf("%q: fixturechange.Lit(%s)", col, goString(val.Lit))
 		}
+		parts = append(parts, part)
+		width += len(part) + 2
 	}
-	if len(parts) <= 3 {
+	if len(parts) <= 3 && width <= 80 {
 		return "fixturechange.Values{" + strings.Join(parts, ", ") + "}"
 	}
 	return "fixturechange.Values{\n\t\t\t\t" + strings.Join(parts, ",\n\t\t\t\t") + ",\n\t\t\t}"
+}
+
+// goString writes a string as a Go literal a reviewer can read: a raw string
+// for a value full of double quotes, such as JSON, and an interpreted one
+// otherwise, which is also the only way to write a newline or a backquote.
+func goString(s string) string {
+	if strings.Contains(s, `"`) && strconv.CanBackquote(s) {
+		return "`" + s + "`"
+	}
+	return strconv.Quote(s)
 }
 
 func sortedKeys(t fixturechange.Tables) []string {

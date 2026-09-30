@@ -242,7 +242,8 @@ func TestVariantUUIDKeys(t *testing.T) {
   rows:
 `
 	variant{
-		ddl: []string{"DROP TABLE IF EXISTS v_settings, v_tenants",
+		// gen_random_uuid is core from PostgreSQL 13; before, pgcrypto has it.
+		ddl: []string{"CREATE EXTENSION IF NOT EXISTS pgcrypto", "DROP TABLE IF EXISTS v_settings, v_tenants",
 			"CREATE TABLE v_tenants (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), slug text UNIQUE NOT NULL)",
 			"CREATE TABLE v_settings (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), " +
 				"tenant_id uuid NOT NULL REFERENCES v_tenants, key text NOT NULL, value text NOT NULL, UNIQUE (tenant_id, key))"},

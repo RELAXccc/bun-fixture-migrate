@@ -29,7 +29,6 @@ type SnapshotOptions struct {
 type rawRow struct {
 	id     string
 	values map[string]fixturechange.Value
-	anchor string
 }
 
 // DatabaseSnapshot reads the master data out of a database.

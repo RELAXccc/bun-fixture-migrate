@@ -1258,8 +1258,7 @@ func (r *runner) syncSequences(ctx context.Context, o options) error {
 		if err != nil {
 			return err
 		}
-		idCol, err := quoteIdent(t.ID)
-		if err != nil {
+		if _, err := quoteIdent(t.ID); err != nil {
 			return err
 		}
 		if o.dryRun {
@@ -1269,26 +1268,8 @@ func (r *runner) syncSequences(ctx context.Context, o options) error {
 			o.report(Outcome{Set: r.set.Name, Index: -1, Model: m, Status: StatusSequence, Message: msg})
 			continue
 		}
-		// The quoted name goes to pg_get_serial_sequence, which parses its
-		// first argument as SQL: unquoted, a mixed-case table would not be
-		// found and its sequence silently left behind.
-		query := fmt.Sprintf(`SELECT setval(s.seq, s.top) FROM (`+
-			`SELECT pg_get_serial_sequence(?, ?)::regclass AS seq, (SELECT COALESCE(MAX(%s), 0) FROM %s) AS top`+
-			`) s WHERE s.seq IS NOT NULL AND s.top > COALESCE(pg_sequence_last_value(s.seq), `+
-			`(SELECT seqstart - 1 FROM pg_sequence WHERE seqrelid = s.seq))`, idCol, table)
-		rows, err := r.tx.QueryContext(ctx, query, table, t.ID)
+		moved, err := moveSequence(ctx, r.tx, table, t.ID)
 		if err != nil {
-			return fmt.Errorf("move the sequence of %s past the ids written: %w", t.Name, err)
-		}
-		moved := false
-		for rows.Next() {
-			moved = true
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return fmt.Errorf("move the sequence of %s past the ids written: %w", t.Name, err)
-		}
-		if err := rows.Close(); err != nil {
 			return err
 		}
 		if moved {

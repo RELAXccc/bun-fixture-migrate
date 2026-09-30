@@ -32,6 +32,11 @@ func TestAGeneratedFileReadsBackAsTheSetItRuns(t *testing.T) {
     - plan_id: '{{ $.Plan.free.ID }}'
       code: sso
       quota: 1
+      note: "{\"sso\":true,\"why\":\"a \x60backquote\x60\"}"
+    - plan_id: '{{ $.Plan.free.ID }}'
+      code: audit
+      quota: 1
+      note: '{"audit":true}'
 `, 1)
 	old := replace(t, base, "      quota: 100\n", "      quota: 100\n      note: x\n")
 	res := computeWith(t, cfg, old, next)
@@ -65,7 +70,12 @@ func TestAGeneratedFileReadsBackAsTheSetItRuns(t *testing.T) {
 	for _, c := range got.Changes {
 		kinds = append(kinds, string(c.Kind))
 	}
-	if strings.Join(kinds, ",") != "update,insert,insert,update,update" {
+	// JSON is written as a raw string, unless it holds a backquote.
+	if !strings.Contains(string(src), "fixturechange.Lit(`{\"audit\":true}`)") ||
+		!strings.Contains(string(src), `\"why\":\"a `+"`backquote`"+`\"}")`) {
+		t.Fatalf("literals:\n%s", src)
+	}
+	if strings.Join(kinds, ",") != "update,insert,insert,insert,update,update" {
 		t.Fatalf("expected a rename, inserts and updates, got %v", kinds)
 	}
 }

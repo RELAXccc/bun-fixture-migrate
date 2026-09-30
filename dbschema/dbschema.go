@@ -239,7 +239,7 @@ func Load(ctx context.Context, db bun.IDB, schemas ...string) (map[string]*Table
 	if len(schemas) == 0 {
 		schemas = []string{"public"}
 	}
-	list := bun.In(schemas)
+	list := bun.List(schemas)
 	tables := map[string]*Table{}
 
 	// One row per column. Nothing is aggregated in SQL: a column name may hold
