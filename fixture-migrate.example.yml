@@ -167,10 +167,12 @@ models:
     # omitted column is "not set", which compares equal to another omitted
     # column and to nothing else; a column written on one side and omitted on
     # the other is refused rather than guessed at. The scaffold fills this in
-    # from the database's column defaults.
+    # from the database's column defaults. ~ means NULL, which is right for a
+    # column added to the table later: the rows written before it hold NULL.
     defaults:
       price_cents: "0"
       seats: "1"
+      note: ~
     # Other tables point at a plan, and only you can say what should happen to
     # them when one goes away.
     deletes: refuse

@@ -4,9 +4,10 @@
 //
 // dbfixture only loads a fixture file into an empty database. Once a database
 // has been seeded, editing the YAML changes nothing there, so every edit needs a
-// data migration. This package writes that migration, from the diff between two
-// git revisions of the file or from the diff between the database and the file,
-// and it can go the other way and write the file from the database.
+// data migration. This package writes that migration, from the diff between the
+// file and the state the earlier migrations leave (see State) or between the
+// database and the file, and it can go the other way and write the file from
+// the database. Sync applies the difference to a database directly.
 //
 // It knows nothing about your Go models. The fixture file says which models and
 // columns exist, PostgreSQL's catalog says which tables, types, defaults, keys
