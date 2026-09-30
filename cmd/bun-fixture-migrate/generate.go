@@ -10,6 +10,7 @@ import (
 	"time"
 
 	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
+	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
 
 	"github.com/uptrace/bun"
 )
@@ -53,13 +54,21 @@ func generate(o streams, args []string) error {
 		}
 		defer db.Close()
 		err = readOnly(o.ctx, db, func(tx bun.Tx) error {
-			if old, err = databaseSnapshot(o.ctx, tx, s.cfg, head); err != nil {
+			tables, err := dbschema.Load(o.ctx, tx, s.cfg.Schema)
+			if err != nil {
+				return err
+			}
+			before := len(head.Findings)
+			if err := canonical(o, tx, s.cfg, tables, head); err != nil {
+				return err
+			}
+			if old, err = databaseSnapshot(o.ctx, tx, s.cfg, tables, head); err != nil {
 				return err
 			}
 			if *noLint {
 				return nil
 			}
-			return lint(o, tx, s.cfg, head)
+			return lint(o, s.cfg, head, tables, before)
 		})
 		if err != nil {
 			return err
@@ -78,7 +87,20 @@ func generate(o streams, args []string) error {
 				return err
 			}
 			defer db.Close()
-			if err := readOnly(o.ctx, db, func(tx bun.Tx) error { return lint(o, tx, s.cfg, head) }); err != nil {
+			// Both sides are respelled by the database, so a value written two
+			// ways in two revisions of the file is not a change.
+			err = readOnly(o.ctx, db, func(tx bun.Tx) error {
+				tables, err := dbschema.Load(o.ctx, tx, s.cfg.Schema)
+				if err != nil {
+					return err
+				}
+				before := len(head.Findings)
+				if err := canonical(o, tx, s.cfg, tables, head, old); err != nil {
+					return err
+				}
+				return lint(o, s.cfg, head, tables, before)
+			})
+			if err != nil {
 				return err
 			}
 		}
@@ -123,6 +145,14 @@ func generate(o streams, args []string) error {
 		}
 	}
 	stamp := fixturemigrate.NextStamp(time.Now(), existing)
+	// bun orders migrations by name as strings, so a short name such as
+	// "3_backfill" sorts after every timestamp and would run after this one.
+	for _, name := range existing {
+		if name > stamp {
+			fmt.Fprintf(o.stderr, "warning: migration %s sorts after %s, so bun runs it after this one, "+
+				"although this one was generated against the state it leaves\n", name, stamp)
+		}
+	}
 	src, err := fixturemigrate.Render(s.cfg, *name, stamp, res)
 	if err != nil {
 		return err

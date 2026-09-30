@@ -1,6 +1,7 @@
 package fixtureapply
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 
@@ -264,6 +265,27 @@ func TestRowCount(t *testing.T) {
 // a test, a tool or a dry run must not go looking for one, whatever the file
 // calling it is named.
 func TestTheMigrationNameIsOnlyReadUnderTheMigrator(t *testing.T) {
+	const app = "example.com/app/migrations"
+	frame := func(fn, file string) runtime.Frame { return runtime.Frame{Function: fn, File: file} }
+	apply := frame("github.com/RELAXccc/bun-fixture-migrate/fixtureapply.Apply", "/x/fixtureapply/apply.go")
+	generated := frame(app+".init.0.func1", "/app/migrations/20260921120000_fixture_prices.go")
+	helper := frame(app+".applyFixtures", "/app/migrations/helpers.go")
+	migrator := frame("github.com/uptrace/bun/migrate.(*Migrator).Migrate", "/mod/bun/migrate/migrator.go")
+	main := frame("main.main", "/app/cmd/20260101000000_tool.go")
+
+	for name, tc := range map[string]struct {
+		frames []runtime.Frame
+		want   string
+	}{
+		"generated file under the migrator":       {[]runtime.Frame{apply, generated, migrator, main}, "20260921120000"},
+		"through a helper in another file":        {[]runtime.Frame{apply, helper, generated, migrator}, "20260921120000"},
+		"a migration-named file, no migrator":     {[]runtime.Frame{apply, generated, main}, ""},
+		"only the tool's own file named like one": {[]runtime.Frame{apply, main}, ""},
+	} {
+		if got := migrationFromFrames(tc.frames); got != tc.want {
+			t.Errorf("%s: %q, want %q", name, got, tc.want)
+		}
+	}
 	if got := migrationFromStack(); got != "" {
 		t.Fatalf("no migrator on this stack, got %q", got)
 	}

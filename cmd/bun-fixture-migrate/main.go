@@ -215,15 +215,31 @@ func (s *setup) readFixture() ([]byte, *fixturemigrate.Snapshot, error) {
 	return data, snap, err
 }
 
+// canonical has PostgreSQL respell every value of the snapshots as the columns
+// hold them, so they compare with each other and with the database the way
+// the database compares values. Findings of all but the first snapshot are
+// dropped: they are about base states, which are history.
+func canonical(o streams, db bun.IDB, cfg *fixturemigrate.Config, tables map[string]*dbschema.Table,
+	snaps ...*fixturemigrate.Snapshot) error {
+
+	for i, snap := range snaps {
+		before := len(snap.Findings)
+		if err := fixturemigrate.Canonicalize(o.ctx, db, cfg, snap, tables); err != nil {
+			return err
+		}
+		if i > 0 {
+			snap.Findings = snap.Findings[:before]
+		}
+	}
+	return nil
+}
+
 // lint checks the fixture file against what the database says about its own
 // columns. A lint that could not run is never reported as a lint that found
 // nothing: the connection error comes back as an error.
-func lint(o streams, db bun.IDB, cfg *fixturemigrate.Config, snap *fixturemigrate.Snapshot) error {
-	tables, err := dbschema.Load(o.ctx, db, cfg.Schema)
-	if err != nil {
-		return err
-	}
-	before := len(snap.Findings)
+func lint(o streams, cfg *fixturemigrate.Config, snap *fixturemigrate.Snapshot, tables map[string]*dbschema.Table,
+	before int) error {
+
 	fixturemigrate.LintColumns(cfg, snap, tables)
 	fixturemigrate.LintZeroDefaults(cfg, snap, tables)
 	fixturemigrate.LintNullDefaults(cfg, snap, tables)
@@ -244,12 +260,8 @@ func lint(o streams, db bun.IDB, cfg *fixturemigrate.Config, snap *fixturemigrat
 // writes. A column no fixture row mentions is not master data, so a difference
 // in it is not drift.
 func databaseSnapshot(ctx context.Context, db bun.IDB, cfg *fixturemigrate.Config,
-	head *fixturemigrate.Snapshot) (*fixturemigrate.Snapshot, error) {
+	tables map[string]*dbschema.Table, head *fixturemigrate.Snapshot) (*fixturemigrate.Snapshot, error) {
 
-	tables, err := dbschema.Load(ctx, db, cfg.Schema)
-	if err != nil {
-		return nil, err
-	}
 	columns := map[string][]string{}
 	for model, cols := range head.Columns {
 		columns[model] = cols
@@ -306,7 +318,7 @@ func export(o streams, args []string) error {
 		fmt.Fprintln(o.stderr, string(f.Kind)+":", f.String())
 	}
 	if mode == fixturemigrate.ModeError {
-		return exitError{3, fmt.Sprintf(
+		return exitError{2, fmt.Sprintf(
 			"%s, nothing written: this export would not reproduce the database it was taken from. "+
 				"Fix them, or set the policy to warn to write it anyway", plural(len(findings), "problem"))}
 	}
@@ -351,10 +363,13 @@ func check(o streams, args []string) error {
 		if err != nil {
 			return err
 		}
+		if err := canonical(o, tx, s.cfg, tables, head); err != nil {
+			return err
+		}
 		fixturemigrate.LintColumns(s.cfg, head, tables)
 		fixturemigrate.LintZeroDefaults(s.cfg, head, tables)
 		fixturemigrate.LintNullDefaults(s.cfg, head, tables)
-		database, err := databaseSnapshot(o.ctx, tx, s.cfg, head)
+		database, err := databaseSnapshot(o.ctx, tx, s.cfg, tables, head)
 		if err != nil {
 			return err
 		}

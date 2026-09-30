@@ -54,6 +54,7 @@ type options struct {
 	logf      func(format string, args ...any)
 	report    func(Outcome)
 	migration string
+	dryRun    bool
 }
 
 // WithLogger replaces log.Printf as the destination of the per-row report.
@@ -72,11 +73,21 @@ func WithReport(fn func(Outcome)) Option {
 // WithMigrationName names the bun migration Apply is running as: the
 // timestamp at the front of the migration's file name, which is what bun
 // stores in its migrations table. Apply reads it off the call stack the way
-// bun's own Register does, so a generated migration never needs this; a
-// hand-written one that calls Apply through a helper outside the migration
-// file does.
+// bun's own Register does -- the nearest caller in a file named like a
+// migration -- so a generated migration never needs this, and neither does a
+// helper in an ordinary file. A helper that lives in another migration's file
+// does: the stack would name that migration.
 func WithMigrationName(name string) Option {
 	return func(o *options) { o.migration = name }
+}
+
+// WithDryRun is for a caller that rolls the transaction back afterwards, the
+// way the plan command does. Everything runs as it would, except the one step
+// a rollback cannot undo: moving a sequence past the explicit ids written
+// (setval is not transactional). That step is reported instead, with
+// StatusSequence.
+func WithDryRun() Option {
+	return func(o *options) { o.dryRun = true }
 }
 
 func newOptions(opts []Option) options {
@@ -105,6 +116,10 @@ const (
 	// StatusUnseeded is the whole set passed over because the seed guard
 	// table is empty. Index is -1.
 	StatusUnseeded Status = "unseeded"
+	// StatusSequence is a sequence moved past the explicit ids the set
+	// wrote, or under WithDryRun one that would be. Index is -1 and Model
+	// names the table's model.
+	StatusSequence Status = "sequence"
 )
 
 // Problem names why a change could not be made.
@@ -155,12 +170,14 @@ type Outcome struct {
 //
 // So a failing Apply that finds itself running under bun's migrator deletes
 // that record: the newest row of the migrations table, if it carries this
-// migration's name and was written within the hour. Nothing older, nothing
-// else, and nothing at all when the migrator records on success, because then
-// there is no such row. The error says whether it did. The name is the one bun
-// derived from the migration's file name, read off the call stack the same way
-// bun's Register reads it; see WithMigrationName for the case where that
-// cannot work.
+// migration's name and was written within the hour. Nothing older and nothing
+// else. When the migrator records on success there is normally no such row
+// and nothing is deleted; the exceptions are two migrations sharing one name,
+// which bun cannot run correctly anyway and the status command reports, and
+// RunMigration re-running the newest migration within the hour of its first
+// run, after which the next migrate runs it again and finds its changes made.
+// The error says whether a record was deleted. The name is the one bun derived
+// from the migration's file name; see WithMigrationName.
 func Apply(ctx context.Context, db bun.IDB, set fixturechange.Set, opts ...Option) error {
 	o := newOptions(opts)
 	err := db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
@@ -180,17 +197,28 @@ func Apply(ctx context.Context, db bun.IDB, set fixturechange.Set, opts ...Optio
 var bunMigrationFile = regexp.MustCompile(`^(\d{1,14})_([0-9a-z_\-]+)\.`)
 
 // migrationFromStack finds the migration file Apply was called from, the way
-// bun's Register finds the file it was called from: the first frame outside
-// this package whose file is named like a migration. It answers only when bun's
-// migrator is further up the stack, so Apply called from a test or a tool
-// never goes looking for a record to take back.
+// bun's Register finds the file it was called from.
 func migrationFromStack() string {
 	var pcs [64]uintptr
 	n := runtime.Callers(2, pcs[:])
 	frames := runtime.CallersFrames(pcs[:n])
-	name := ""
+	var list []runtime.Frame
 	for {
 		f, more := frames.Next()
+		list = append(list, f)
+		if !more {
+			return migrationFromFrames(list)
+		}
+	}
+}
+
+// migrationFromFrames is the first frame outside this package whose file is
+// named like a migration, innermost first. It answers only when bun's migrator
+// is further out, so Apply called from a test or a tool never goes looking for
+// a record to take back, whatever the calling file is named.
+func migrationFromFrames(frames []runtime.Frame) string {
+	name := ""
+	for _, f := range frames {
 		if strings.Contains(f.Function, "/bun/migrate.") {
 			return name
 		}
@@ -199,10 +227,8 @@ func migrationFromStack() string {
 				name = m[1]
 			}
 		}
-		if !more {
-			return ""
-		}
 	}
+	return ""
 }
 
 // unrecord deletes the record bun's migrator made of this migration before
@@ -219,10 +245,13 @@ func unrecord(ctx context.Context, db bun.IDB, set fixturechange.Set, o options,
 	if table == "" {
 		table = fixturechange.DefaultMigrationsTable
 	}
-	quoted, err := quoteIdent(table)
-	if err != nil {
+	// bun puts the table name into its SQL as written, unquoted, so
+	// PostgreSQL folds it to lower case; this has to find the same table.
+	// Validate has made sure it is a plain identifier.
+	if _, err := quoteIdent(table); err != nil {
 		return failure
 	}
+	quoted := table
 	// The migration may have failed because the context ended; the record
 	// still has to go, or the next deploy skips this migration.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
@@ -401,6 +430,10 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 	if err := Validate(set); err != nil {
 		return err
 	}
+	restore, err := session(ctx, tx)
+	if err != nil {
+		return err
+	}
 	if set.SeedGuardTable != "" {
 		seeded, err := tableHasRows(ctx, tx, set.SeedGuardTable)
 		if err != nil {
@@ -410,7 +443,7 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 			msg := set.SeedGuardTable + " is empty, nothing to do (the fixture loader seeds this database)"
 			o.logf("%s: %s", set.Name, msg)
 			o.report(Outcome{Set: set.Name, Index: -1, Status: StatusUnseeded, Message: msg})
-			return nil
+			return restore(ctx)
 		}
 	}
 
@@ -455,7 +488,37 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 		}
 		o.report(out)
 	}
-	return r.syncSequences(ctx)
+	if err := r.syncSequences(ctx, o); err != nil {
+		return err
+	}
+	return restore(ctx)
+}
+
+// session makes a literal mean in the migration what it meant to dbfixture.
+// yaml.v3 reads a timestamp without a zone as UTC, and bun writes the
+// time.Time it becomes with an offset, so "2026-01-01 10:00:00" in a fixture
+// file is 10:00 UTC in the seeded database whatever the server's TimeZone. A
+// migration binding the same text has to read it the same way, and a date such
+// as 2026-01-02 has to be year-month-day. The settings are local to the
+// transaction; restore puts back what a caller's own transaction had, and a
+// rollback does that by itself.
+func session(ctx context.Context, tx bun.IDB) (func(context.Context) error, error) {
+	var tz, ds string
+	if err := tx.QueryRowContext(ctx,
+		"SELECT current_setting('TimeZone'), current_setting('DateStyle')").Scan(&tz, &ds); err != nil {
+		return nil, fmt.Errorf("read the session's settings: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"SELECT set_config('TimeZone', 'UTC', true), set_config('DateStyle', 'ISO, YMD', true)"); err != nil {
+		return nil, fmt.Errorf("fix the session's settings: %w", err)
+	}
+	return func(ctx context.Context) error {
+		if _, err := tx.ExecContext(ctx,
+			"SELECT set_config('TimeZone', ?, true), set_config('DateStyle', ?, true)", tz, ds); err != nil {
+			return fmt.Errorf("restore the session's settings: %w", err)
+		}
+		return nil
+	}, nil
 }
 
 // problem names the three materially different reasons a guarded statement
@@ -952,7 +1015,13 @@ func (r *runner) resolve(ctx context.Context, ref fixturechange.Ref) (string, er
 // syncSequences moves the sequence of every table that got an explicit id past
 // the highest id in it. Without this the next ordinary insert reuses an id that
 // is already taken.
-func (r *runner) syncSequences(ctx context.Context) error {
+//
+// It only ever moves a sequence forward. setval is not transactional and a
+// sequence is routinely ahead of the highest id -- rows were deleted, an insert
+// rolled back, another session holds values it has not committed yet -- and
+// moving it back to the highest id would hand those values out a second time.
+// A sequence that was never called is compared with its start value.
+func (r *runner) syncSequences(ctx context.Context, o options) error {
 	models := make([]string, 0, len(r.resync))
 	for m := range r.resync {
 		models = append(models, m)
@@ -968,11 +1037,39 @@ func (r *runner) syncSequences(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		query := fmt.Sprintf(
-			`SELECT setval(s.seq, GREATEST(s.top, 1)) FROM (SELECT pg_get_serial_sequence(?, ?) AS seq, `+
-				`(SELECT COALESCE(MAX(%s), 0) FROM %s) AS top) s WHERE s.seq IS NOT NULL`, idCol, table)
-		if _, err := r.tx.ExecContext(ctx, query, t.Name, t.ID); err != nil {
+		if o.dryRun {
+			msg := fmt.Sprintf("explicit ids were written into %s; the migration moves its sequence past them "+
+				"if it is behind, which a dry run leaves alone", t.Name)
+			o.logf("%s: %s", r.set.Name, msg)
+			o.report(Outcome{Set: r.set.Name, Index: -1, Model: m, Status: StatusSequence, Message: msg})
+			continue
+		}
+		// The quoted name goes to pg_get_serial_sequence, which parses its
+		// first argument as SQL: unquoted, a mixed-case table would not be
+		// found and its sequence silently left behind.
+		query := fmt.Sprintf(`SELECT setval(s.seq, s.top) FROM (`+
+			`SELECT pg_get_serial_sequence(?, ?)::regclass AS seq, (SELECT COALESCE(MAX(%s), 0) FROM %s) AS top`+
+			`) s WHERE s.seq IS NOT NULL AND s.top > COALESCE(pg_sequence_last_value(s.seq), `+
+			`(SELECT seqstart - 1 FROM pg_sequence WHERE seqrelid = s.seq))`, idCol, table)
+		rows, err := r.tx.QueryContext(ctx, query, table, t.ID)
+		if err != nil {
 			return fmt.Errorf("move the sequence of %s past the ids written: %w", t.Name, err)
+		}
+		moved := false
+		for rows.Next() {
+			moved = true
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("move the sequence of %s past the ids written: %w", t.Name, err)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if moved {
+			msg := fmt.Sprintf("moved the sequence of %s past the explicit ids written", t.Name)
+			o.logf("%s: %s", r.set.Name, msg)
+			o.report(Outcome{Set: r.set.Name, Index: -1, Model: m, Status: StatusSequence, Message: msg})
 		}
 	}
 	return nil

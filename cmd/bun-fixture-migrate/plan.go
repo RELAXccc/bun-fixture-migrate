@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"database/sql/driver"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -14,6 +17,7 @@ import (
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 
 	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/driver/pgdriver"
 )
 
 type planReport struct {
@@ -25,7 +29,10 @@ type planReport struct {
 
 type plannedMigration struct {
 	ID string `json:"id"`
-	// Result is "succeeds", "fails", "unseeded" or "not reached".
+	// Result is "succeeds", "fails", "unseeded", "not reached", or
+	// "inconclusive" when the plan itself could not finish: a lock it waited
+	// for too long, a cancelled query, a lost connection. That is no verdict
+	// on the migration.
 	Result string `json:"result"`
 	Error  string `json:"error,omitempty"`
 	// After are the pending migrations that were not simulated and run
@@ -38,6 +45,29 @@ type planTarget struct {
 	id    string
 	set   fixturechange.Set
 	after []string
+}
+
+// inconclusive reports an error that stopped the plan rather than one the
+// migration would meet: waiting too long for a lock another session holds, a
+// cancelled query, a serialisation failure, a lost connection. Each would
+// come out differently on another try.
+func inconclusive(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, driver.ErrBadConn) {
+		return true
+	}
+	var pgErr pgdriver.Error
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	code := pgErr.Field('C')
+	switch {
+	case code == "55P03", code == "57014", code == "40001", code == "40P01":
+		return true
+	case strings.HasPrefix(code, "08"), strings.HasPrefix(code, "57P"):
+		return true
+	}
+	return false
 }
 
 // fileList is a flag that can be given more than once.
@@ -137,6 +167,10 @@ func plan(o streams, args []string) error {
 
 	skipped := 0
 	for _, m := range report.Migrations {
+		if m.Result == "inconclusive" {
+			return exitError{1, "the plan could not finish at " + m.ID + ", which says nothing about the " +
+				"migration: " + m.Error}
+		}
 		if m.Result == "fails" {
 			return exitError{3, m.ID + " would fail, and so would the deploy"}
 		}
@@ -175,6 +209,7 @@ func simulate(o streams, db *bun.DB, targets []planTarget, lockTimeout time.Dura
 		}
 		pm.Result = "succeeds"
 		err := fixtureapply.Apply(o.ctx, tx, t.set,
+			fixtureapply.WithDryRun(),
 			fixtureapply.WithLogger(func(string, ...any) {}),
 			fixtureapply.WithReport(func(out fixtureapply.Outcome) {
 				if out.Status == fixtureapply.StatusUnseeded {
@@ -184,6 +219,9 @@ func simulate(o streams, db *bun.DB, targets []planTarget, lockTimeout time.Dura
 			}))
 		if err != nil {
 			pm.Result, pm.Error, failed = "fails", err.Error(), true
+			if inconclusive(err) {
+				pm.Result = "inconclusive"
+			}
 		}
 		report.Migrations = append(report.Migrations, pm)
 	}
@@ -208,12 +246,18 @@ func printPlan(o streams, r *planReport) {
 			fmt.Fprintf(o.stdout, "%s: would do nothing, the database is not seeded yet\n", m.ID)
 		case "fails":
 			fmt.Fprintf(o.stdout, "%s: would FAIL\n", m.ID)
+		case "inconclusive":
+			fmt.Fprintf(o.stdout, "%s: could not be planned\n", m.ID)
 		default:
 			fmt.Fprintf(o.stdout, "%s: not reached\n", m.ID)
 		}
 		w := tabwriter.NewWriter(o.stdout, 0, 4, 2, ' ', 0)
 		for _, c := range m.Changes {
 			if c.Status == fixtureapply.StatusUnseeded {
+				continue
+			}
+			if c.Status == fixtureapply.StatusSequence {
+				fmt.Fprintf(w, "  %s\t%s\n", c.Status, c.Message)
 				continue
 			}
 			line := fmt.Sprintf("  %s\t%s %s %s", c.Status, c.Model, c.Key, c.Kind)
@@ -228,7 +272,7 @@ func printPlan(o streams, r *planReport) {
 			fmt.Fprintln(w, line)
 		}
 		w.Flush()
-		if m.Result == "fails" {
+		if m.Result == "fails" || m.Result == "inconclusive" {
 			fmt.Fprintf(o.stdout, "  %s\n", m.Error)
 			if len(m.After) > 0 {
 				fmt.Fprintf(o.stdout, "  note: %s run before it and were not simulated; if they change "+
@@ -249,8 +293,8 @@ func printPlan(o streams, r *planReport) {
 	}
 	switch {
 	case inserted:
-		fmt.Fprintln(o.stdout, "\nrolled back: nothing was changed, except that a sequence an insert "+
-			"drew from stays where it was moved to, which only leaves a gap in the ids")
+		fmt.Fprintln(o.stdout, "\nrolled back: nothing was changed, except that an id an insert drew from "+
+			"a sequence stays drawn, which only leaves a gap")
 	case len(r.Migrations) > 0:
 		fmt.Fprintln(o.stdout, "\nrolled back: nothing was changed")
 	}

@@ -217,17 +217,26 @@ func TestAnEditedRowIsLeftAlone(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `UPDATE plans SET price_cents = 3333 WHERE name = 'team'`); err != nil {
 		t.Fatal(err)
 	}
-	var log []string
-	err := fixtureapply.Apply(ctx, db, changeSet(),
-		fixtureapply.WithLogger(func(f string, a ...any) { log = append(log, f) }))
+	var outcomes []fixtureapply.Outcome
+	err := fixtureapply.Apply(ctx, db, changeSet(), quiet(),
+		fixtureapply.WithReport(func(o fixtureapply.Outcome) { outcomes = append(outcomes, o) }))
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if got := scan[int64](t, db, `SELECT price_cents FROM plans WHERE name = 'team'`); got != 3333 {
 		t.Fatalf("the hand-made edit should have survived, price_cents = %d", got)
 	}
-	if len(log) != len(changeSet().Changes) {
-		t.Fatalf("every change should be reported, got %d lines", len(log))
+	reported := map[int]fixtureapply.Status{}
+	for _, o := range outcomes {
+		if o.Index >= 0 {
+			reported[o.Index] = o.Status
+		}
+	}
+	if len(reported) != len(changeSet().Changes) {
+		t.Fatalf("every change should be reported, got %v", reported)
+	}
+	if reported[2] != fixtureapply.StatusSkipped {
+		t.Fatalf("the edited row's update should be skipped, got %v", reported)
 	}
 }
 

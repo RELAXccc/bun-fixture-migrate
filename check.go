@@ -47,7 +47,8 @@ func Check(cfg *Config, database, fixture *Snapshot) (*CheckResult, error) {
 func (c *CheckResult) Lines() []string {
 	var out []string
 	grouped := FindingsByKind(c.Findings)
-	for _, kind := range []FindingKind{FindingUnknownColumn, FindingZeroDefault, FindingNullDefault, FindingDuplicateKey} {
+	for _, kind := range []FindingKind{FindingUnknownColumn, FindingInvalidValue, FindingZeroDefault,
+		FindingNullDefault, FindingDuplicateKey} {
 		list := grouped[kind]
 		if len(list) == 0 {
 			continue

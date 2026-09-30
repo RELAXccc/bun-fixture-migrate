@@ -53,7 +53,7 @@ func newIndex(cfg *Config, doc Doc) *index {
 			if m == nil {
 				continue
 			}
-			if id := normalize(row.Str(m.ID)); id != "" && id != "0" {
+			if id := idText(m, row); id != "" {
 				if _, dup := ix.byID[dm.Name][id]; !dup {
 					ix.byID[dm.Name][id] = row
 				}
@@ -74,10 +74,24 @@ func (ix *index) anchorOf(m *Model, row Row) string {
 	if m == nil {
 		return ""
 	}
-	if id := normalize(row.Str(m.ID)); id != "" && id != "0" && !row[m.ID].IsNull {
+	if id := idText(m, row); id != "" {
 		return "pk" + id
 	}
 	return ""
+}
+
+// idText is a row's primary key as text, "" when the row leaves it to the
+// database: absent, null, or its type's zero, which bun does not write.
+func idText(m *Model, row Row) string {
+	c, ok := row[m.ID]
+	if !ok || c.IsNull {
+		return ""
+	}
+	id := scalarText(c)
+	if id == "" || sameScalar(id, "0") {
+		return ""
+	}
+	return id
 }
 
 // loaded registers a row the way dbfixture does after inserting it: later
@@ -122,6 +136,12 @@ func (ix *index) value(model, col string, row Row) (fixturechange.Value, bool, e
 		v, err := ix.resolveTemplate(model, col, text, match, target, isRef)
 		return v, err == nil, err
 	}
+	if match := looseTemplate.FindStringSubmatch(text); match != nil {
+		return fixturechange.Value{}, false, fmt.Errorf(
+			"%s.%s is %s, but %q is not a name text/template can follow, so dbfixture cannot load this "+
+				"file: give that row an _id made of letters, digits and underscores, not starting with a digit",
+			model, col, text, match[2])
+	}
 	// Any other template is evaluated by dbfixture at load time, so the
 	// database never holds this text. Comparing it, or writing it into a
 	// migration, would be comparing and writing something that is not there.
@@ -130,14 +150,17 @@ func (ix *index) value(model, col string, row Row) (fixturechange.Value, bool, e
 			"%s.%s is %s, a template dbfixture evaluates when it loads the file and this tool cannot; "+
 				"the database does not hold this text, so put %s in ignore", model, col, text, col)
 	}
+	// The value itself, exactly: a string as written, a number as YAML
+	// resolves it.
+	lit := scalarText(cell)
 	if !isRef {
-		return fixturechange.Lit(normalize(text)), true, nil
+		return fixturechange.Lit(lit), true, nil
 	}
 	// A reference column holding nothing, 0 or NULL points at no row.
-	if n := normalize(text); n == "" || n == "0" {
-		return fixturechange.Lit(n), true, nil
+	if lit == "" || sameScalar(lit, "0") {
+		return fixturechange.Lit(lit), true, nil
 	}
-	v, err := ix.refByID(model, col, target, normalize(text))
+	v, err := ix.refByID(model, col, target, lit)
 	return v, err == nil, err
 }
 
@@ -181,7 +204,7 @@ func (ix *index) resolveTemplate(model, col, text string, match []string, target
 	if tcell.IsNull {
 		return fixturechange.Null(), nil
 	}
-	return fixturechange.Lit(normalize(tcell.Text)), nil
+	return fixturechange.Lit(scalarText(tcell)), nil
 }
 
 // refByID turns the id a reference column holds into a reference by key, using
@@ -239,7 +262,7 @@ func isZero(v fixturechange.Value) bool {
 	if v.Ref != nil {
 		return false
 	}
-	return v.IsNull || v.Lit == "" || normalize(v.Lit) == "0"
+	return v.IsNull || v.Lit == "" || sameScalar(v.Lit, "0")
 }
 
 // FixtureSnapshot resolves a parsed fixture file into a snapshot. Every value
@@ -284,13 +307,10 @@ func (ix *index) entry(model string, m *Model, row Row) (*Entry, error) {
 	}
 	e := &Entry{
 		Anchor: row.Str(anchorColumn),
-		ID:     normalize(row.Str(m.ID)),
+		ID:     idText(m, row),
 		Key:    key,
 		KeyStr: keyString(model, key),
 		Cells:  fixturechange.Values{},
-	}
-	if e.ID == "0" {
-		e.ID = ""
 	}
 	cols := map[string]bool{}
 	for col := range row {
@@ -349,7 +369,7 @@ func LintZeroDefaults(cfg *Config, snap *Snapshot, tables map[string]*dbschema.T
 					continue
 				}
 				zero, known := column.ZeroText()
-				if !known || normalize(v.Lit) != normalize(zero) {
+				if !known || !sameScalar(v.Lit, zero) {
 					continue
 				}
 				hazard, stored := column.ZeroIsNotDefault()
@@ -430,6 +450,18 @@ func LintColumns(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table)
 				Detail: "the configuration says this model lives in " + cfg.QualifiedTable(m) + ", which does not exist",
 			})
 			continue
+		}
+		if idCol, ok := table.Column(m.ID); ok && idCol.IdentityAlways {
+			for _, e := range snap.Entries[model] {
+				if e.ID != "" {
+					snap.Findings = append(snap.Findings, Finding{
+						Kind: FindingUnknownColumn, Model: model, Row: e.KeyStr,
+						Detail: fmt.Sprintf("%s is %s, but %s.%s is an identity GENERATED ALWAYS, which refuses "+
+							"an explicit value from dbfixture as from a migration: leave %s out and name the row "+
+							"by its _id", m.ID, e.ID, table.Qualified(), m.ID, m.ID),
+					})
+				}
+			}
 		}
 		for _, col := range snap.Columns[model] {
 			column, ok := table.Column(col)

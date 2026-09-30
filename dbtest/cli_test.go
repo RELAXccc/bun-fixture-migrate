@@ -185,13 +185,29 @@ func TestTheLifeOfAFixtureChange(t *testing.T) {
 	var plan struct {
 		Migrations []struct {
 			Result  string
-			Changes []struct{ Status, Model, Key string }
+			Changes []struct {
+				Index              int
+				Status, Model, Key string
+			}
 		}
 	}
 	_, stdout, _ := c.run("plan", "-json")
 	if err := json.Unmarshal([]byte(stdout), &plan); err != nil || len(plan.Migrations) != 1 ||
-		plan.Migrations[0].Result != "succeeds" || len(plan.Migrations[0].Changes) != 2 {
+		plan.Migrations[0].Result != "succeeds" {
 		t.Fatalf("plan -json: %v\n%s", err, stdout)
+	}
+	// Two changes, and the sequence the insert's explicit id would move,
+	// which a dry run reports instead of moving.
+	var changes, sequences int
+	for _, c := range plan.Migrations[0].Changes {
+		if c.Index >= 0 {
+			changes++
+		} else if c.Status == "sequence" {
+			sequences++
+		}
+	}
+	if changes != 2 || sequences != 1 {
+		t.Fatalf("plan -json: %d changes, %d sequences\n%s", changes, sequences, stdout)
 	}
 
 	// Deploy with bun's migrator, then everything agrees.

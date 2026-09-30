@@ -211,20 +211,3 @@ func TestIsZero(t *testing.T) {
 		}
 	}
 }
-
-func TestNormalizeComparesNumbersByValueAndLeavesTextAlone(t *testing.T) {
-	for in, want := range map[string]string{
-		"1.0":    "1",
-		" 2 ":    "2",
-		"2.50":   "2.5",
-		"1e3":    "1000",
-		"01":     "1",
-		"EUR":    "EUR",
-		"":       "",
-		"1 plan": "1 plan",
-	} {
-		if got := normalize(in); got != want {
-			t.Errorf("normalize(%q) = %q, want %q", in, got, want)
-		}
-	}
-}

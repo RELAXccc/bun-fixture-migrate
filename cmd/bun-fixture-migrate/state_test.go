@@ -224,17 +224,20 @@ func TestAStrayArgumentIsAnError(t *testing.T) {
 // DSN in its error. Neither may reach the terminal.
 func TestABadDSNIsASentenceWithoutThePassword(t *testing.T) {
 	for name, dsn := range map[string]string{
-		"libpq keywords":   "host=localhost dbname=app password=s3cret",
-		"broken URL":       "postgres://app:s3cret@[::1/app",
-		"unreachable host": "postgres://app:s3cret@127.0.0.1:1/app?sslmode=disable",
-		"other scheme":     "mysql://app:s3cret@localhost/app",
+		"libpq keywords":    "host=localhost dbname=app password=s3cret",
+		"broken URL":        "postgres://app:s3cret@[::1/app",
+		"unreachable host":  "postgres://app:s3cret@127.0.0.1:1/app?sslmode=disable",
+		"other scheme":      "mysql://app:s3cret@localhost/app",
+		"unix without path": "unix://app:s3cret@mydb",
+		"query password":    "postgres://app@127.0.0.1:1/app?sslmode=disable&password=s3cret",
+		"escaped password":  "postgres://app:s3cr%40et@127.0.0.1:1/app?sslmode=disable&password=s3cret",
 	} {
 		cfg, _ := projectWith(t, config+"database: "+dsn+"\n", oldFixture, oldFixture)
 		code, out, errs := call(t, "check", "-config", cfg)
 		if code != 1 {
 			t.Errorf("%s: exit %d\n%s%s", name, code, out, errs)
 		}
-		if strings.Contains(errs, "s3cret") || strings.Contains(errs, "goroutine") {
+		if strings.Contains(errs, "s3cr") || strings.Contains(errs, "goroutine") {
 			t.Errorf("%s: the password or a stack trace reached the terminal:\n%s", name, errs)
 		}
 	}

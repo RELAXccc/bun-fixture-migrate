@@ -113,6 +113,9 @@ const (
 	// FindingNullDefault is an explicit null written into a column that has a
 	// default, which bun turns into DEFAULT for a pointer or nullzero field.
 	FindingNullDefault FindingKind = "null against a default"
+	// FindingInvalidValue is a value the column's type cannot hold, which
+	// the migration would fail on at deploy time.
+	FindingInvalidValue FindingKind = "invalid value"
 	// FindingUnknownColumn is a column in the fixture file that the table does
 	// not have.
 	FindingUnknownColumn FindingKind = "unknown column"

@@ -3,7 +3,6 @@ package fixturemigrate
 import (
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -16,8 +15,13 @@ const anchorColumn = "_id"
 // Cell is one column of a fixture row.
 type Cell struct {
 	// Text is the scalar as it was written, with no conversion. Numbers keep
-	// the notation of the file; compare through normalize.
+	// the notation of the file; scalarText resolves them.
 	Text string
+	// Tag is the YAML type the scalar resolved to, "!!str", "!!int",
+	// "!!float", "!!bool", "!!timestamp", and "" for a value that did not come
+	// from YAML, such as a configured default. It decides what the text
+	// means: 017 is the integer 15, "017" is a string.
+	Tag string
 	// IsNull is true for an explicit YAML null.
 	IsNull bool
 	// Structured is true when the value was a mapping or a sequence. The
@@ -74,7 +78,7 @@ func cellOf(node yaml.Node) (Cell, error) {
 	case node.Tag == "!!null":
 		return Cell{IsNull: true}, nil
 	case node.Kind == yaml.ScalarNode:
-		return Cell{Text: node.Value}, nil
+		return Cell{Text: node.Value, Tag: node.ShortTag()}, nil
 	case node.Kind == 0:
 		return Cell{IsNull: true}, nil
 	default:
@@ -93,22 +97,21 @@ func (r Row) Str(col string) string { return r[col].Text }
 // The delimiters are dbfixture's own: it only evaluates a value holding
 // "{{ " and " }}" with the spaces (dbfixture/fixture.go, tplRE), so
 // "{{$.Model.row.ID}}" is not a template to it and is not one here.
-var template = regexp.MustCompile(`^\{\{ \s*\$\.([A-Za-z_][A-Za-z0-9_]*)\.([^.\s{}]+)\.([A-Za-z_][A-Za-z0-9_]*)\s* \}\}$`)
+//
+// The row is an identifier too: text/template reads "$.Model.row.Field" as a
+// chain of field names, so an anchor such as "my-row" or "1_month" cannot be
+// named in a template at all, however dbfixture registered it.
+var template = regexp.MustCompile(`^\{\{ \s*\$\.([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s* \}\}$`)
+
+// looseTemplate is the same reference with any row name, so a row name
+// text/template cannot parse gets a message about that rather than about
+// templates in general.
+var looseTemplate = regexp.MustCompile(`^\{\{ \s*\$\.([A-Za-z_][A-Za-z0-9_]*)\.([^\s{}]+)\.([A-Za-z_][A-Za-z0-9_]*)\s* \}\}$`)
 
 // anyTemplate is dbfixture's test for "evaluate this value as a template"
 // (tplRE). A value it matches never reaches the database as written: dbfixture
 // replaces it with whatever the template produces.
 var anyTemplate = regexp.MustCompile(`\{\{ .+ \}\}`)
-
-// normalize makes two spellings of the same number compare equal ("1.0" and
-// "1"). Everything else is returned trimmed.
-func normalize(s string) string {
-	s = strings.TrimSpace(s)
-	if f, err := strconv.ParseFloat(s, 64); err == nil {
-		return strconv.FormatFloat(f, 'f', -1, 64)
-	}
-	return s
-}
 
 // underscore is bun's default column name for a Go field name, so a template
 // that names a field ("ID", "GroupName") can be matched against a column.

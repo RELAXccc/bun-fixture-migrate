@@ -29,8 +29,17 @@ type Column struct {
 	// so an exported file looks like the table.
 	Position int
 	// Type is the PostgreSQL type name as the catalog spells it ("int8",
-	// "text", "bool", "numeric", "timestamptz", "jsonb").
+	// "text", "bool", "numeric", "timestamptz", "jsonb", "_text" for text[]).
 	Type string
+	// FullType is the type as SQL writes it, with its modifiers and, where
+	// the search path needs it, its schema: "numeric(10,2)", "character
+	// varying(20)", "text[]", "timestamp with time zone". It is what a value
+	// is cast to so PostgreSQL can say what the column would hold.
+	FullType string
+	// Category is the type's category (pg_type.typcategory): "A" for an
+	// array, "E" for an enum, "N" numeric, "S" string, "D" date and time,
+	// "U" user-defined, and so on.
+	Category string
 	// Nullable is true when the column accepts NULL.
 	Nullable bool
 	// Default is the column default exactly as the catalog stores it, "" when
@@ -39,6 +48,9 @@ type Column struct {
 	Default string
 	// Identity is true for a GENERATED ... AS IDENTITY column.
 	Identity bool
+	// IdentityAlways is true for GENERATED ALWAYS AS IDENTITY, which refuses
+	// an explicit value from anybody: dbfixture, bun or a migration.
+	IdentityAlways bool
 	// Generated is true for a GENERATED ALWAYS AS (...) STORED column. Its
 	// Default is the generation expression, and nothing can write into it.
 	Generated bool
@@ -224,8 +236,10 @@ func Load(ctx context.Context, db bun.IDB, schemas ...string) (map[string]*Table
 	// One row per column. Nothing is aggregated in SQL: a column name may hold
 	// any character, so there is no separator a string_agg could use safely.
 	const columnQuery = `
-SELECT n.nspname, c.relname, a.attname, a.attnum, t.typname, NOT a.attnotnull,
-       COALESCE(pg_get_expr(d.adbin, d.adrelid), ''), a.attidentity <> '', a.attgenerated <> ''
+SELECT n.nspname, c.relname, a.attname, a.attnum, t.typname,
+       format_type(a.atttypid, a.atttypmod), t.typcategory::text, NOT a.attnotnull,
+       COALESCE(pg_get_expr(d.adbin, d.adrelid), ''), a.attidentity <> '', a.attidentity = 'a',
+       a.attgenerated <> ''
 FROM pg_attribute a
 JOIN pg_class c ON c.oid = a.attrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -236,8 +250,9 @@ ORDER BY n.nspname, c.relname, a.attnum`
 	if err := each(ctx, db, columnQuery, list, func(rows *sql.Rows) error {
 		var schema, table string
 		var col Column
-		if err := rows.Scan(&schema, &table, &col.Name, &col.Position, &col.Type, &col.Nullable,
-			&col.Default, &col.Identity, &col.Generated); err != nil {
+		if err := rows.Scan(&schema, &table, &col.Name, &col.Position, &col.Type, &col.FullType, &col.Category,
+			&col.Nullable,
+			&col.Default, &col.Identity, &col.IdentityAlways, &col.Generated); err != nil {
 			return err
 		}
 		t := tables[schema+"."+table]

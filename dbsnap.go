@@ -127,7 +127,9 @@ func readColumns(m *Model, table *dbschema.Table, want []string) ([]string, erro
 	if want == nil {
 		var out []string
 		for _, c := range table.Columns {
-			if m.skip(c.Name) {
+			// A generated column is the database's to fill, like a derived
+			// one is the application's: nothing can write it back.
+			if m.skip(c.Name) || c.Generated {
 				continue
 			}
 			out = append(out, c.Name)
@@ -186,16 +188,17 @@ func selectQuery(cfg *Config, m *Model, table *dbschema.Table, cols []string) (s
 		return "", false, err
 	}
 	selects := make([]string, 0, len(cols)+1)
-	_, hasID := table.Column(m.ID)
+	idColumn, hasID := table.Column(m.ID)
 	if hasID {
-		selects = append(selects, "("+idQuoted+")::text")
+		selects = append(selects, readExpr(idColumn.Type, idQuoted))
 	}
 	for _, col := range cols {
 		q, err := quoteIdent(col)
 		if err != nil {
 			return "", false, err
 		}
-		selects = append(selects, "("+q+")::text")
+		column, _ := table.Column(col)
+		selects = append(selects, readExpr(column.Type, q))
 	}
 	qualified, err := quoteQualified(cfg.QualifiedTable(m))
 	if err != nil {
@@ -220,6 +223,20 @@ func selectQuery(cfg *Config, m *Model, table *dbschema.Table, cols []string) (s
 		query += " ORDER BY " + strings.Join(orderBy, ", ")
 	}
 	return query, hasID, nil
+}
+
+// readExpr is how a column is read as text. PostgreSQL's own text is the
+// value for nearly every type, in the session's fixed settings; json keeps
+// the spelling it was written in, so it is read through jsonb, which has one;
+// money's text depends on the locale, so it is read as the number it is.
+func readExpr(typ, expr string) string {
+	switch typ {
+	case "json":
+		return "(" + expr + ")::jsonb::text"
+	case "money":
+		return "(" + expr + ")::numeric::text"
+	}
+	return "(" + expr + ")::text"
 }
 
 // readRows runs the one SELECT per model.
@@ -253,9 +270,10 @@ func readRows(ctx context.Context, db bun.IDB, cfg *Config, m *Model, table *dbs
 		i := 0
 		if hasID {
 			if cells[0].Valid {
-				r.id = normalize(cells[0].String)
+				idCol, _ := table.Column(m.ID)
+				r.id = columnText(idCol.Type, cells[0].String)
 			}
-			if r.id == "0" {
+			if sameScalar(r.id, "0") {
 				r.id = ""
 			}
 			i = 1
@@ -266,7 +284,8 @@ func readRows(ctx context.Context, db bun.IDB, cfg *Config, m *Model, table *dbs
 				r.values[col] = fixturechange.Null()
 				continue
 			}
-			r.values[col] = fixturechange.Lit(normalize(c.String))
+			column, _ := table.Column(col)
+			r.values[col] = fixturechange.Lit(columnText(column.Type, c.String))
 		}
 		out = append(out, r)
 	}
@@ -324,7 +343,13 @@ func anchorOf(key fixturechange.Values) string {
 	if len(parts) == 0 {
 		return "row"
 	}
-	return strings.Join(parts, "_")
+	anchor := strings.Join(parts, "_")
+	// A template names the anchor as a Go identifier ("$.Plan.row.ID"), and
+	// text/template reads "1_month" as a malformed number.
+	if anchor[0] >= '0' && anchor[0] <= '9' {
+		anchor = "r" + anchor
+	}
+	return anchor
 }
 
 func uniqueAnchor(base, id string, taken map[string]bool) string {

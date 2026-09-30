@@ -534,11 +534,15 @@ type Applied struct {
 // ReadApplied reads bun's migrations table, by migration name. The second
 // result is false when the table does not exist, which is what a database the
 // migrator never ran against looks like, and not an error.
+//
+// The name is used as bun uses it, unquoted, so PostgreSQL folds it to lower
+// case exactly as it did for the migrator; it has been checked to be a plain,
+// optionally schema-qualified identifier.
 func ReadApplied(ctx context.Context, db bun.IDB, table string) (map[string]Applied, bool, error) {
-	quoted, err := quoteQualified(table)
-	if err != nil {
+	if _, err := quoteQualified(table); err != nil {
 		return nil, false, err
 	}
+	quoted := table
 	var exists bool
 	if err := db.QueryRowContext(ctx, "SELECT to_regclass(?) IS NOT NULL", quoted).Scan(&exists); err != nil {
 		return nil, false, fmt.Errorf("look for %s: %w", table, err)

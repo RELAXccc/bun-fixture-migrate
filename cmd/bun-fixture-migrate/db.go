@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 
+	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
+
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 	"github.com/uptrace/bun/driver/pgdriver"
@@ -31,11 +33,12 @@ func resolveDSN(dsn string) (string, error) {
 
 // openDB connects to PostgreSQL.
 //
-// pgdriver.WithDSN panics on a DSN it cannot read, and url.Parse puts the
-// whole DSN, password and all, into its error. So the DSN is checked here
-// first, and no message this function returns contains it: a typo in
-// DATABASE_URL must end up as a sentence in a deploy log, not as a stack
-// trace or a leaked password.
+// pgdriver.WithDSN panics on a DSN it cannot read, with the DSN in the panic,
+// and url.Parse puts the whole DSN, password and all, into its error. So the
+// DSN is checked here first, a panic's text is never shown, and every message
+// this function returns has the password masked, wherever the DSN put it: a
+// typo in DATABASE_URL must end up as a sentence in a deploy log, not as a
+// stack trace or a leaked password.
 func openDB(ctx context.Context, dsn string) (*bun.DB, error) {
 	u, err := url.Parse(dsn)
 	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql" && u.Scheme != "unix") {
@@ -43,14 +46,17 @@ func openDB(ctx context.Context, dsn string) (*bun.DB, error) {
 			"postgres://user:password@host:5432/dbname?sslmode=verify-full (a libpq \"host=... dbname=...\" " +
 			"string is not supported)")
 	}
+	if u.Scheme == "unix" && u.Path == "" {
+		return nil, fmt.Errorf("the database DSN %s is a unix socket DSN without the socket's path", redact(u))
+	}
 	connector, err := newConnector(dsn)
 	if err != nil {
-		return nil, fmt.Errorf("the database DSN %s cannot be used: %v", u.Redacted(), err)
+		return nil, fmt.Errorf("pgdriver cannot use the database DSN %s", redact(u))
 	}
 	db := bun.NewDB(sql.OpenDB(connector), pgdialect.New())
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("connect to %s: %w", u.Redacted(), err)
+		return nil, fmt.Errorf("connect to %s: %s", redact(u), scrub(err.Error(), u))
 	}
 	return db, nil
 }
@@ -58,7 +64,8 @@ func openDB(ctx context.Context, dsn string) (*bun.DB, error) {
 func newConnector(dsn string) (c *pgdriver.Connector, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("%v", r)
+			// The panic's text repeats the DSN; it is dropped, not shown.
+			err = errors.New("pgdriver refused the DSN")
 		}
 	}()
 	// The application name goes first so that one in the DSN wins. It is what
@@ -67,6 +74,53 @@ func newConnector(dsn string) (c *pgdriver.Connector, err error) {
 		pgdriver.WithApplicationName("bun-fixture-migrate"),
 		pgdriver.WithDSN(dsn),
 	), nil
+}
+
+// secretParams are the query parameters of a DSN that hold a secret.
+var secretParams = map[string]bool{"password": true, "sslpassword": true}
+
+// redact is the DSN with every password masked: the one in the user info and
+// any passed as a query parameter, which url.URL.Redacted leaves alone.
+func redact(u *url.URL) string {
+	c := *u
+	if c.User != nil {
+		if _, ok := c.User.Password(); ok {
+			c.User = url.UserPassword(c.User.Username(), "xxxxx")
+		}
+	}
+	q := c.Query()
+	for k := range q {
+		if secretParams[strings.ToLower(k)] {
+			q.Set(k, "xxxxx")
+		}
+	}
+	c.RawQuery = q.Encode()
+	return c.String()
+}
+
+// scrub masks every password of the DSN in a message from the driver, in the
+// spellings a message could carry it in.
+func scrub(msg string, u *url.URL) string {
+	var secrets []string
+	if u.User != nil {
+		if p, ok := u.User.Password(); ok {
+			secrets = append(secrets, p)
+		}
+	}
+	for k, vs := range u.Query() {
+		if secretParams[strings.ToLower(k)] {
+			secrets = append(secrets, vs...)
+		}
+	}
+	for _, secret := range secrets {
+		if secret == "" {
+			continue
+		}
+		for _, spelling := range []string{secret, url.QueryEscape(secret), url.PathEscape(secret)} {
+			msg = strings.ReplaceAll(msg, spelling, "xxxxx")
+		}
+	}
+	return msg
 }
 
 // readOnly runs fn inside one REPEATABLE READ, READ ONLY transaction, and
@@ -89,6 +143,9 @@ func readOnly(ctx context.Context, db *bun.DB, fn func(tx bun.Tx) error) error {
 	}
 	if readOnly != "on" {
 		return errors.New("the database did not start a read-only transaction; refusing to go on")
+	}
+	if err := fixturemigrate.PrepareSession(ctx, tx); err != nil {
+		return err
 	}
 	return fn(tx)
 }

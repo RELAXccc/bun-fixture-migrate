@@ -74,7 +74,10 @@ func Export(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table, head
 				b.WriteString("\n")
 			}
 			write(anchorColumn, yamlAnchor(e.Anchor), "")
-			if e.ID != "" {
+			// An identity GENERATED ALWAYS refuses an explicit id from
+			// dbfixture as from anybody, so the file names rows by anchor
+			// only and the database numbers them.
+			if idCol, _ := table.Column(m.ID); e.ID != "" && !idCol.IdentityAlways {
 				write(m.ID, yamlScalar(e.ID, idType(table, m.ID)), "")
 			}
 			for _, col := range cols {
@@ -101,7 +104,7 @@ func exportColumns(m *Model, table *dbschema.Table, have []string) []string {
 	present := set(have)
 	var out []string
 	for _, c := range table.Columns {
-		if c.Name == m.ID || m.skip(c.Name) || !present[c.Name] {
+		if c.Name == m.ID || m.skip(c.Name) || c.Generated || !present[c.Name] {
 			continue
 		}
 		out = append(out, c.Name)
@@ -163,7 +166,7 @@ func hazardComment(v fixturechange.Value, column dbschema.Column) string {
 		return ""
 	}
 	zero, known := column.ZeroText()
-	if !known || normalize(v.Lit) != normalize(zero) {
+	if !known || !sameScalar(v.Lit, zero) {
 		return ""
 	}
 	hazard, stored := column.ZeroIsNotDefault()
@@ -193,6 +196,10 @@ func yamlScalar(text, typ string) string {
 			return "true"
 		case "false", "f":
 			return "false"
+		}
+	case "date", "timestamp", "timestamptz":
+		if s, ok := exportTimestamp(typ, text); ok {
+			return s
 		}
 	}
 	return yamlString(text)

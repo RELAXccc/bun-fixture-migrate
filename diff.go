@@ -104,7 +104,9 @@ func sameValue(a, b fixturechange.Value) bool {
 	if a.Ref != nil {
 		return a.Ref.Model == b.Ref.Model && a.Ref.Key == b.Ref.Key
 	}
-	return normalize(a.Lit) == normalize(b.Lit)
+	// Both sides are already canonical: a string as written, a number in one
+	// spelling (see scalarText and columnText).
+	return a.Lit == b.Lit
 }
 
 // Compute diffs two snapshots. Both sides are the same shape whether they came
