@@ -149,6 +149,9 @@ func Render(cfg *Config, name, stamp string, res *Result) ([]byte, error) {
 		if t.Serial {
 			b.WriteString(", Serial: true")
 		}
+		if t.Cascade {
+			b.WriteString(", Cascade: true")
+		}
 		b.WriteString("},\n")
 	}
 	b.WriteString("\t},\n")

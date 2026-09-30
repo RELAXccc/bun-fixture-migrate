@@ -7,6 +7,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
 	"github.com/RELAXccc/bun-fixture-migrate/fixtureapply"
@@ -267,5 +268,114 @@ func TestATemplateNamingAnUnnameableAnchorIsRefused(t *testing.T) {
 	_, err = fixturemigrate.FixtureSnapshot(cfg, doc, "fixture.yml")
 	if err == nil || !strings.Contains(err.Error(), `"north-america" is not a name text/template can follow`) {
 		t.Fatalf("expected the anchor to be named: %v", err)
+	}
+}
+
+// Two replicas of an application migrate at the same start-up. Without a
+// unique index nothing in the database stops both from finding the row
+// missing and both inserting it; the advisory lock makes the second wait and
+// then find it there.
+func TestConcurrentChangeSetsDoNotBothInsert(t *testing.T) {
+	db := connect(t)
+	ctx := context.Background()
+	run(t, db,
+		"DROP TABLE IF EXISTS race_plans",
+		"CREATE TABLE race_plans (id bigserial PRIMARY KEY, name text NOT NULL)")
+	set := fixturechange.Set{Name: "race",
+		Tables: fixturechange.Tables{"Plan": {Name: "race_plans", ID: "id", Key: "name"}},
+		Changes: []fixturechange.Change{{Model: "Plan", Kind: fixturechange.Insert,
+			Key: fixturechange.Values{"name": fixturechange.Lit("pro")},
+			New: fixturechange.Values{"name": fixturechange.Lit("pro")}}}}
+
+	first, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixtureapply.Apply(ctx, first, set, quiet()); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- fixtureapply.Apply(ctx, db, set, quiet()) }()
+	select {
+	case err := <-done:
+		t.Fatalf("the second change set ran while the first was open: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := first.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("the second change set: %v", err)
+	}
+	if got := scan[int64](t, db, "SELECT count(*) FROM race_plans"); got != 1 {
+		t.Fatalf("%d rows named pro", got)
+	}
+}
+
+func deletePlan(cascade bool) fixturechange.Set {
+	return fixturechange.Set{Name: "delete",
+		Tables: fixturechange.Tables{"Plan": {Name: "del_plans", ID: "id", Key: "name", Cascade: cascade}},
+		Changes: []fixturechange.Change{{Model: "Plan", Kind: fixturechange.Delete,
+			Key: fixturechange.Values{"name": fixturechange.Lit("old")},
+			Old: fixturechange.Values{"id": fixturechange.Lit("1"), "name": fixturechange.Lit("old")}}}}
+}
+
+// Deleting a plan must not quietly delete, or detach, the subscriptions on
+// it: they are not master data and the change set knows nothing of them.
+func TestADeleteDoesNotCascadeIntoOtherRows(t *testing.T) {
+	db := connect(t)
+	ctx := context.Background()
+	for _, action := range []string{"CASCADE", "SET NULL", "RESTRICT"} {
+		t.Run(action, func(t *testing.T) {
+			run(t, db,
+				"DROP TABLE IF EXISTS del_subs, del_plans",
+				"CREATE TABLE del_plans (id bigint PRIMARY KEY, name text UNIQUE NOT NULL)",
+				"CREATE TABLE del_subs (id bigint PRIMARY KEY, plan_id bigint REFERENCES del_plans (id) ON DELETE "+action+")",
+				"INSERT INTO del_plans VALUES (1, 'old'), (2, 'other')",
+				"INSERT INTO del_subs VALUES (10, 1), (11, 1), (12, 2)")
+			err := fixtureapply.Apply(ctx, db, deletePlan(false), quiet())
+			if err == nil || !strings.Contains(err.Error(), "2 rows of del_subs point at del_plans name=old") {
+				t.Fatalf("expected the delete to be refused with the rows named: %v", err)
+			}
+			if got := scan[int64](t, db, "SELECT count(*) FROM del_subs WHERE plan_id = 1"); got != 2 {
+				t.Fatalf("the subscriptions were touched: %d left", got)
+			}
+			if action == "RESTRICT" {
+				return
+			}
+			// Allowed for the model, the delete goes through and takes the
+			// foreign key's action.
+			if err := fixtureapply.Apply(ctx, db, deletePlan(true), quiet()); err != nil {
+				t.Fatalf("with deletes: cascade: %v", err)
+			}
+			if got := scan[int64](t, db, "SELECT count(*) FROM del_plans WHERE name = 'old'"); got != 0 {
+				t.Fatal("the plan was not deleted")
+			}
+		})
+	}
+	// Nothing pointing at it: the delete goes through without being allowed.
+	run(t, db, "DELETE FROM del_subs WHERE plan_id = 1", "INSERT INTO del_plans VALUES (1, 'old') ON CONFLICT DO NOTHING")
+	if err := fixtureapply.Apply(ctx, db, deletePlan(false), quiet()); err != nil {
+		t.Fatalf("a row nothing points at: %v", err)
+	}
+}
+
+// A category tree: a parent's children point at it from the same table.
+func TestADeleteDoesNotCascadeThroughItsOwnTable(t *testing.T) {
+	db := connect(t)
+	run(t, db,
+		"DROP TABLE IF EXISTS del_categories",
+		"CREATE TABLE del_categories (id bigint PRIMARY KEY, name text UNIQUE NOT NULL, "+
+			"parent_id bigint REFERENCES del_categories (id) ON DELETE CASCADE)",
+		"INSERT INTO del_categories VALUES (1, 'root', NULL), (2, 'child', 1)")
+	set := fixturechange.Set{Name: "tree",
+		Tables: fixturechange.Tables{"Category": {Name: "del_categories", ID: "id", Key: "name"}},
+		Changes: []fixturechange.Change{{Model: "Category", Kind: fixturechange.Delete,
+			Key: fixturechange.Values{"name": fixturechange.Lit("root")},
+			Old: fixturechange.Values{"id": fixturechange.Lit("1"), "name": fixturechange.Lit("root"),
+				"parent_id": fixturechange.Null()}}}}
+	err := fixtureapply.Apply(context.Background(), db, set, quiet())
+	if err == nil || !strings.Contains(err.Error(), "1 row of del_categories point at") {
+		t.Fatalf("expected the child to stop the delete: %v", err)
 	}
 }

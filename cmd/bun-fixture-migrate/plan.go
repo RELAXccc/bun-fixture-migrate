@@ -102,6 +102,16 @@ func plan(o streams, args []string) error {
 		return err
 	}
 	defer db.Close()
+	// A standby refuses every write, which would read as every migration
+	// failing.
+	var standby bool
+	if err := db.QueryRowContext(o.ctx, "SELECT pg_is_in_recovery()").Scan(&standby); err != nil {
+		return err
+	}
+	if standby {
+		return fmt.Errorf("the database is a standby, which accepts no writes, so nothing can be planned " +
+			"there: point plan at the primary or at a writable copy")
+	}
 
 	var targets []planTarget
 	report := &planReport{}

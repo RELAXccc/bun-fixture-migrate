@@ -17,6 +17,7 @@ import (
 func TestAGeneratedFileReadsBackAsTheSetItRuns(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.Policy.Renames = RenameUpdate
+	cfg.Models["Currency"].Deletes = DeleteCascade
 	next := replace(t, base, "      price_cents: 2000\n", "      price_cents: 2500\n")
 	next = replace(t, next, "      name: team\n", "      name: crew\n")
 	next = replace(t, next, "      quota: 100\n", "      quota: 100\n      note: ~\n")

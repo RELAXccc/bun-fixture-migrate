@@ -82,6 +82,11 @@ func TestZeroIsNotDefault(t *testing.T) {
 		{"serial", Column{Type: "int8", Default: "nextval('t_id_seq'::regclass)"}, false, ""},
 		{"expression", Column{Type: "timestamptz", Default: "now()"}, false, ""},
 		{"unknown type", Column{Type: "jsonb", Default: "'{}'::jsonb"}, false, ""},
+		// An expression is never the zero: bun writes DEFAULT and the
+		// database runs it.
+		{"uuid generated", Column{Type: "uuid", Default: "gen_random_uuid()"}, true, "gen_random_uuid()"},
+		{"int from a function", Column{Type: "int4", Default: "next_rank()"}, true, "next_rank()"},
+		{"generated column", Column{Type: "int4", Default: "(a * 2)", Generated: true}, false, ""},
 	} {
 		hazard, stored := tc.col.ZeroIsNotDefault()
 		if hazard != tc.hazard || stored != tc.stored {

@@ -358,10 +358,12 @@ policy:
   renames: refuse
 
   # A row left the fixture file.
-  #   allow   write a guarded DELETE (default)
-  #   refuse  report it
-  # Override it per model with "deletes: refuse" wherever other tables point at
-  # the row and only you can say whether they should cascade, be repointed or
-  # block the delete.
+  #   allow    write a guarded DELETE (default). If rows of other tables still
+  #            point at it, the migration fails instead of letting a foreign
+  #            key's ON DELETE CASCADE or SET NULL reach them.
+  #   refuse   report it and write nothing
+  #   cascade  write the DELETE and let those foreign keys do what they say
+  # Override it per model wherever only you can say whether the rows pointing
+  # at one should go with it, be repointed or block it.
   deletes: allow
 `

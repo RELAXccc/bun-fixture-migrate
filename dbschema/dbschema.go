@@ -122,6 +122,9 @@ func (c Column) ZeroText() (string, bool) {
 		return "false", true
 	case "text", "varchar", "bpchar", "citext":
 		return "", true
+	case "uuid":
+		// A uuid.UUID nobody set, or the zero of any [16]byte uuid type.
+		return "00000000-0000-0000-0000-000000000000", true
 	}
 	return "", false
 }
@@ -205,11 +208,17 @@ func (c Column) NonNullDefault() (string, bool) {
 // The second result is the value the database would store instead.
 func (c Column) ZeroIsNotDefault() (bool, string) {
 	zero, known := c.ZeroText()
-	if !known {
+	// A sequence's zero is how bun asks for the next id, which is the point.
+	if !known || c.Generated || c.Serial() {
 		return false, ""
 	}
 	def, literal := c.LiteralDefault()
 	if !literal {
+		// An expression -- nextval(...), gen_random_uuid() -- is never the
+		// zero: bun writes DEFAULT and the database runs it.
+		if expr, ok := c.NonNullDefault(); ok {
+			return true, expr
+		}
 		return false, ""
 	}
 	if numbersEqual(def, zero) || def == zero {

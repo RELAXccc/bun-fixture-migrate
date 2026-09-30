@@ -295,6 +295,8 @@ func (r *setReader) tables(expr ast.Expr) (fixturechange.Tables, error) {
 				t.Key, err = r.str(value)
 			case "Serial":
 				t.Serial, err = r.boolean(value)
+			case "Cascade":
+				t.Cascade, err = r.boolean(value)
 			default:
 				err = r.errorf(value, "unknown field %s", key)
 			}

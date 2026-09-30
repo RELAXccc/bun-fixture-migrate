@@ -154,6 +154,11 @@ const (
 	DeleteAllow DeletePolicy = "allow"
 	// DeleteRefuse reports it and writes nothing.
 	DeleteRefuse DeletePolicy = "refuse"
+	// DeleteCascade writes a guarded DELETE and lets it reach the rows other
+	// tables point at it with, through a foreign key declared ON DELETE
+	// CASCADE, SET NULL or SET DEFAULT. Under DeleteAllow the migration fails
+	// while any such row exists.
+	DeleteCascade DeletePolicy = "cascade"
 )
 
 // Model is one model of the fixture file.
@@ -287,8 +292,9 @@ func (c *Config) Prepare() error {
 		if m.Deletes == "" {
 			m.Deletes = c.Policy.Deletes
 		}
-		if m.Deletes != DeleteAllow && m.Deletes != DeleteRefuse {
-			return fmt.Errorf("model %q: deletes is %q, it has to be %q or %q", name, m.Deletes, DeleteAllow, DeleteRefuse)
+		if m.Deletes != DeleteAllow && m.Deletes != DeleteRefuse && m.Deletes != DeleteCascade {
+			return fmt.Errorf("model %q: deletes is %q, it has to be %q, %q or %q", name, m.Deletes,
+				DeleteAllow, DeleteRefuse, DeleteCascade)
 		}
 		m.derived = set(m.Derived)
 		m.ignored = set(m.Ignore)
@@ -327,8 +333,9 @@ func (p *Policy) prepare() error {
 	if p.Deletes == "" {
 		p.Deletes = DeleteAllow
 	}
-	if p.Deletes != DeleteAllow && p.Deletes != DeleteRefuse {
-		return fmt.Errorf("policy deletes is %q, it has to be %q or %q", p.Deletes, DeleteAllow, DeleteRefuse)
+	if p.Deletes != DeleteAllow && p.Deletes != DeleteRefuse && p.Deletes != DeleteCascade {
+		return fmt.Errorf("policy deletes is %q, it has to be %q, %q or %q", p.Deletes,
+			DeleteAllow, DeleteRefuse, DeleteCascade)
 	}
 	return nil
 }

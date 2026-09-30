@@ -35,6 +35,12 @@ type Table struct {
 	// into such a table leaves the sequence behind, so fixtureapply advances
 	// it afterwards.
 	Serial bool
+	// Cascade allows a delete to reach rows of other tables through a
+	// foreign key declared ON DELETE CASCADE, SET NULL or SET DEFAULT. Without
+	// it such a delete fails while any row still points at the one being
+	// deleted: removing a plan must not quietly delete or detach the
+	// subscriptions on it.
+	Cascade bool
 }
 
 // Tables maps a model name to its table.
