@@ -15,6 +15,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/dbfixture"
 )
 
 const cliConfig = `fixture: fixtures/fixture.yml
@@ -282,4 +285,58 @@ func TestPlanSaysWhatItCannotSimulate(t *testing.T) {
 	if strings.Contains(out, "sequence") {
 		t.Fatalf("nothing was inserted, so no sequence moved:\n%s", out)
 	}
+}
+
+// Two files loaded with one fixture.Load, as an application splits its master
+// data: the check agrees with the database, and an export writes each file
+// back in place, which dbfixture loads into the same state.
+func TestSeveralFixtureFilesAgainstDbfixture(t *testing.T) {
+	db := itemDB(t)
+	parts := strings.SplitN(itemFixture, "- model: Item", 2)
+	regions, items := parts[0], "- model: Item"+parts[1]
+	loadFiles := func(db *bun.DB, files ...[2]string) {
+		t.Helper()
+		dir := t.TempDir()
+		var names []string
+		for _, f := range files {
+			if err := os.WriteFile(filepath.Join(dir, f[0]), []byte(f[1]), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			names = append(names, f[0])
+		}
+		if err := dbfixture.New(db).Load(context.Background(), os.DirFS(dir), names...); err != nil {
+			t.Fatalf("dbfixture: %v", err)
+		}
+	}
+	loadFiles(db, [2]string{"regions.yml", regions}, [2]string{"items.yml", items})
+	want := itemState(t, db)
+
+	c := buildCLI(t)
+	c.write("fixture-migrate.yml", strings.Replace(cliConfig, "fixture: fixtures/fixture.yml",
+		"fixtures: [fixtures/regions.yml, fixtures/items.yml]", 1))
+	c.write("fixtures/regions.yml", regions)
+	c.write("fixtures/items.yml", items)
+	c.must(0, "check")
+
+	c.must(0, "export")
+	gotRegions := readFileT(t, filepath.Join(c.dir, "fixtures/regions.yml"))
+	gotItems := readFileT(t, filepath.Join(c.dir, "fixtures/items.yml"))
+	if strings.Contains(gotRegions, "model: Item") || !strings.Contains(gotItems, "model: Item") ||
+		strings.Contains(gotItems, "model: Region") {
+		t.Fatalf("each model belongs in its own file:\n%s\n---\n%s", gotRegions, gotItems)
+	}
+	fresh := itemDB(t)
+	loadFiles(fresh, [2]string{"regions.yml", gotRegions}, [2]string{"items.yml", gotItems})
+	if got := itemState(t, fresh); got != want {
+		t.Fatalf("the exported files do not load back as the database\n got %s\nwant %s", got, want)
+	}
+}
+
+func readFileT(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }

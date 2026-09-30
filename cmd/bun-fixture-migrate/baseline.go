@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -35,22 +34,24 @@ func baseline(o streams, args []string) error {
 	if *rev != "" && *oldPath != "" {
 		return fmt.Errorf("-from and -old name two different files; pass one of them")
 	}
-	var data []byte
-	source := s.cfg.Fixture
+	var files []fixturemigrate.FixtureFile
+	source := s.cfg.FixtureLabel()
 	switch {
 	case *rev != "":
-		data, err = gitShow(s.fixturePath, *rev)
-		source = *rev + ":" + s.cfg.Fixture
+		files, err = s.gitFiles(*rev)
+		source = *rev + ":" + source
 	case *oldPath != "":
+		var data []byte
 		data, err = os.ReadFile(*oldPath)
+		files = []fixturemigrate.FixtureFile{{Path: *oldPath, Data: data}}
 		source = *oldPath
 	default:
-		data, _, err = s.readFixture()
+		files, _, err = s.readFixture()
 	}
 	if err != nil {
 		return err
 	}
-	next, err := s.fixtureSnapshot(data, source)
+	next, err := s.snapshotOf(files, source)
 	if err != nil {
 		return err
 	}
@@ -62,11 +63,11 @@ func baseline(o streams, args []string) error {
 		if !*force {
 			return fmt.Errorf("%w\npass -force to replace it", err)
 		}
-	case bytes.Equal(current.Fixture, data):
+	case fixturemigrate.SameFiles(current.Files, files):
 		fmt.Fprintf(o.stdout, "%s already records %s\n", s.statePath, source)
 		return nil
 	default:
-		prev, err := s.fixtureSnapshot(current.Fixture, "the state file")
+		prev, err := s.snapshotOf(current.Files, "the state file")
 		if err != nil {
 			return err
 		}
@@ -86,7 +87,7 @@ func baseline(o streams, args []string) error {
 					"or pass -force if a migration you wrote by hand covers them", plural(n, "change"))}
 		}
 	}
-	if err := fixturemigrate.WriteState(s.statePath, fixturemigrate.State{Fixture: data, Migration: "baseline"}); err != nil {
+	if err := fixturemigrate.WriteState(s.statePath, fixturemigrate.State{Files: files, Migration: "baseline"}); err != nil {
 		return err
 	}
 	fmt.Fprintf(o.stdout, "wrote %s: generate now diffs against %s\n", s.statePath, source)

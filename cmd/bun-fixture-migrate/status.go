@@ -79,7 +79,7 @@ func status(o streams, args []string) error {
 	if *required && (*offline || s.cfg.Database == "") {
 		return fmt.Errorf("-require-applied needs the database")
 	}
-	r := &statusReport{Fixture: s.cfg.Fixture, Directory: s.outDir}
+	r := &statusReport{Fixture: s.cfg.FixtureLabel(), Directory: s.outDir}
 	if err := s.uncovered(r); err != nil {
 		return err
 	}
@@ -171,30 +171,30 @@ func (s *setup) uncovered(r *statusReport) error {
 	if err != nil {
 		return err
 	}
-	var data []byte
+	var files []fixturemigrate.FixtureFile
 	if s.statePath != "" {
 		r.State = &stateInfo{Path: s.statePath}
 		state, err := fixturemigrate.ReadState(s.statePath)
 		switch {
 		case err == nil:
 			r.State.Exists, r.State.Migration = true, state.Migration
-			data, r.Base = state.Fixture, "the state file"
+			files, r.Base = state.Files, "the state file"
 		case errors.Is(err, fixturemigrate.ErrNoState):
 		default:
 			r.Problems = append(r.Problems, err.Error())
 			return nil
 		}
 	}
-	if data == nil {
-		gitData, err := gitShow(s.fixturePath, "HEAD")
+	if files == nil {
+		gitFiles, err := s.gitFiles("HEAD")
 		if err != nil {
 			r.Notes = append(r.Notes, "no state file and no git history to compare the fixture file with, "+
 				"so what it changes is unknown; run baseline once the databases hold it")
 			return nil
 		}
-		data, r.Base = gitData, "HEAD"
+		files, r.Base = gitFiles, "HEAD"
 	}
-	old, err := s.fixtureSnapshot(data, r.Base)
+	old, err := s.snapshotOf(files, r.Base)
 	if err != nil {
 		return err
 	}

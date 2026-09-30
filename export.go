@@ -24,6 +24,87 @@ import (
 // from is worse than no export, so the round-trip hazards are named in the file
 // itself as well as on the terminal.
 func Export(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table, header []string) ([]byte, error) {
+	return exportModels(cfg, snap, tables, header, snap.Order)
+}
+
+// ExportFiles writes a snapshot into several fixture files, the way an
+// application loading them with one fixture.Load keeps its master data.
+//
+// Each model goes into the file of current that holds it now, a model none of
+// them holds into the last, and every file lists its models in dependency
+// order. dbfixture loads the files in order, so a row can only name a row of
+// its own file or an earlier one: an assignment where a model points at one in
+// a later file is refused rather than written. A file with no model left is
+// written as an empty list, which dbfixture loads; an empty file it does not.
+func ExportFiles(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table, header []string,
+	current []FixtureFile) ([][]byte, error) {
+
+	if len(current) == 0 {
+		return nil, fmt.Errorf("no fixture files to export into")
+	}
+	where := map[string]int{}
+	for i, f := range current {
+		doc, err := ParseDoc(f.Data)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", f.Path, err)
+		}
+		for _, dm := range doc {
+			if _, ok := where[dm.Name]; !ok {
+				where[dm.Name] = i
+			}
+		}
+	}
+	for _, model := range snap.Order {
+		if _, ok := where[model]; !ok {
+			where[model] = len(current) - 1
+		}
+	}
+	for _, model := range snap.Order {
+		m := cfg.Models[model]
+		for _, col := range sortedKeysOf(m.References) {
+			target := m.References[col]
+			if m.skip(col) || target == model || where[target] <= where[model] {
+				continue
+			}
+			return nil, fmt.Errorf("%s in %s points at %s, which is in %s, and dbfixture loads that file later: "+
+				"move %s into %s or an earlier file", model, current[where[model]].Path, target,
+				current[where[target]].Path, target, current[where[model]].Path)
+		}
+	}
+	out := make([][]byte, len(current))
+	for i := range current {
+		var models []string
+		for _, model := range snap.Order {
+			if where[model] == i {
+				models = append(models, model)
+			}
+		}
+		data, err := exportModels(cfg, snap, tables, header, models)
+		if err != nil {
+			return nil, err
+		}
+		if len(models) == 0 {
+			data = append(data, "[]\n"...)
+		}
+		out[i] = data
+	}
+	return out, nil
+}
+
+func sortedKeysOf(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// exportModels writes some of a snapshot's models. References may name rows of
+// any model of the snapshot: in another file they are still one scope.
+func exportModels(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table, header []string,
+	models []string) ([]byte, error) {
+
 	var b strings.Builder
 	for _, line := range header {
 		if line == "" {
@@ -47,7 +128,7 @@ func Export(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table, head
 		}
 	}
 
-	for _, model := range snap.Order {
+	for _, model := range models {
 		m := cfg.Models[model]
 		table := tables[cfg.QualifiedTable(m)]
 		if table == nil {

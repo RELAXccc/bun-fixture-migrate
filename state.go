@@ -27,18 +27,29 @@ import (
 // migration both rewrite the header of this file, so the merge stops there
 // instead of producing two migrations that each assume they are the only one.
 type State struct {
-	// Fixture is the fixture file's content, byte for byte.
-	Fixture []byte
+	// Files are the fixture files, in load order, byte for byte. A
+	// configuration with one fixture file has one, whose Path a state file
+	// written before several files were supported leaves empty.
+	Files []FixtureFile
 	// Migration names the migration that last wrote the state, or "baseline".
 	Migration string
+}
+
+// FixtureFile is one fixture file: its path as the configuration spells it,
+// and its content.
+type FixtureFile struct {
+	Path string
+	Data []byte
 }
 
 // ErrNoState is what ReadState returns for a state file that does not exist.
 var ErrNoState = errors.New("no state file")
 
 const (
-	stateMarker = "# ----- the fixture file, as the migrations leave a database -----"
-	stateHeader = `# bun-fixture-migrate state file. Do not edit it by hand.
+	stateMarker     = "# ----- the fixture file, as the migrations leave a database -----"
+	fileMarkerStart = "# ----- fixture file: "
+	fileMarkerEnd   = " -----"
+	stateHeader     = `# bun-fixture-migrate state file. Do not edit it by hand.
 #
 # It is the fixture file as the generated migrations leave a database.
 # "generate" diffs the fixture file against it, not against git, and rewrites
@@ -54,16 +65,36 @@ const (
 `
 )
 
-// Encode renders the state file.
+// Encode renders the state file. One fixture file is written after a single
+// marker line; several each after a line naming the file, which a line of the
+// files themselves cannot be mistaken for as long as none of them contains
+// such a comment. The checksum covers everything after it.
 func (s State) Encode() []byte {
-	body := normalizeNewlines(s.Fixture)
+	var rest bytes.Buffer
+	if len(s.Files) == 1 {
+		rest.WriteString(stateMarker + "\n")
+		rest.Write(normalizeNewlines(s.Files[0].Data))
+	} else {
+		for _, f := range s.Files {
+			rest.WriteString(fileMarkerStart + f.Path + fileMarkerEnd + "\n")
+			rest.Write(withFinalNewline(normalizeNewlines(f.Data)))
+		}
+	}
 	var b bytes.Buffer
 	b.WriteString(stateHeader)
 	fmt.Fprintf(&b, "# migration: %s\n", s.Migration)
-	fmt.Fprintf(&b, "# sha256: %s\n", checksum(body))
-	b.WriteString(stateMarker + "\n")
-	b.Write(body)
+	fmt.Fprintf(&b, "# sha256: %s\n", checksum(bodyOf(rest.Bytes())))
+	b.Write(rest.Bytes())
 	return b.Bytes()
+}
+
+// bodyOf is what the checksum covers: for one file, its content after the
+// marker line, as it always was; for several, the markers and the files.
+func bodyOf(rest []byte) []byte {
+	if bytes.HasPrefix(rest, []byte(stateMarker+"\n")) {
+		return rest[len(stateMarker)+1:]
+	}
+	return rest
 }
 
 // DecodeState reads a state file and checks it against its own checksum. A
@@ -71,31 +102,95 @@ func (s State) Encode() []byte {
 // produces a migration that looks right and is not.
 func DecodeState(data []byte) (State, error) {
 	data = normalizeNewlines(data)
-	i := bytes.Index(data, []byte("\n"+stateMarker+"\n"))
-	if i < 0 {
-		return State{}, fmt.Errorf("this is not a state file bun-fixture-migrate wrote: the marker line is missing")
-	}
-	header, body := string(data[:i]), data[i+len(stateMarker)+2:]
 	var s State
 	var sum string
-	for _, line := range strings.Split(header, "\n") {
+	start := -1
+	lines := bytes.SplitAfter(data, []byte("\n"))
+	offset := 0
+	for _, raw := range lines {
+		line := strings.TrimSuffix(string(raw), "\n")
+		if line == stateMarker || strings.HasPrefix(line, fileMarkerStart) {
+			start = offset
+			break
+		}
 		if v, ok := strings.CutPrefix(line, "# migration: "); ok {
 			s.Migration = strings.TrimSpace(v)
 		}
 		if v, ok := strings.CutPrefix(line, "# sha256: "); ok {
 			sum = strings.TrimSpace(v)
 		}
+		offset += len(raw)
+	}
+	if start < 0 {
+		return State{}, fmt.Errorf("this is not a state file bun-fixture-migrate wrote: the marker line is missing")
 	}
 	if sum == "" {
 		return State{}, fmt.Errorf("the state file has no checksum line")
 	}
-	if checksum(body) != sum {
+	rest := data[start:]
+	if checksum(bodyOf(rest)) != sum {
 		return State{}, fmt.Errorf("the state file does not match its own checksum, so it was edited by hand " +
 			"or merged line by line. Take it back from git, or rewrite it with baseline once you know which " +
 			"state the migrations leave a database in")
 	}
-	s.Fixture = body
+	if bytes.HasPrefix(rest, []byte(stateMarker+"\n")) {
+		s.Files = []FixtureFile{{Data: bodyOf(rest)}}
+		return s, nil
+	}
+	var current *FixtureFile
+	for _, raw := range bytes.SplitAfter(rest, []byte("\n")) {
+		line := strings.TrimSuffix(string(raw), "\n")
+		if strings.HasPrefix(line, fileMarkerStart) && strings.HasSuffix(line, fileMarkerEnd) {
+			path := strings.TrimSuffix(strings.TrimPrefix(line, fileMarkerStart), fileMarkerEnd)
+			s.Files = append(s.Files, FixtureFile{Path: path})
+			current = &s.Files[len(s.Files)-1]
+			continue
+		}
+		current.Data = append(current.Data, raw...)
+	}
 	return s, nil
+}
+
+// SameFiles reports whether two lists of fixture files hold the same content,
+// ignoring line endings and a missing final newline, which change nothing.
+func SameFiles(a, b []FixtureFile) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if len(a) > 1 && a[i].Path != b[i].Path {
+			return false
+		}
+		if !bytes.Equal(withFinalNewline(normalizeNewlines(a[i].Data)), withFinalNewline(normalizeNewlines(b[i].Data))) {
+			return false
+		}
+	}
+	return true
+}
+
+// ParseFiles parses fixture files as dbfixture loads them with one
+// fixture.Load: in order, as one document, one scope of anchors across all of
+// them.
+func ParseFiles(files []FixtureFile) (Doc, error) {
+	var doc Doc
+	for _, f := range files {
+		part, err := ParseDoc(f.Data)
+		if err != nil {
+			if f.Path != "" {
+				return nil, fmt.Errorf("%s: %w", f.Path, err)
+			}
+			return nil, err
+		}
+		doc = append(doc, part...)
+	}
+	return doc, nil
+}
+
+func withFinalNewline(b []byte) []byte {
+	if len(b) == 0 || b[len(b)-1] == '\n' {
+		return b
+	}
+	return append(append([]byte{}, b...), '\n')
 }
 
 // ReadState reads a state file, ErrNoState when there is none.

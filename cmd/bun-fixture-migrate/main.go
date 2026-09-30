@@ -151,11 +151,13 @@ func plural(n int, word string) string {
 // setup is the part every command shares: read the configuration, work out
 // where the fixture file, the migrations and the state file are.
 type setup struct {
-	cfg         *fixturemigrate.Config
-	root        string
-	fixturePath string
-	outDir      string
-	statePath   string
+	cfg  *fixturemigrate.Config
+	root string
+	// fixturePaths are the fixture files, in load order, as paths from
+	// where the command runs.
+	fixturePaths []string
+	outDir       string
+	statePath    string
 }
 
 func common(o streams, fs *flag.FlagSet, args []string) (*setup, error) {
@@ -172,8 +174,8 @@ func common(o streams, fs *flag.FlagSet, args []string) (*setup, error) {
 		return nil, err
 	}
 	s := &setup{cfg: cfg, root: filepath.Dir(*configPath)}
-	if cfg.Fixture != "" {
-		s.fixturePath = filepath.Join(s.root, cfg.Fixture)
+	for _, f := range cfg.Fixtures {
+		s.fixturePaths = append(s.fixturePaths, filepath.Join(s.root, f))
 	}
 	if cfg.Out != "" {
 		s.outDir = filepath.Join(s.root, cfg.Out)
@@ -193,26 +195,56 @@ func (s *setup) connect(ctx context.Context) (*bun.DB, error) {
 	return openDB(ctx, dsn)
 }
 
-func (s *setup) fixtureSnapshot(data []byte, source string) (*fixturemigrate.Snapshot, error) {
-	doc, err := fixturemigrate.ParseDoc(data)
+// snapshotOf resolves fixture files the way dbfixture loads them: in order,
+// one scope of anchors.
+func (s *setup) snapshotOf(files []fixturemigrate.FixtureFile, source string) (*fixturemigrate.Snapshot, error) {
+	doc, err := fixturemigrate.ParseFiles(files)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", source, err)
 	}
 	return fixturemigrate.FixtureSnapshot(s.cfg, doc, source)
 }
 
-// readFixture reads the fixture file, as bytes for the state file and as a
+// readFixture reads the fixture files, as bytes for the state file and as one
 // snapshot for everything else.
-func (s *setup) readFixture() ([]byte, *fixturemigrate.Snapshot, error) {
-	if s.fixturePath == "" {
+func (s *setup) readFixture() ([]fixturemigrate.FixtureFile, *fixturemigrate.Snapshot, error) {
+	if len(s.fixturePaths) == 0 {
 		return nil, nil, fmt.Errorf("no fixture file in the configuration")
 	}
-	data, err := os.ReadFile(s.fixturePath)
-	if err != nil {
-		return nil, nil, err
+	files := make([]fixturemigrate.FixtureFile, 0, len(s.fixturePaths))
+	for i, path := range s.fixturePaths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, nil, err
+		}
+		files = append(files, fixturemigrate.FixtureFile{Path: s.cfg.Fixtures[i], Data: data})
 	}
-	snap, err := s.fixtureSnapshot(data, s.cfg.Fixture)
-	return data, snap, err
+	snap, err := s.snapshotOf(files, s.cfg.FixtureLabel())
+	return files, snap, err
+}
+
+// gitFiles reads the fixture files as of a revision. A file the revision does
+// not have yet is empty there: at that revision, nothing loaded it.
+func (s *setup) gitFiles(rev string) ([]fixturemigrate.FixtureFile, error) {
+	files := make([]fixturemigrate.FixtureFile, 0, len(s.fixturePaths))
+	for i, path := range s.fixturePaths {
+		data, err := gitShow(path, rev)
+		if err != nil {
+			if missingAt(err) {
+				data = nil
+			} else {
+				return nil, err
+			}
+		}
+		files = append(files, fixturemigrate.FixtureFile{Path: s.cfg.Fixtures[i], Data: data})
+	}
+	return files, nil
+}
+
+// missingAt reports git's answer for a path the revision does not have.
+func missingAt(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "exists on disk, but not in") || strings.Contains(msg, "does not exist in")
 }
 
 // canonical has PostgreSQL respell every value of the snapshots as the columns
@@ -270,23 +302,36 @@ func databaseSnapshot(ctx context.Context, db bun.IDB, cfg *fixturemigrate.Confi
 		Columns: columns, Order: head.Order})
 }
 
-// export writes the fixture file from the database.
+// export writes the fixture files from the database.
 func export(o streams, args []string) error {
 	fs := flag.NewFlagSet("export", flag.ContinueOnError)
 	var (
-		out    = fs.String("o", "", "write here instead of the fixture file of the configuration")
+		out    = fs.String("o", "", "write here instead of the fixture file of the configuration (one fixture file only)")
 		stdout = fs.Bool("stdout", false, "write to standard output")
 	)
 	s, err := common(o, fs, args)
 	if err != nil {
 		return err
 	}
+	several := len(s.fixturePaths) > 1
+	if several && *out != "" {
+		return fmt.Errorf("-o writes one file; with several fixture files, export writes each of them in place")
+	}
+	// With several files, each model goes back into the file that holds it.
+	var current []fixturemigrate.FixtureFile
+	for i, path := range s.fixturePaths {
+		data, err := os.ReadFile(path)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		current = append(current, fixturemigrate.FixtureFile{Path: s.cfg.Fixtures[i], Data: data})
+	}
 	db, err := s.connect(o.ctx)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-	var data []byte
+	var outputs [][]byte
 	var mode fixturemigrate.Mode
 	var findings []fixturemigrate.Finding
 	err = readOnly(o.ctx, db, func(tx bun.Tx) error {
@@ -308,7 +353,12 @@ func export(o streams, args []string) error {
 		for _, f := range findings {
 			header = append(header, "", string(f.Kind)+": "+f.String())
 		}
-		data, err = fixturemigrate.Export(s.cfg, snap, tables, header)
+		if several {
+			outputs, err = fixturemigrate.ExportFiles(s.cfg, snap, tables, header, current)
+			return err
+		}
+		data, err := fixturemigrate.Export(s.cfg, snap, tables, header)
+		outputs = [][]byte{data}
 		return err
 	})
 	if err != nil {
@@ -323,20 +373,27 @@ func export(o streams, args []string) error {
 				"Fix them, or set the policy to warn to write it anyway", plural(len(findings), "problem"))}
 	}
 	if *stdout {
-		o.stdout.Write(data)
+		for i, data := range outputs {
+			if several {
+				fmt.Fprintf(o.stdout, "# ==> %s <==\n", s.cfg.Fixtures[i])
+			}
+			o.stdout.Write(data)
+		}
 		return nil
 	}
-	target := *out
-	if target == "" {
-		target = s.fixturePath
+	targets := s.fixturePaths
+	if *out != "" {
+		targets = []string{*out}
 	}
-	if target == "" {
+	if len(targets) == 0 {
 		return fmt.Errorf("no fixture file in the configuration and no -o")
 	}
-	if err := fixturemigrate.WriteFileAtomic(target, data, 0o644); err != nil {
-		return err
+	for i, target := range targets {
+		if err := fixturemigrate.WriteFileAtomic(target, outputs[i], 0o644); err != nil {
+			return err
+		}
+		fmt.Fprintln(o.stdout, "wrote", target)
 	}
-	fmt.Fprintln(o.stdout, "wrote", target)
 	return nil
 }
 
@@ -394,7 +451,7 @@ func check(o streams, args []string) error {
 		return nil
 	}
 	if mode == fixturemigrate.ModeError || len(res.Changes) > 0 || len(res.Refusals) > 0 {
-		return exitError{3, "the database and " + s.cfg.Fixture + " do not agree"}
+		return exitError{3, "the database and " + s.cfg.FixtureLabel() + " do not agree"}
 	}
 	return nil
 }

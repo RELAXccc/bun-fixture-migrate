@@ -33,6 +33,11 @@ type Config struct {
 	// Fixture is the path of the fixture YAML file, relative to the
 	// configuration file.
 	Fixture string `yaml:"fixture"`
+	// Fixtures are the fixture files, for an application that loads several
+	// with one fixture.Load(ctx, fsys, "a.yml", "b.yml"): in that order, one
+	// scope of anchors across them, a row of a later file able to name a row
+	// of an earlier one. Set this or Fixture; Prepare puts Fixture here.
+	Fixtures []string `yaml:"fixtures"`
 	// Out is the directory generated migrations go into, relative to the
 	// configuration file.
 	Out string `yaml:"out"`
@@ -242,6 +247,22 @@ func (c *Config) Prepare() error {
 	if c.Schema == "" {
 		c.Schema = "public"
 	}
+	// Prepare fills one from the other, and has to stay repeatable.
+	switch {
+	case c.Fixture != "" && len(c.Fixtures) > 0 && c.Fixtures[0] != c.Fixture:
+		return fmt.Errorf("fixture and fixtures both set; name the files in fixtures")
+	case len(c.Fixtures) > 0:
+		c.Fixture = c.Fixtures[0]
+	case c.Fixture != "":
+		c.Fixtures = []string{c.Fixture}
+	}
+	seenFixture := map[string]bool{}
+	for _, f := range c.Fixtures {
+		if f == "" || seenFixture[f] {
+			return fmt.Errorf("fixtures: %q is empty or listed twice", f)
+		}
+		seenFixture[f] = true
+	}
 	if c.MigrationsTable == "" {
 		c.MigrationsTable = "bun_migrations"
 	}
@@ -346,6 +367,14 @@ func modeList(modes []Mode) string {
 		out = append(out, string(m))
 	}
 	return strings.Join(out, ", ")
+}
+
+// FixtureLabel names the fixture files in messages.
+func (c *Config) FixtureLabel() string {
+	if len(c.Fixtures) == 0 {
+		return c.Fixture
+	}
+	return strings.Join(c.Fixtures, ", ")
 }
 
 // ModelNames lists the configured models in alphabetical order.

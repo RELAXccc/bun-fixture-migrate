@@ -7,6 +7,12 @@
 
 # The dbfixture YAML file, relative to this file.
 fixture: fixtures/fixture.yml
+# Or, when the application loads several with one fixture.Load(ctx, fsys,
+# "currencies.yml", "plans.yml"), all of them in that order instead: one scope
+# of anchors across them, so a row of a later file can name one of an earlier
+# file and not the other way round. export writes each model back into the
+# file that holds it.
+# fixtures: [fixtures/currencies.yml, fixtures/plans.yml]
 # Where generated migrations go, and the Go package and migrator variable they
 # register with.
 out: internal/migrations

@@ -385,3 +385,46 @@ func TestLintColumnsReportsAGeneratedColumn(t *testing.T) {
 		t.Fatalf("expected seats to be reported, got %+v", state.Findings)
 	}
 }
+
+// Each model goes back into the file that holds it; one that no file holds
+// yet goes into the last; a file left without a model is an empty list, which
+// dbfixture loads.
+func TestExportFilesKeepsEachModelInItsFile(t *testing.T) {
+	cfg := testConfig(t)
+	state := snap(t, cfg, base, "the database")
+	for _, model := range state.Order {
+		for _, e := range state.Entries[model] {
+			e.Anchor = anchorOf(e.Key)
+		}
+	}
+	current := []FixtureFile{
+		{Path: "a.yml", Data: []byte("- model: Currency\n  rows: []\n")},
+		{Path: "b.yml", Data: []byte("- model: Plan\n  rows: []\n")},
+		{Path: "c.yml"},
+	}
+	out, err := ExportFiles(cfg, state, testTables(), nil, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []string{"model: Currency", "model: Plan", "model: Feature"} {
+		if !strings.Contains(string(out[i]), want) || strings.Count(string(out[i]), "- model:") != 1 {
+			t.Fatalf("%s:\n%s", current[i].Path, out[i])
+		}
+	}
+	// A model pointing at one of a later file cannot be loaded.
+	current[0].Data = []byte("- model: Plan\n  rows: []\n")
+	current[1].Data = []byte("- model: Currency\n  rows: []\n")
+	if _, err := ExportFiles(cfg, state, testTables(), nil, current); err == nil ||
+		!strings.Contains(err.Error(), "Plan in a.yml points at Currency, which is in b.yml") {
+		t.Fatalf("expected the order to be refused: %v", err)
+	}
+	// An empty file is written as an empty list.
+	current = []FixtureFile{{Path: "a.yml", Data: []byte(base)}, {Path: "empty.yml", Data: []byte("- model: Nothing\n  rows: []\n")}}
+	out, err = ExportFiles(cfg, state, testTables(), nil, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(out[1])) != "[]" {
+		t.Fatalf("got %q", out[1])
+	}
+}
