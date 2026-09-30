@@ -1,0 +1,35 @@
+# The configuration of the example project: currencies, subscription plans,
+# and the features a plan grants. See fixture-migrate.example.yml at the top
+# of the repository for every setting and what changing it does.
+fixture: fixtures/fixture.yml
+out: migrations
+package: migrations
+migrator: Migrations
+seed_guard_table: plans
+database: env:DATABASE_URL
+
+models:
+  Currency:
+    table: currencies
+    key: [code]
+    ref: code
+
+  Plan:
+    table: plans
+    serial: true
+    key: [name]
+    references:
+      currency_id: Currency
+    defaults:
+      note: ~
+    # Subscriptions point at plans; deleting one is a decision about them.
+    deletes: refuse
+
+  Feature:
+    table: features
+    serial: true
+    key: [plan_id, code]
+    references:
+      plan_id: Plan
+    defaults:
+      quota: "0"

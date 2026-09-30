@@ -1,0 +1,64 @@
+# bun-fixture-migrate state file. Do not edit it by hand.
+#
+# It is the fixture file as the generated migrations leave a database.
+# "generate" diffs the fixture file against it, not against git, and rewrites
+# it with every migration it writes. "baseline" rewrites it without writing a
+# migration, for a change you migrated by hand.
+#
+# Two branches that each generate a migration both change the two lines below,
+# so their merge conflicts here, on purpose. Keep both migrations, check with
+# "bun-fixture-migrate plan" against a copy of production that they do not
+# change the same rows, then run "bun-fixture-migrate baseline" on the merged
+# fixture file.
+#
+# migration: 20260930165255_fixture_plan_prices
+# sha256: fa97287d1721218a546a930d1bab32163e5a20cd1d08dc022bfefcf863aa8511
+# ----- the fixture file, as the migrations leave a database -----
+- model: Currency
+  rows:
+    - _id: eur
+      id: 1
+      code: EUR
+      symbol: "€"
+    - _id: usd
+      id: 2
+      code: USD
+      symbol: "$"
+
+- model: Plan
+  rows:
+    - _id: free
+      id: 1
+      name: free
+      currency_id: '{{ $.Currency.eur.ID }}'
+      price_cents: 0
+      seats: 1
+      settings: {trial_days: 0}
+    - _id: team
+      id: 2
+      name: team
+      currency_id: '{{ $.Currency.eur.ID }}'
+      price_cents: 2500
+      seats: 10
+      settings: {trial_days: 14, sso: true}
+      note: "most popular"
+
+    - _id: pro
+      id: 3
+      name: pro
+      currency_id: '{{ $.Currency.usd.ID }}'
+      price_cents: 9000
+      seats: 100
+      settings: {trial_days: 30, sso: true}
+
+- model: Feature
+  rows:
+    - plan_id: '{{ $.Plan.free.ID }}'
+      code: api
+      quota: 100
+    - plan_id: '{{ $.Plan.team.ID }}'
+      code: api
+      quota: 5000
+    - plan_id: '{{ $.Plan.pro.ID }}'
+      code: api
+      quota: 50000

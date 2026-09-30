@@ -3,24 +3,28 @@ name: test
 on:
   push:
   pull_request:
-  # Weekly, so a change on bun's master branch shows up here even while this
-  # repository is quiet.
+  workflow_dispatch:
+  # Weekly, so a change on bun's master branch, a new PostgreSQL image or a new
+  # advisory shows up here even while this repository is quiet.
   schedule:
     - cron: "17 5 * * 1"
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The Go a job sets up is the Go it tests with. Without this a dependency
+  # that asks for a newer Go would quietly download one, and the go 1.24 in
+  # go.mod would go untested.
+  GOTOOLCHAIN: local
+
 jobs:
-  test:
+  lint:
     runs-on: ubuntu-latest
-
-    services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_PASSWORD: pg
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
-
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -36,28 +40,105 @@ jobs:
             exit 1
           fi
 
-      - run: go vet ./...
-      - run: go test -race ./...
+      # dbtest is left out: pgx's test dependencies need a newer Go to tidy
+      # than the one the module is tested with.
+      - name: go.mod is tidy
+        run: |
+          go mod tidy -diff
+          (cd examples/basic && go mod tidy -diff)
 
-      - run: go vet ./...
-        working-directory: dbtest
-      # The database suite holds no shared state between tests, but it is the
-      # only place the run time is exercised at all, so it runs under -race too.
+      - name: go vet
+        run: |
+          for m in . dbtest examples/basic; do
+            (cd "$m" && go vet ./...)
+          done
+
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
+          for m in . dbtest examples/basic; do
+            (cd "$m" && staticcheck ./...)
+          done
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          for m in . examples/basic; do
+            (cd "$m" && govulncheck ./...)
+          done
+
+  unit:
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.24", "stable"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+      - run: go test -race -coverprofile=coverage.out ./...
+      - run: go tool cover -func=coverage.out | tail -1
+
+      # A short run of every fuzz target, on top of their seeds, which the
+      # plain test run already checks. A failure leaves its input in
+      # testdata/fuzz; the artifact below keeps it.
+      - name: fuzz
+        if: matrix.go == 'stable'
+        run: |
+          for target in $(go test -list '^Fuzz' . | grep '^Fuzz'); do
+            go test -run '^$' -fuzz "^${target}\$" -fuzztime 20s .
+          done
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-${{ matrix.go }}
+          path: testdata/fuzz
+          if-no-files-found: ignore
+
+  # The database suite against every PostgreSQL version still in use, under
+  # bun's own driver, and under pgx at both ends of the range: the run time
+  # lives in the application's process and has to work under either.
+  postgres:
+    name: postgres ${{ matrix.postgres }} (${{ matrix.driver }})
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["12", "13", "14", "15", "16", "17", "18"]
+        driver: [pgdriver]
+        include:
+          - postgres: "12"
+            driver: pgx
+          - postgres: "18"
+            driver: pgx
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_PASSWORD: pg
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      # The suite holds no shared state between tests, but it is the only
+      # place the run time is exercised at all, so it runs under -race.
       - run: go test -race ./...
         working-directory: dbtest
         env:
           BUN_FIXTURE_MIGRATE_POSTGRES: postgres://postgres:pg@127.0.0.1:5432/postgres?sslmode=disable
+          BUN_FIXTURE_MIGRATE_DRIVER: ${{ matrix.driver }}
 
-  # The same suite against bun's master branch. Every premise this tool rests
-  # on -- the DEFAULT bun writes for a zero and for a null, what the migrator
-  # records when a migration fails, how dbfixture reads a file -- has a test,
-  # so a change upstream fails one of them here before it ships in a release.
-  # It is allowed to fail because the cause is outside this repository; a red
-  # run is still the signal to read.
-  bun-master:
+  # The action in this repository, used the way a project's workflow uses it,
+  # on the example project: the offline check a pull request runs, then a
+  # database deployed by the example's own migrate step and checked.
+  action:
     runs-on: ubuntu-latest
-    continue-on-error: true
-
     services:
       postgres:
         image: postgres:18
@@ -66,22 +147,93 @@ jobs:
         ports: ["5432:5432"]
         options: >-
           --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
-
+    env:
+      DATABASE_URL: postgres://postgres:pg@127.0.0.1:5432/postgres?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24"
 
+      - name: every fixture change has a migration
+        uses: ./
+        with:
+          command: status
+          args: -offline
+          working-directory: examples/basic
+
+      - name: deploy the example
+        run: go run . migrate
+        working-directory: examples/basic
+
+      - name: the database holds the fixture file
+        uses: ./
+        with:
+          command: check
+          working-directory: examples/basic
+
+      - name: every migration was applied
+        id: status
+        uses: ./
+        with:
+          command: status
+          args: -require-applied -json
+          working-directory: examples/basic
+
+      - name: the action reports the exit code
+        env:
+          CODE: ${{ steps.status.outputs.exit-code }}
+        run: test "$CODE" = 0
+
+      - name: edit the database by hand
+        run: psql "$DATABASE_URL" -c "UPDATE plans SET price_cents = 2200 WHERE name = 'team'"
+
+      - name: check after the hand edit
+        id: drift
+        continue-on-error: true
+        uses: ./
+        with:
+          command: check
+          working-directory: examples/basic
+      - name: the drift failed the step, with exit code 3
+        env:
+          CODE: ${{ steps.drift.outputs.exit-code }}
+          OUTCOME: ${{ steps.drift.outcome }}
+        run: test "$CODE" = 3 && test "$OUTCOME" = failure
+
+  # The same suites against bun's master branch. Every premise this tool rests
+  # on -- the DEFAULT bun writes for a zero and for a null, what the migrator
+  # records when a migration fails, how dbfixture reads a file -- has a test,
+  # so a change upstream fails one of them here before it ships in a release.
+  # It is allowed to fail because the cause is outside this repository; a red
+  # run is still the signal to read.
+  bun-master:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      GOTOOLCHAIN: auto
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: pg
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
       - name: use bun master
         run: |
           bun="github.com/uptrace/bun@master github.com/uptrace/bun/dialect/pgdialect@master github.com/uptrace/bun/driver/pgdriver@master"
           go get $bun
           go mod tidy
-          cd dbtest
-          go get $bun github.com/uptrace/bun/dbfixture@master
-          go mod tidy
-          grep uptrace go.mod
+          for m in dbtest examples/basic; do
+            (cd "$m" && go get $bun github.com/uptrace/bun/dbfixture@master && go mod tidy && grep uptrace go.mod)
+          done
 
       - run: go vet ./...
       - run: go test -race ./...

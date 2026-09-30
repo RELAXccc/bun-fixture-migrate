@@ -1,0 +1,84 @@
+# Hidden jobs for a GitLab pipeline, one per use of bun-fixture-migrate in CI.
+# Include this file and extend the ones you want:
+#
+#   include:
+#     - remote: https://raw.githubusercontent.com/RELAXccc/bun-fixture-migrate/<tag>/ci/gitlab/bun-fixture-migrate.gitlab-ci.yml
+#
+#   fixture migrations:
+#     extends: .bun-fixture-migrate:status
+#     variables:
+#       BFM_VERSION: <tag>
+#       BFM_DIR: backend
+#
+# Pin BFM_VERSION, and the <tag> in the include, to one release: the command
+# and the fixtureapply package your migrations import should be the same
+# version. Every job takes:
+#
+#   BFM_VERSION  the version to go install, "latest" by default
+#   BFM_SOURCE   a checkout to build from instead, for testing this file
+#   BFM_DIR      the directory to run in, "." by default
+#   BFM_CONFIG   the configuration file in it, "fixture-migrate.yml" by default
+#   BFM_ARGS     further arguments, split on whitespace
+#
+# A database is named by the configuration, usually "database: env:NAME";
+# define that variable for the jobs that need one, as a masked CI/CD
+# variable, never in this file.
+
+.bun-fixture-migrate:
+  image: golang:1.24
+  variables:
+    BFM_VERSION: latest
+    BFM_SOURCE: ""
+    BFM_DIR: .
+    BFM_CONFIG: fixture-migrate.yml
+    BFM_ARGS: ""
+    BFM_COMMAND: status
+  before_script:
+    - |
+      if [ -n "$BFM_SOURCE" ]; then
+        (cd "$BFM_SOURCE" && go build -trimpath -o /usr/local/bin/bun-fixture-migrate ./cmd/bun-fixture-migrate)
+      else
+        GOBIN=/usr/local/bin go install "github.com/RELAXccc/bun-fixture-migrate/cmd/bun-fixture-migrate@$BFM_VERSION"
+      fi
+      bun-fixture-migrate version
+  script:
+    - cd "$BFM_DIR"
+    # BFM_ARGS is split on whitespace on purpose, and nothing else in it is
+    # interpreted.
+    - bun-fixture-migrate "$BFM_COMMAND" -config "$BFM_CONFIG" $BFM_ARGS
+
+# Every change to the fixture file has a migration, and the migrations
+# directory reads. Needs no database: run it on every merge request.
+.bun-fixture-migrate:status:
+  extends: .bun-fixture-migrate
+  variables:
+    BFM_COMMAND: status
+    BFM_ARGS: -offline
+
+# The pending fixture migrations, run against a database and rolled back,
+# row by row: against a copy of production before a deploy, or production
+# itself, which plan only reads. -strict fails on a change that would be
+# skipped as well as on one that would fail.
+.bun-fixture-migrate:plan:
+  extends: .bun-fixture-migrate
+  variables:
+    BFM_COMMAND: plan
+    BFM_ARGS: -strict
+
+# What the database and the fixture file disagree about, after a deploy or on
+# a schedule. Drift is exit code 3, which this job reports as a warning
+# rather than a failure; anything else, such as no connection, still fails.
+.bun-fixture-migrate:check:
+  extends: .bun-fixture-migrate
+  variables:
+    BFM_COMMAND: check
+  allow_failure:
+    exit_codes: [3]
+
+# Every migration in the directory was applied to the database, for a job that
+# runs after the deploy.
+.bun-fixture-migrate:applied:
+  extends: .bun-fixture-migrate
+  variables:
+    BFM_COMMAND: status
+    BFM_ARGS: -require-applied
