@@ -506,6 +506,15 @@ func export(o streams, args []string) error {
 	for _, f := range findings {
 		fmt.Fprintln(o.stderr, string(f.Kind)+":", f.String())
 	}
+	// An export is written from the database, not edited into the file it
+	// replaces: what the file said in comments is gone from it. Written
+	// elsewhere with -o, it replaces nothing.
+	for i, data := range outputs {
+		if n := droppedComments(current[i].Data, data); n > 0 && *out == "" {
+			fmt.Fprintf(o.stderr, "note: the export does not keep the comments of %s: %s not in it; "+
+				"put back the ones to keep before committing\n", s.fixturePaths[i], plural(n, "comment line"))
+		}
+	}
 	if mode == fixturemigrate.ModeError {
 		return exitError{2, fmt.Sprintf(
 			"%s, nothing written: this export would not reproduce the database it was taken from. "+
@@ -536,6 +545,24 @@ func export(o streams, args []string) error {
 		fmt.Fprintln(o.stdout, "wrote", target)
 	}
 	return nil
+}
+
+// droppedComments counts the comment lines of a fixture file that an export of
+// it does not have. An export writes the file anew from the database, so a
+// comment, whole-line or after a value, is not carried over.
+func droppedComments(old, exported []byte) int {
+	kept := map[string]bool{}
+	for _, line := range strings.Split(string(exported), "\n") {
+		kept[strings.TrimSpace(line)] = true
+	}
+	n := 0
+	for _, line := range strings.Split(string(old), "\n") {
+		line = strings.TrimSpace(line)
+		if !kept[line] && (strings.HasPrefix(line, "#") || strings.Contains(line, " #")) {
+			n++
+		}
+	}
+	return n
 }
 
 // exportColumns is the columns an export writes of each model the fixture

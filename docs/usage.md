@@ -218,10 +218,13 @@ file, the newer truth. Three settings and one loop keep that safe:
   ```
 
   The migration brings every other database to the file; on production itself every change is
-  already made and reports `unchanged`. Review the export's diff like any other change: it holds
-  the columns and ids the file held, so it shows the edits and nothing else. The
-  read-only role has to see every row of the master data: one a row-level security policy limits
-  is refused, because an export without the rows it hides would delete them everywhere else.
+  already made and reports `unchanged`. Review the export's diff like any other change. It holds
+  the columns and ids the file held, but it is written anew from the database: models in
+  dependency order, values quoted the export's way, and no comments, which it says it dropped. So
+  against a file export wrote, the diff shows the edits and nothing else; against one edited by
+  hand, it shows that layout too, once. The read-only role has to see every row of the master
+  data: one a row-level security policy limits is refused, because an export without the rows it
+  hides would delete them everywhere else.
 
 `generate -from-db` is the other direction: it diffs a database against the file and writes the
 migration that makes that database match the file. It is the tool for "production is out of step and

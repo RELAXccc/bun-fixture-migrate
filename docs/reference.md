@@ -64,8 +64,9 @@ the notation that loads back as the same value. Rows pointing at each other in a
 `dbfixture` cannot load them in any order. With several fixture files, each model goes back into the file that holds it and a new
 one into the last. Refuses (exit 2) to write a file `dbfixture` would not load back as the database,
 such as a zero bun would replace with a column default. Two exports of one database are the same
-bytes: the header holds no time. Output that cannot all be written, to a full disk or a closed pipe,
-is exit 1.
+bytes: the header holds no time. The file is written anew, not edited: comments in the file it
+replaces are not kept, and a note says how many lines of them it dropped. Output that cannot all be
+written, to a full disk or a closed pipe, is exit 1.
 
 For a model the fixture files hold, it writes what they hold: the columns their rows use, with the
 key and the `ref` column, and the ids only when the rows name them. A column the files never wrote

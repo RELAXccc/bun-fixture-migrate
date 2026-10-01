@@ -136,6 +136,16 @@ func TestAdoptingAsTheREADMESays(t *testing.T) {
 		t.Fatalf("the export holds data that is not master data:\n%s", exported)
 	}
 	a.run(0, "check")
+	// Exported again, the file is written anew: a comment in it is gone,
+	// and the export says so.
+	a.write("fixtures/fixture.yml", "# prices are in cents\n"+exported)
+	if out := a.run(0, "export"); !strings.Contains(out,
+		"note: the export does not keep the comments of fixtures/fixture.yml: 1 comment line not in it") {
+		t.Fatal(out)
+	}
+	if a.read("fixtures/fixture.yml") != exported {
+		t.Fatal("two exports of one database differ")
+	}
 
 	// $ bun-fixture-migrate baseline
 	if out := a.run(0, "baseline"); !strings.Contains(out, "wrote internal/migrations/fixture_state.yml") {
