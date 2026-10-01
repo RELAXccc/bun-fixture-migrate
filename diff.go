@@ -802,15 +802,8 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 				"policy.renames to update and run this again", prev.label(model), cur.label(model))})
 		return nil
 	}
-	// Against a database, a model the files do not own all of holds rows the
-	// files never had, an operator's or a tenant's. One of them sharing an id
-	// with a file row is no rename of it: renaming it would hand the file's
-	// key to a row the files never owned, with all that points at it. Such
-	// rows are matched by their natural keys only, and an id both claim is
-	// a collision the run time reports, which plan shows before a deploy.
-	pairByID := !old.database || m.Mode == OwnSync
 	for _, prev := range old.Entries[model] {
-		if !pairByID || prev.ID == "" || sharedID[prev.ID] {
+		if prev.ID == "" || sharedID[prev.ID] {
 			continue
 		}
 		cur, ok := newByID[prev.ID]

@@ -601,13 +601,15 @@ row whose `insert_only` column an operator changed since is skipped as changed. 
   through a foreign key the configuration leaves out is not seen: a delete then reaches its rows
   through `ON DELETE CASCADE`, `SET NULL` or `SET DEFAULT`, the rows those modes leave to the
   database included. Configure the reference, or keep `deletes: refuse` on such a model.
-- **Pairing by id against a database** is done only under `sync`. Under `upsert` and `insert`,
-  `check`, `sync` and `generate -from-db` match a database row with a file row by natural key
-  alone, because a row the database holds may be a tenant's that happens to hold the id the files
-  give to a new row. A row the files renamed is then an insert of the new key next to the old one,
-  which stays; where both claim one id, the insert fails on it at run time, which `plan` shows.
-  Give new rows ids no database row holds, or use `ids: database`. `generate` from the state file
-  pairs two revisions of the files and still pairs by id.
+- **Pairing by id against a database.** `check`, `sync` and `generate -from-db` pair a database row
+  with a file row by id before they pair by natural key, under every mode. A row that a tenant added
+  under the id that the files give to a new row is therefore taken for a rename of that row. Under
+  `policy.renames: update`, `sync` renames the tenant's row into the master row and keeps what points
+  at it; under `insert` it is reported as a refused rename. Under `upsert` and `insert`, use `ids:
+  database`, whose database ids are never compared, or give new rows ids no database row holds.
+  `generate` from the state file pairs two revisions of the files and is not affected. (Pairing by
+  natural key alone against a database would turn a genuine rename of a row the files own into a
+  collision; telling the two apart needs the state file's view of which rows the files held.)
 - **Respelled keys under `upsert`, `insert` and `insert_only`.** An export keeps a row of the files
   by its natural key exactly as written, so a key the database spells differently but its type holds
   equal (`Go` and `GO` in `citext`) is taken for a row the files do not hold, and is left out. Under

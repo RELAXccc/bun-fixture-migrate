@@ -370,44 +370,6 @@ func TestIDsFromTheDatabaseCannotNameARow(t *testing.T) {
 	}
 }
 
-// Against a database, an upsert or insert model holds rows the files never
-// had, a tenant's or an operator's. One that shares an id with a file row is
-// not renamed into it: the rows are matched by their natural keys only, and
-// the id both claim is a collision the run time reports. Under sync every row
-// is the files', and a shared id still pairs them.
-func TestAgainstADatabaseKeptRowsAreNeverPairedByID(t *testing.T) {
-	next := replace(t, base, "      name: team\n", "      name: crew\n")
-	for _, mode := range []Ownership{OwnSync, OwnUpsert, OwnInsert} {
-		cfg := ownedConfig(t, func(cfg *Config) {
-			cfg.Policy.Renames = RenameUpdate
-			cfg.Models["Plan"].Mode = mode
-			cfg.Models["Plan"].Deletes = ""
-		})
-		database := snap(t, cfg, base, "the database")
-		database.database = true
-		res, err := Compute(cfg, database, snap(t, cfg, next, "fixtures/fixture.yml"))
-		if err != nil {
-			t.Fatalf("%s: %v", mode, err)
-		}
-		if mode == OwnSync {
-			if c := only(t, res, "Plan", fixturechange.Update); c.ID != "2" || c.New["name"].Lit != "crew" {
-				t.Fatalf("sync renames by id: %+v", c)
-			}
-			continue
-		}
-		for _, c := range res.Changes {
-			if c.Model == "Plan" && c.Kind == fixturechange.Update {
-				t.Fatalf("%s renamed a row the database holds into the file's: %+v", mode, c)
-			}
-		}
-		for _, r := range res.Refusals {
-			if r.Model == "Plan" && strings.Contains(r.Reason, "renamed") {
-				t.Fatalf("%s called it a rename: %+v", mode, r)
-			}
-		}
-	}
-}
-
 // A sync model whose deletes cascade cannot have an upsert or insert model
 // pointing at it: the cascade would delete rows that mode never deletes.
 func TestACascadeIntoKeptRowsIsRefused(t *testing.T) {

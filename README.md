@@ -38,7 +38,28 @@ model lives in which table and which column is a reference. That is enough for a
 | [Troubleshooting](docs/troubleshooting.md) | messages and what to do about them |
 | [`examples/basic`](examples/basic) | a complete bun project: schema and fixture migrations, the deploy step, seeding |
 | [`examples/saas`](examples/saas), [`examples/commerce`](examples/commerce) | a year of releases each, replayed against several databases by `dbtest`, and what they found |
-| [Concept](docs/concept.md) | where this is going, and why |
+| [Concept](docs/concept.md) | what is done, the known limitations, what comes next, and why |
+| [Architecture](docs/architecture.md) | for contributors: the packages, one command end to end, the rules that keep old migrations working |
+| [Changelog](CHANGELOG.md) | what the tool can do, by area |
+
+## What it handles
+
+- **Master data that others write too.** A model's `mode` says which rows the files own: all of them
+  (`sync`), the ones they hold without ever deleting another (`upsert`), or only seeding (`insert`).
+  `insert_only` columns are written once and left to an admin UI after that, and `ids: database`
+  leaves ids to the sequence. What the configuration gives to the database is never drift.
+- **Soft deletes.** With `soft_delete: deleted_at`, a row leaving the files is soft-deleted, and one
+  coming back is restored with its id and everything that points at it.
+- **Deploys that fail safely.** Every write is guarded by the values it expects, runs under an
+  advisory lock and a `lock_timeout`, and a failed migration takes back bun's record of it so the
+  next deploy retries. With `audit_table`, a rollback undoes exactly what that database's run did.
+- **Keys you can trust.** The natural key of every model is checked against the table's unique
+  indexes, and unique values trading places are refused with the way out.
+- **Values as PostgreSQL sees them.** Numbers, timestamps, intervals, JSON, arrays and citext are
+  compared as the column's type compares them, and what cannot be settled is refused, never guessed.
+
+Its [known limitations](docs/concept.md#known-limitations) are listed, each with how to stay clear of
+it.
 
 ## Install
 
@@ -331,7 +352,11 @@ The `dbtest` module needs PostgreSQL. It seeds with the real `dbfixture` and che
 loads back as the database it came from; runs every run-time policy and edge case; compiles
 generated migrations and runs them under bun's `migrate.Migrator` in both of its modes; runs the
 same pipeline over a series of schema variants (composite keys, uuids, trees, reserved words,
-another schema); and builds the command and the example project and deploys them.
+another schema); and builds the command and the example project and deploys them. A property test
+throws random models, ownership modes, soft deletes and edits at the whole pipeline; every shape of
+generated file an earlier version wrote is compiled and run again; and the two long-running examples
+are replayed release by release. The [architecture guide](docs/architecture.md#tests) lists the
+switches.
 
 ```
 podman run --rm -d -p 55461:5432 -e POSTGRES_PASSWORD=pg --name bfm-test postgres:18

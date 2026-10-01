@@ -178,7 +178,7 @@ Each was reproduced before it went into this table.
 
 ## 4. Features
 
-### Done: the last iteration
+### Done
 
 - **Value fidelity.** A cell keeps its YAML type. Strings are exact; integers are resolved as YAML
   resolves them and written in decimal; decimals are canonicalised exactly, never through float64.
@@ -240,15 +240,144 @@ Each was reproduced before it went into this table.
   carries the column in the generated file, `Table.SoftDelete`, which older files leave out and keep
   their hard deletes. `scaffold` proposes it as a guess, never the other commands.
 
+- **An audit table and an accurate revert.** With `audit_table` set, every run records what each
+  change did on that database, with the set's SHA-256. `Revert` undoes only what that database's
+  `Apply` did: a second revert changes nothing, a run that found the database unseeded reverts
+  nothing, and a file edited since it ran is flagged. `status` shows it per migration.
+- **Migrating by hand.** `apply -file` runs one generated migration, and `-record` records it as bun's
+  migrator would, under bun's lock; `-revert -record` only removes the record when the audit table
+  says the set was reverted already.
+- **Run-time guards.** `lock_timeout` set after the advisory lock, the audit write included; a set
+  refuses to run where row-level security would hide rows, the audit table's included; deferrable
+  constraints deferred and checked before commit; sequences moved past explicit ids, never back,
+  even by a role that may not read them.
+- **Tables without an id of their own.** `id: none` for a table keyed by its parent's id, a 1:1
+  extension table, which scaffold proposes.
+- **Unique values that trade places.** A swap or rotation under a non-deferrable unique index is
+  refused with the two ways out, a deferrable constraint or a parking value in a migration of its
+  own; under a deferrable one it is written.
+- **Offline readings PostgreSQL agrees with.** Interval spellings, bool and uuid template copies and
+  numbers are settled without a database as PostgreSQL would settle them, and what cannot be is
+  refused.
+- **Two long-running examples.** `examples/saas` over 13 releases and `examples/commerce`, a shop's
+  back office in three schemas, over 12, both replayed release by release against bun's migrator in
+  CI, each with a table of what it found.
+
+### Known limitations
+
+Found by the adversarial reviews and the two long-running examples, and not fixed yet. Each says what
+happens and how to stay clear of it; none of them writes wrong data silently where the workaround is
+followed, and most fail loudly at `plan`.
+
+**Who owns what.** The reference lists them with their workarounds under
+[who owns what](reference.md#who-owns-what). In short:
+- `check`, `sync` and `generate -from-db` pair rows by id before natural key, so a tenant's row that
+  holds the id the files give a new row is taken for a rename of it. Give new rows ids no database
+  holds, or use `ids: database`. Fixing it needs the state file's view of which rows the files held,
+  passed into the database diff, because pairing by key alone would turn genuine renames into
+  collisions.
+- A cascade reaching an `upsert` or `insert` model through a foreign key the configuration does not
+  declare as a reference is not refused. One it declares is.
+- Under `upsert` and `insert`: keys the database spells differently but holds equal (citext) are
+  dropped by `export`; the `ref` column under `insert` follows the database; `export` over fixture
+  files that do not read skips the ownership filter; a mode change is not recorded in the state; an
+  `ids: database` column without a default is not linted; a new row taking a unique value that a
+  kept row holds is not warned about.
+- An insert that finds its row already there, differing only in columns the database owns
+  (`insert_only`, or every column under `mode: insert`), is reported as a skipped changed row rather
+  than as unchanged. Nothing is written either way; under `changed_row: error` it fails the set. A
+  soft-delete restore compares `insert_only` columns too. The fix is a field in `fixturechange.Table`
+  naming the columns the files own, with the format rules of the [architecture](architecture.md).
+
+**The run time.**
+- Under `default_transaction_isolation` set to `repeatable read` or `serializable`, the second of two
+  simultaneous runs of one set fails with a serialization error instead of finding the work done. It
+  rolls back, so nothing is lost; the fix is beginning the transactions `READ COMMITTED` explicitly.
+- A role with `USAGE` and `UPDATE` but not `SELECT` on a sequence moves a sequence restarted with
+  `RESTART WITH` and not used since back to just past the ids it inserted. Grant `SELECT`.
+
+**Soft deletes.**
+- Under a `DEFERRABLE` unique constraint, inserting beside a soft-deleted copy is not refused inside
+  the savepoint, so instead of a `changed_row` outcome the whole set fails at the final constraint
+  check. Use a constraint that is not deferrable, or a partial unique index over live rows.
+- One application soft-delete of a parent that another master row points at stops `check`, `export`
+  and `sync`; restore the parent by hand.
+- `scaffold` proposes a key containing the soft-delete column for `UNIQUE NULLS NOT DISTINCT (sku,
+  deleted_at)`, which the loader refuses; key on `sku` and keep `key_index` at `warn` for that model.
+- A fixture file holding a soft-deleted history row beside a live row of the same key, under a unique
+  index over all rows, passes `check` but cannot be seeded by `dbfixture`.
+- A restore skipped under `changed_row: warn` makes an insert of the same set that points at the
+  row fail the deploy, and `check`'s note that a migration restores the row is then wrong.
+- A restore locks its candidate rows (`FOR UPDATE`), so the role running migrations needs `UPDATE`
+  on a soft-delete table even for a change that only inserts.
+- Reverting a restore soft-deletes the row at the revert's time, not at its original `deleted_at`.
+- `mode: insert` with `soft_delete` is refused.
+
+**The key lint.**
+- False positives: a partial unique index on a partitioned table, which the planner test cannot
+  decide; an index column the model's `where` or soft-delete pins to one value, reported as a
+  superset. Set `key_index: warn`, or `ignore` on that model.
+- `plan`'s notes misjudge `key_any_of` keys that `check` passes.
+- An index under a nondeterministic collation the column lacks is taken as plain, not stricter, so
+  values it holds equal are not reported as duplicates before deploy.
+- The proposed `CREATE UNIQUE INDEX` does not run on a partitioned table, or with a predicate that
+  calls `now()` or a subquery.
+- `scaffold` does not key a table on a partial expression index (`lower(email) WHERE deleted_at IS
+  NULL`).
+- A finding read back from JSON loses the mark that caps an undecidable verdict at a warning.
+- Unverified risks: the planner test runs once per partial index, which takes seconds per key with
+  hundreds of them, and the textual implication check ignores casts.
+
+**Ordering and values.**
+- Unique values trading places are detected through plain unique indexes only: through a partial
+  index, an expression index such as `lower(email)` or a citext column they are written, and the
+  migration fails at run time, which `plan` shows. Move one row to a free value in a migration of its
+  own.
+- `id: none` chains (a table keyed by a table keyed by a parent) are not ordered by their foreign
+  keys, so an insert can come before the row it needs, and an export is not in an order `dbfixture`
+  loads. Split such a change into two migrations.
+- Offline, an interval with a time field before a fractional day (`'00:00 1.5 days'`) is read
+  differently from PostgreSQL, and quoted respellings of other types (`'1.10'`, a uuid's case) and
+  intervals used as natural keys are compared as written. Configure the database.
+- A null inside a JSON mapping that a `map[string]string` field loads is stored as `""` by
+  `dbfixture`, while the tool reads it as JSON null; `check` after the seed is the first to say so.
+  A nullable jsonb column through a `nullzero` map can only be allowed with the global
+  `null_default: warn`.
+- An insert of a row the model's `where` leaves out fails on the table's key before the `where` is
+  checked, with a bare unique violation.
+- Retiring a model by taking it out of the files and the configuration at once stops every command
+  with a message about the fixture file; take it out of the files first, generate, then out of the
+  configuration.
+
+**bun upstream.** bun pull requests #1356 and #1365 (free-form migration names) would break the
+reading of migration names from file names; the bun-master CI job will show it. bun's `int64`
+soft-delete field fails on PostgreSQL in bun itself.
+
 ### Later
+
+First, the known limitations above, in this order, because each can cost data or a deploy:
+
+1. **The files' columns in the run time.** A `fixturechange.Table` field naming the columns the files
+   own, so an insert that finds its row differing only in the database's columns is unchanged, a
+   restore ignores `insert_only` columns, and `mode: insert` can take `soft_delete`.
+2. **The state file in the database diff.** `check`, `sync` and `generate -from-db` told which rows
+   the files held, so a row the files never had is never paired with a file row by id.
+3. **`READ COMMITTED` change sets**, and a sequence that a role may not read checked with `nextval`.
+4. **Soft deletes under deferrable constraints**, by setting the table's deferrable unique
+   constraints `IMMEDIATE` inside the savepoint; an application soft-delete of a referenced parent
+   reported as a finding that `sync` repairs.
+5. **Ordering through every unique index**: partial, expression and citext ones, and `id: none`
+   chains through their foreign keys.
+6. **The key lint's false positives** on partitioned tables and on columns a filter pins.
+7. **The commerce example's later releases**: retiring a shipping method orders point at, by soft
+   delete, and `key_index: error` after unique indexes added by SQL migrations.
+
+Then:
 
 - **SQL output.** A change set rendered as guarded PL/pgSQL (`DO` blocks, `GET DIAGNOSTICS`,
   `RAISE EXCEPTION` per policy) for projects whose migrations are SQL only and for other migrators.
   It cannot take back bun's record of a failure from inside the failed transaction, so with bun it
   needs `WithMarkAppliedOnSuccess(true)`, and says so in the file.
-- **Soft deletes under `mode: insert`.** Refused for now: under it a soft-deleted row is the
-  database's and must not come back, which needs the run time to know the mode. A restore compares
-  `insert_only` columns too, which the run time cannot tell apart; both need a field in the table.
 - **Scoped inserts.** An insert into a model with a `where` clause is checked against it, so a row
   the export would not see again cannot be written.
 - **Batching** for change sets of thousands of rows: one statement per model and kind instead of
@@ -263,7 +392,7 @@ Each was reproduced before it went into this table.
 
 ## 5. Tests
 
-Four layers, each with a job the others cannot do:
+Seven layers, each with a job the others cannot do:
 
 1. **Unit** — the diff, reading and rendering, the state file, value canonicalisation, the reader
    of generated files. Fuzzed where the input is text from outside: number canonicalisation, the
@@ -274,6 +403,15 @@ Four layers, each with a job the others cannot do:
    `InsertQuery` and the real `migrate.Migrator` in both of its modes.
 4. **End to end** — the command built and driven through a fixture change from baseline to deploy,
    including a generated migration compiled into a program that runs bun's migrator.
+5. **Properties** — random models, ownership modes, soft deletes and edits, checking that applying
+   what `generate` wrote takes a database to the files, and that revert, `check` and `export` agree.
+6. **Generated files over time** — every shape an earlier version wrote, frozen in
+   `testdata/generated`, compiled and run against today's run time.
+7. **Long-running examples** — `examples/saas` and `examples/commerce` replayed release by release:
+   seeds, migrations, rollbacks, hand edits, merges and runbooks, as a team would live them.
+
+Each wave of work was followed by an adversarial review that reproduced what it found; the open
+findings are the known limitations above.
 
 Variants, as a CI matrix: PostgreSQL 12 to 18; the pinned bun release and bun master; `pgdriver`
 and `pgx`; Go's oldest supported version and the current one. The same pipeline runs on GitHub
