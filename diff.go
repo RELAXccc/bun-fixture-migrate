@@ -30,6 +30,11 @@ type Result struct {
 	Changes []fixturechange.Change
 	// Refusals are the differences that need a hand-written migration.
 	Refusals []Refusal
+	// Warnings are what the policy says to report and carry on with: a row
+	// under another id than the one it had, with policy.id_drift set to warn.
+	// The rest of such a row is migrated. Nothing in them stops a migration
+	// from being written, or a sync from running.
+	Warnings []Refusal
 	// Tables covers every model a change touches or points at.
 	Tables fixturechange.Tables
 	// Order is the model order that was used: every model after the models
@@ -357,12 +362,14 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 	}
 	res.Changes = orderChanges(cfg, renames, deletes, updates, inserts)
 	res.Tables = tablesFor(cfg, res.Changes)
-	sort.SliceStable(res.Refusals, func(i, j int) bool {
-		if res.Refusals[i].Model != res.Refusals[j].Model {
-			return res.Refusals[i].Model < res.Refusals[j].Model
-		}
-		return res.Refusals[i].Key < res.Refusals[j].Key
-	})
+	for _, list := range [][]Refusal{res.Refusals, res.Warnings} {
+		sort.SliceStable(list, func(i, j int) bool {
+			if list[i].Model != list[j].Model {
+				return list[i].Model < list[j].Model
+			}
+			return list[i].Key < list[j].Key
+		})
+	}
 	return res, nil
 }
 
@@ -487,18 +494,20 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 		if !ok || cur.ID == "" || cur.ID == prev.ID {
 			continue
 		}
-		reason := fmt.Sprintf(
-			"its %s changed from %s to %s. This tool does not renumber a primary key: live data points at %s, "+
-				"and so does anything outside the database that was given an id. Put %s back, or set "+
-				"policy.id_drift to warn if nothing outside this database names these ids",
-			m.ID, prev.ID, cur.ID, prev.ID, prev.ID)
 		if cfg.Policy.IDDrift == ModeWarn {
 			// The row still gets its value diff; only the id is left alone,
 			// which an update never writes anyway.
-			res.Refusals = append(res.Refusals, Refusal{model, prev.label(model), "warning: " + reason})
+			res.Warnings = append(res.Warnings, Refusal{model, prev.label(model), fmt.Sprintf(
+				"its %s changed from %s to %s. This tool does not renumber a primary key, so wherever the row "+
+					"is it keeps the %s it has; policy.id_drift is warn, so the rest of the row is migrated",
+				m.ID, prev.ID, cur.ID, m.ID)})
 			continue
 		}
-		res.Refusals = append(res.Refusals, Refusal{model, prev.label(model), reason})
+		res.Refusals = append(res.Refusals, Refusal{model, prev.label(model), fmt.Sprintf(
+			"its %s changed from %s to %s. This tool does not renumber a primary key: live data points at %s, "+
+				"and so does anything outside the database that was given an id. Put %s back, or set "+
+				"policy.id_drift to warn if nothing outside this database names these ids",
+			m.ID, prev.ID, cur.ID, prev.ID, prev.ID)})
 		skip[prev.KeyStr] = true
 	}
 	return nil

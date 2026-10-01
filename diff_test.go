@@ -622,11 +622,16 @@ func TestComputeLeavesItsSnapshotsAlone(t *testing.T) {
 func TestIDDriftPolicy(t *testing.T) {
 	next := replace(t, base, "      id: 2\n      name: team\n", "      id: 7\n      name: team\n")
 
+	// warn reports and carries on: a warning, not a refusal, and the rest of
+	// the row is still migrated.
 	warn := testConfig(t)
 	warn.Policy.IDDrift = ModeWarn
-	res := computeWith(t, warn, base, next)
-	if len(res.Refusals) != 1 || !strings.HasPrefix(res.Refusals[0].Reason, "warning:") {
-		t.Fatalf("expected a warning, got %+v", res.Refusals)
+	res := computeWith(t, warn, base, replace(t, next, "      price_cents: 2000\n", "      price_cents: 2500\n"))
+	if len(res.Refusals) != 0 || len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0].Reason, "changed from 2 to 7") {
+		t.Fatalf("expected one warning and no refusal, got %+v / %+v", res.Warnings, res.Refusals)
+	}
+	if c := only(t, res, "Plan", fixturechange.Update); c.New["price_cents"].Lit != "2500" {
+		t.Fatalf("the rest of the row is migrated: %+v", c)
 	}
 
 	ignore := testConfig(t)

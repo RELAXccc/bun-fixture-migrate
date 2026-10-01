@@ -209,7 +209,7 @@ listed stops every command.
 
 | Key | Values | Default | Decides |
 | --- | --- | --- | --- |
-| `id_drift` | error, warn, ignore | error | a row under another id than the file's, or the file's id held by another row |
+| `id_drift` | error, warn, ignore | error | a row under another id than the file's, or the file's id held by another row. `warn` reports it as a warning, not a refusal, and migrates the rest of the row |
 | `missing_row` | error, warn | error | an update or delete whose row is not there. `warn` loses the change for good under bun's migrator |
 | `changed_row` | error, warn | warn | a row somebody changed in this database; `warn` keeps their change |
 | `zero_default` | error, warn, ignore | error | a zero in a column whose default is not that zero, which bun replaces with the default |
