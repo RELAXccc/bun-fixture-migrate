@@ -320,6 +320,11 @@ func judge(err error) (result, note string) {
 	case code == pgerr.ActiveSQLTransaction:
 		return "inconclusive", "it cannot run inside a transaction, so plan cannot simulate it or what " +
 			"follows it; plan without -with-sql"
+	case code == pgerr.InsufficientPrivilege, code == pgerr.ReadOnlyTransaction:
+		// The plan's role, not the migration: a read-only role, one without
+		// the grants, or one a row-level security policy limits. The deploy
+		// connects as the role the application migrates as.
+		return "inconclusive", "the role plan connects as cannot write here; plan as the role the deploy uses"
 	case code == pgerr.UnsafeNewEnumValue:
 		return "inconclusive", "it uses an enum value a migration before it in this plan added, and " +
 			"PostgreSQL lets no transaction use an enum value it added itself. The plan runs every migration " +
@@ -509,6 +514,18 @@ func simulate(o streams, db *bun.DB, targets []planTarget, lockTimeout time.Dura
 		return err
 	}
 	defer tx.Rollback()
+	// A transaction that starts read only, from default_transaction_read_only
+	// on the role or in the DSN, refuses every write, which would read as
+	// every migration failing, as on a standby.
+	var readOnly string
+	if err := tx.QueryRowContext(o.ctx, "SHOW transaction_read_only").Scan(&readOnly); err != nil {
+		return err
+	}
+	if readOnly == "on" {
+		return fmt.Errorf("the database starts every transaction of this connection read only " +
+			"(default_transaction_read_only), so nothing can be planned there: plan as the role the deploy uses, " +
+			"which needs the rights the migrations need")
+	}
 	start := time.Now()
 	if lockTimeout > 0 {
 		if _, err := tx.ExecContext(o.ctx, fmt.Sprintf("SET LOCAL lock_timeout = %d", lockTimeout.Milliseconds())); err != nil {

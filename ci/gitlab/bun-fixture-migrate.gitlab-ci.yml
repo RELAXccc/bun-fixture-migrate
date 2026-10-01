@@ -64,7 +64,9 @@
 # The pending fixture migrations, run against a database in a transaction that
 # is rolled back, row by row: against a copy of production before a deploy, or
 # production itself. -strict fails on a change that would be skipped as well
-# as on one that would fail.
+# as on one that would fail. plan writes, so give this job a DSN of its own,
+# for a role with the rights the migrations need: as a read-only role it
+# proves nothing, and says so with exit code 1.
 .bun-fixture-migrate:plan:
   extends: .bun-fixture-migrate
   variables:

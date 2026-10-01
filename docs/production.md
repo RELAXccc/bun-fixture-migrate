@@ -30,6 +30,8 @@ against production itself: it runs in a transaction PostgreSQL holds to `READ ON
 
 [CI](ci.md) has ready-made jobs for all of them. `plan` against production itself is safe too:
 it rolls back, gives up on a lock after `-lock-timeout` (5s), and is refused against a standby. It
+connects as a role with the rights the migrations need, the deploy's own or one granted the same:
+as a read-only role it proves nothing, and says so. It
 does hold the rows its changes touch locked until it rolls back, and says how many and for how long;
 a change set of thousands of rows can hold application writes to those rows for seconds, so plan a
 large one against a copy, or off-peak.

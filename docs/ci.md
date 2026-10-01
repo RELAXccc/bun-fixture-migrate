@@ -61,8 +61,17 @@ command through environment variables, never by being pasted into a script.
 
 A database is whatever the configuration names, usually `database: env:DATABASE_URL`, or what
 `-dsn` names for one command, such as `-dsn env:PRODUCTION_READONLY_DSN`; give the step that variable
-from a secret. `$BUN_FIXTURE_MIGRATE_CONFIG` names the configuration for every command of a job that
-does not run where it is:
+from a secret.
+
+`plan` writes and rolls back, so it connects as a role with the rights the migrations need: the one
+the deploy migrates as, or one granted the same. Give it a secret of its own, here
+`PRODUCTION_PLAN_DSN`, and keep the read-only one for `check` and `status`. As a role that cannot
+write, plan proves nothing about the deploy: a role whose transactions start read only
+(`default_transaction_read_only`) is refused, as a standby is, and a write the role is not granted
+makes the plan inconclusive (exit 1) rather than a migration that would fail. Until it rolls back, plan
+holds locked every row it wrote, and with `-with-sql` what the SQL migrations lock, so against
+production a large change set holds up the application's writes for as long as the plan runs; its
+report says how many rows and how long. Point it at a copy of production where you can.
 
 ```yaml
   plan:
@@ -75,17 +84,13 @@ does not run where it is:
           go-version: stable
       - uses: RELAXccc/bun-fixture-migrate@<tag>
         env:
-          DATABASE_URL: ${{ secrets.PRODUCTION_READONLY_DSN }}
+          DATABASE_URL: ${{ secrets.PRODUCTION_PLAN_DSN }}
         with:
           command: plan
           args: -strict
 ```
 
-`plan` writes and rolls back, so its database user needs the rights the migrations need. Until it
-rolls back it holds locked every row it wrote, and with `-with-sql` what the SQL migrations lock, so
-against production a large change set holds up the application's writes for as long as the plan
-runs; its report says how many rows and how long. Point it at a copy of production where you can.
-`check` and `status` only read, and are fine with a read-only user or a standby.
+`check` and `status` only read, and are fine with a read-only role or a standby.
 
 To treat drift as a warning in a scheduled job, let the step fail softly and look at the code:
 

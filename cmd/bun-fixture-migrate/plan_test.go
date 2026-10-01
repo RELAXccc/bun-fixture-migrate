@@ -210,6 +210,9 @@ func TestJudge(t *testing.T) {
 		{sqlState("55P03"), "inconclusive", ""},
 		{sqlState("08006"), "inconclusive", ""},
 		{context.Canceled, "inconclusive", ""},
+		// The plan's role, not the deploy's.
+		{fmt.Errorf("x: %w", sqlState("42501")), "inconclusive", "plan as the role the deploy uses"},
+		{sqlState("25006"), "inconclusive", "cannot write here"},
 	} {
 		result, note := judge(tc.err)
 		if result != tc.result || (tc.note == "") != (note == "") || !strings.Contains(note, tc.note) {

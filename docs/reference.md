@@ -187,7 +187,9 @@ Runs the pending fixture migrations against the database, in bun's order, in one
 always rolled back, and reports every change. Constraints PostgreSQL defers to `COMMIT` are checked
 where the deploy commits: after each migration, and after each statement of a SQL migration bun runs
 without a transaction. Pending migrations it did not write are named, and so is where they would
-run. Refused against a standby.
+run. Refused against a standby, and as a role whose transactions start read only
+(`default_transaction_read_only`): it writes, so it connects as a role with the rights the
+migrations need, such as the one the deploy migrates as.
 
 | Flag | |
 | --- | --- |
@@ -209,7 +211,8 @@ moved, in the database plan ran against; plan notes such a migration.
 Exit 3 when a migration would fail, or with `-strict` be skipped; exit 1 when the plan could not
 finish (a lock waited for too long, a lost connection, a SQL migration that cannot run in a
 transaction, an enum value a migration in the same plan added, a table or column missing after a
-migration plan did not run), which says nothing about the migration.
+migration plan did not run, a write the role plan connects as may not make), which says nothing
+about the migration.
 
 ### sync
 

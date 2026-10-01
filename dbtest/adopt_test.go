@@ -238,3 +238,55 @@ func TestScaffoldRefusesWhatItCannotPropose(t *testing.T) {
 		t.Fatal(out)
 	}
 }
+
+// plan writes and rolls back, so it needs a role that can write what the
+// migrations write. As a role that cannot, every change fails, and that is no
+// verdict on the deploy, which migrates as another role: a role whose
+// transactions start read only is refused like a standby, and a missing grant
+// makes the plan inconclusive (exit 1), not a migration that would fail.
+func TestPlanAsARoleThatCannotWrite(t *testing.T) {
+	a := newAdoption(t)
+	a.run(0, "scaffold", "-o", "fixture-migrate.yml", "-tables", "currencies,plans")
+	exported := func() string { a.run(0, "export"); return a.read("fixtures/fixture.yml") }()
+	a.run(0, "baseline")
+	a.write("fixtures/fixture.yml", strings.Replace(exported, "price_cents: 2500", "price_cents: 2600", 1))
+	a.run(0, "generate", "-name", "plan prices")
+	a.run(0, "plan")
+
+	roles := []string{"bfm_plan_reader", "bfm_plan_readonly"}
+	drop := func() {
+		for _, role := range roles {
+			run(t, a.db, "DO $$ BEGIN IF EXISTS (SELECT FROM pg_roles WHERE rolname = '"+role+"') THEN "+
+				"EXECUTE 'DROP OWNED BY "+role+"'; EXECUTE 'DROP ROLE "+role+"'; END IF; END $$")
+		}
+	}
+	drop()
+	t.Cleanup(drop)
+	for _, role := range roles {
+		run(t, a.db, "CREATE ROLE "+role+" LOGIN PASSWORD 'bfm-plan'", "GRANT USAGE ON SCHEMA public TO "+role,
+			"GRANT SELECT ON ALL TABLES IN SCHEMA public TO "+role)
+	}
+	run(t, a.db, "GRANT ALL ON ALL TABLES IN SCHEMA public TO bfm_plan_readonly",
+		"GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO bfm_plan_readonly",
+		"ALTER ROLE bfm_plan_readonly SET default_transaction_read_only = on")
+	dsn := func(role string) string {
+		u, err := url.Parse(a.dsn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		u.User = url.UserPassword(role, "bfm-plan")
+		return u.String()
+	}
+	out := a.run(1, "plan", "-dsn", dsn("bfm_plan_readonly"))
+	if !strings.Contains(out, "starts every transaction of this connection read only") {
+		t.Fatal(out)
+	}
+	out = a.run(1, "plan", "-dsn", dsn("bfm_plan_reader"))
+	if !strings.Contains(out, "could not be planned") || !strings.Contains(out, "plan as the role the deploy uses") ||
+		strings.Contains(out, "and so would the deploy") {
+		t.Fatal(out)
+	}
+	// check and status only read, and are fine as either.
+	a.run(3, "check", "-dsn", dsn("bfm_plan_readonly"))
+	a.run(0, "status", "-dsn", dsn("bfm_plan_reader"))
+}
