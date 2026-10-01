@@ -15,6 +15,7 @@ import (
 	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
 	"github.com/RELAXccc/bun-fixture-migrate/fixtureapply"
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+	"github.com/RELAXccc/bun-fixture-migrate/internal/pgerr"
 )
 
 // A literal, NULL and a reference have to be told apart by a program, which
@@ -90,7 +91,7 @@ func TestInconclusiveErrors(t *testing.T) {
 	if inconclusive(errors.New("no row of items has name=anvil")) {
 		t.Fatal("a missing row is a verdict")
 	}
-	if sqlState(errors.New("x")) != "" {
+	if pgerr.State(errors.New("x")) != "" {
 		t.Fatal("no SQLSTATE in a plain error")
 	}
 }

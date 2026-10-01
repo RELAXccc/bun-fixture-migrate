@@ -39,6 +39,7 @@ func TestAGeneratedFileReadsBackAsTheSetItRuns(t *testing.T) {
       note: '{"audit":true}'
 `, 1)
 	old := replace(t, base, "      quota: 100\n", "      quota: 100\n      note: x\n")
+	cfg.LockTimeout = "5s"
 	res := computeWith(t, cfg, old, next)
 	if len(res.Refusals) != 0 {
 		t.Fatalf("refusals: %+v", res.Refusals)
@@ -55,12 +56,14 @@ func TestAGeneratedFileReadsBackAsTheSetItRuns(t *testing.T) {
 		Name:            "20260921120000_fixture_all_kinds",
 		SeedGuardTable:  cfg.SeedGuardTable,
 		MigrationsTable: cfg.MigrationsTable,
+		LockTimeout:     "5s",
 		Tables:          res.Tables,
 		Changes:         res.Changes,
 		Policy: fixturechange.Policy{
-			MissingRow: fixturechange.Mode(cfg.Policy.MissingRow),
-			ChangedRow: fixturechange.Mode(cfg.Policy.ChangedRow),
-			IDDrift:    fixturechange.Mode(cfg.Policy.IDDrift),
+			MissingRow:   fixturechange.Mode(cfg.Policy.MissingRow),
+			ChangedRow:   fixturechange.Mode(cfg.Policy.ChangedRow),
+			IDDrift:      fixturechange.Mode(cfg.Policy.IDDrift),
+			DuplicateKey: fixturechange.Mode(cfg.Policy.DuplicateKey),
 		},
 	}
 	if !reflect.DeepEqual(got, want) {

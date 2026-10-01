@@ -15,9 +15,9 @@ import (
 	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
 	"github.com/RELAXccc/bun-fixture-migrate/fixtureapply"
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+	"github.com/RELAXccc/bun-fixture-migrate/internal/pgerr"
 
 	"github.com/uptrace/bun"
-	"github.com/uptrace/bun/driver/pgdriver"
 )
 
 type planReport struct {
@@ -112,15 +112,6 @@ func splitSQL(data []byte) ([]string, error) {
 	return queries, nil
 }
 
-// sqlState is the SQLSTATE of a PostgreSQL error, "" for any other error.
-func sqlState(err error) string {
-	var pgErr pgdriver.Error
-	if errors.As(err, &pgErr) {
-		return pgErr.Field('C')
-	}
-	return ""
-}
-
 // inconclusive reports an error that stopped the plan rather than one the
 // migration would meet: waiting too long for a lock another session holds, a
 // cancelled query, a serialisation failure, a lost connection. Each would
@@ -130,11 +121,7 @@ func inconclusive(err error) bool {
 		errors.Is(err, driver.ErrBadConn) {
 		return true
 	}
-	var pgErr pgdriver.Error
-	if !errors.As(err, &pgErr) {
-		return false
-	}
-	code := pgErr.Field('C')
+	code := pgerr.State(err)
 	switch {
 	case code == "55P03", code == "57014", code == "40001", code == "40P01":
 		return true
@@ -302,10 +289,10 @@ func simulate(o streams, db *bun.DB, targets []planTarget, lockTimeout time.Dura
 			pm.Kind = "sql"
 			if err := runSQLMigration(o, tx, t.sql); err != nil {
 				pm.Result, pm.Error, failed = "fails", err.Error(), true
-				if inconclusive(err) || sqlState(err) == "25001" {
+				if inconclusive(err) || pgerr.State(err) == "25001" {
 					pm.Result = "inconclusive"
 				}
-				if sqlState(err) == "25001" {
+				if pgerr.State(err) == "25001" {
 					pm.Error += " -- it cannot run inside a transaction, so plan cannot simulate it or " +
 						"what follows it; plan without -with-sql"
 				}
