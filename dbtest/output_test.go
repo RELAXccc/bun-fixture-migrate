@@ -95,3 +95,26 @@ func TestOutputThatDoesNotArriveFailsTheCommand(t *testing.T) {
 		}
 	}
 }
+
+// A model whose table is in another schema than the configuration's
+// schema: is read from there by check and export as by everything else.
+func TestCommandsReadATableInAnotherSchema(t *testing.T) {
+	db := connect(t)
+	run(t, db, "DROP SCHEMA IF EXISTS o_catalog CASCADE", "CREATE SCHEMA o_catalog",
+		"CREATE TABLE o_catalog.products (id bigint PRIMARY KEY, sku text UNIQUE NOT NULL, price bigint NOT NULL)",
+		"INSERT INTO o_catalog.products VALUES (1, 'A-1', 100)")
+	c := buildCLI(t)
+	c.write("fixture-migrate.yml", `fixture: fixtures/fixture.yml
+out: migrations
+seed_guard_table: o_catalog.products
+database: env:BFM_TEST_DSN
+models:
+  Product: {table: o_catalog.products, ref: sku, key: [sku]}
+`)
+	c.write("fixtures/fixture.yml", "- model: Product\n  rows:\n    - {id: 1, sku: A-1, price: 100}\n")
+	c.must(0, "check")
+	if out := c.must(0, "export", "-stdout"); !strings.Contains(out, `sku: "A-1"`) {
+		t.Fatalf("export:\n%s", out)
+	}
+	c.must(0, "sync")
+}

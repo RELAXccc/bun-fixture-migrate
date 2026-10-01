@@ -78,7 +78,7 @@ func Sync(ctx context.Context, db *bun.DB, cfg *Config, files []FixtureFile, opt
 	if err := PrepareSession(ctx, tx); err != nil {
 		return nil, err
 	}
-	tables, err := dbschema.Load(ctx, tx, cfg.Schema)
+	tables, err := dbschema.Load(ctx, tx, cfg.Schemas()...)
 	if err != nil {
 		return nil, err
 	}

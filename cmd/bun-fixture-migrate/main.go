@@ -402,7 +402,7 @@ func export(o streams, args []string) error {
 	var mode fixturemigrate.Mode
 	var findings []fixturemigrate.Finding
 	err = readOnly(o.ctx, db, func(tx bun.Tx) error {
-		tables, err := dbschema.Load(o.ctx, tx, s.cfg.Schema)
+		tables, err := dbschema.Load(o.ctx, tx, s.cfg.Schemas()...)
 		if err != nil {
 			return err
 		}
@@ -488,7 +488,7 @@ func check(o streams, args []string) error {
 	defer db.Close()
 	var res *fixturemigrate.CheckResult
 	err = readOnly(o.ctx, db, func(tx bun.Tx) error {
-		tables, err := dbschema.Load(o.ctx, tx, s.cfg.Schema)
+		tables, err := dbschema.Load(o.ctx, tx, s.cfg.Schemas()...)
 		if err != nil {
 			return err
 		}
