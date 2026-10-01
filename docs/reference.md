@@ -49,7 +49,9 @@ Writes the fixture files from the database: models in dependency order, referenc
 naming the target row, anchors from the natural key, values in the notation that loads back as the
 same value. With several fixture files, each model goes back into the file that holds it and a new
 one into the last. Refuses (exit 2) to write a file `dbfixture` would not load back as the database,
-such as a zero bun would replace with a column default.
+such as a zero bun would replace with a column default. Two exports of one database are the same
+bytes: the header holds no time. Output that cannot all be written, to a full disk or a closed pipe,
+is exit 1.
 
 | Flag | |
 | --- | --- |

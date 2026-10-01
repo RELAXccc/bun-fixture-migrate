@@ -6,6 +6,10 @@ package dbtest_test
 
 import (
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -44,5 +48,50 @@ func TestCheckWarningsAreNotDisagreement(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &report); err != nil || code != 3 || report.Agree ||
 		report.Findings[0].Level != "error" {
 		t.Fatalf("check -json under error: exit %d %v\n%s", code, err, stdout)
+	}
+}
+
+// Two exports of one database are the same bytes, so CI can diff an export
+// against the committed file.
+func TestAnExportIsTheSameEveryTime(t *testing.T) {
+	db := itemDB(t)
+	loadFixture(t, db, itemFixture)
+	c := buildCLI(t)
+	_, first, errs := c.run("export", "-stdout")
+	if first == "" {
+		t.Fatalf("no export:\n%s", errs)
+	}
+	if stamp := regexp.MustCompile(`\d{4}-\d\d-\d\dT\d\d:\d\d`).FindString(first); stamp != "" {
+		t.Fatalf("the export carries the time %s:\n%s", stamp, first)
+	}
+	if _, second, _ := c.run("export", "-stdout"); second != first {
+		t.Fatalf("two exports differ:\n%s\n---\n%s", first, second)
+	}
+}
+
+// Standard output on a full disk: export -stdout and scaffold, whose output
+// is the product, fail instead of exiting 0 with nothing written.
+func TestOutputThatDoesNotArriveFailsTheCommand(t *testing.T) {
+	full, err := os.OpenFile("/dev/full", os.O_WRONLY, 0)
+	if err != nil {
+		t.Skip("no /dev/full to write to")
+	}
+	defer full.Close()
+	db := itemDB(t)
+	loadFixture(t, db, itemFixture)
+	c := buildCLI(t)
+	for _, args := range [][]string{
+		{"export", "-config", filepath.Join(c.dir, "fixture-migrate.yml"), "-stdout"},
+		{"scaffold", "-dsn", os.Getenv("BUN_FIXTURE_MIGRATE_POSTGRES")},
+	} {
+		cmd := exec.Command(c.bin, args...)
+		cmd.Env = append(os.Environ(), "BFM_TEST_DSN="+os.Getenv("BUN_FIXTURE_MIGRATE_POSTGRES"))
+		var stderr strings.Builder
+		cmd.Stdout, cmd.Stderr = full, &stderr
+		err := cmd.Run()
+		if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 ||
+			!strings.Contains(stderr.String(), "bun-fixture-migrate: write to standard output") {
+			t.Fatalf("%v: %v\n%s", args, err, stderr.String())
+		}
 	}
 }

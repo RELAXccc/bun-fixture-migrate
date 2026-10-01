@@ -8,6 +8,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -314,3 +315,14 @@ func TestGitShowOutsideARepository(t *testing.T) {
 		t.Fatalf("the message has to name the way out: %v", err)
 	}
 }
+
+// Output a script redirects that did not all arrive fails the command.
+func TestWriteOutFailsWithTheWriter(t *testing.T) {
+	if err := writeOut(failingWriter{}, []byte("x")); err == nil || !strings.Contains(err.Error(), "standard output") {
+		t.Fatalf("%v", err)
+	}
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("no space left on device") }

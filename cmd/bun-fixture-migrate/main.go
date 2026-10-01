@@ -34,7 +34,6 @@ import (
 	"runtime/debug"
 	"strings"
 	"syscall"
-	"time"
 
 	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
 	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
@@ -350,8 +349,11 @@ func export(o streams, args []string) error {
 		fixturemigrate.LintZeroDefaults(s.cfg, snap, tables)
 		fixturemigrate.LintNullDefaults(s.cfg, snap, tables)
 		mode, findings = s.cfg.Worst(snap.Findings)
+		// No time, nor anything else that differs between two exports of
+		// one database: CI diffs an export against the committed file, and
+		// a header that always changes is a diff that always fails.
 		header := []string{
-			"Exported by bun-fixture-migrate from a live database on " + time.Now().UTC().Format(time.RFC3339) + ".",
+			"Exported by bun-fixture-migrate from a live database.",
 			"Models are in dependency order; references name the row they point at, not its id.",
 		}
 		for _, f := range findings {
@@ -379,9 +381,11 @@ func export(o streams, args []string) error {
 	if *stdout {
 		for i, data := range outputs {
 			if several {
-				fmt.Fprintf(o.stdout, "# ==> %s <==\n", s.cfg.Fixtures[i])
+				data = append([]byte("# ==> "+s.cfg.Fixtures[i]+" <==\n"), data...)
 			}
-			o.stdout.Write(data)
+			if err := writeOut(o.stdout, data); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
@@ -502,8 +506,7 @@ func scaffold(o streams, args []string) error {
 	}
 	data := fixturemigrate.Scaffold(tables, wanted, *schema)
 	if *out == "" {
-		o.stdout.Write(data)
-		return nil
+		return writeOut(o.stdout, data)
 	}
 	if _, err := os.Stat(*out); err == nil {
 		return fmt.Errorf("%s exists; scaffold writes a first draft and does not overwrite one", *out)
@@ -513,6 +516,17 @@ func scaffold(o streams, args []string) error {
 	}
 	fmt.Fprintln(o.stderr, "wrote", *out)
 	fmt.Fprintln(o.stderr, "read it: the natural keys and the model names are guesses")
+	return nil
+}
+
+// writeOut writes what a command makes to standard output. Output that did
+// not all arrive, at a full disk or a closed pipe, fails the command: an exit
+// code of 0 would have the script that redirected it carry on with half a
+// file.
+func writeOut(w io.Writer, data []byte) error {
+	if _, err := w.Write(data); err != nil {
+		return fmt.Errorf("write to standard output: %w", err)
+	}
 	return nil
 }
 
