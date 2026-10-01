@@ -62,6 +62,7 @@ as written, and any other field the value it resolves to:
 | `"01234"`, `' spaced '` | exactly that text | exactly that text, cast to the column's type |
 | `01234`, `0x1F`, `1_000` | `01234`, `0x1F`, `1_000` | the integer YAML makes of it: 668, 31, 1000; of any size |
 | `1.10`, `1e3`, `.5` | `1.10`, `1e3`, `.5` | the exact decimal 1.1, 1000, 0.5, never rounded through a float |
+| `0.1234567890123456789`, `9007199254740993` in a `numeric` column | | an `ambiguous value`: a `float64` field stores 0.12345678901234568 and 9007199254740992, an integer, string or decimal field the number; quoted, a `float64` field cannot load it, and it is the number |
 | `.inf`, `.nan` | `.inf`, `.nan` | `Infinity`, `NaN` |
 | `True`, `false` | `True`, `false` | a boolean. `yes` and `on` are strings in YAML 1.2 |
 | `2026-03-04 10:00:00` | `2026-03-04 10:00:00` | that instant, in UTC; unquoted, because a quoted one decodes into a `time.Time` only in RFC 3339 |
@@ -304,6 +305,9 @@ hand and `baseline -force`. See the [runbook](production.md#generate-refused-a-c
   writes.
 - A top-level string that is itself JSON, in a `json` or `jsonb` column, is taken as that document,
   which is what a string field stores; an `any` field stores it as a JSON string.
+- A `~` in a nullable column is NULL, which is what a pointer, an `sql.Null` type or a `nullzero` field
+  writes. A plain `string` or `int64` field without `nullzero` cannot hold NULL and writes its zero,
+  `""` or `0`; the tool takes the model to be able to hold what its column holds.
 - A sequence in a `json` or `jsonb` column is read as an `[]any` field reads it. A `[]string` field
   stores every element as the text it is written as, so `[1, 2026-01-01]` is `["1", "2026-01-01"]`
   through one: quote the elements of such a field.

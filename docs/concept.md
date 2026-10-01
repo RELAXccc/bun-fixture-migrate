@@ -147,6 +147,7 @@ Each was reproduced before it went into this table.
 | `{"a": 1.0}` in `jsonb`, written by SQL | compared as text with the file's `1` | phantom drift | numbers canonical on both sides | done |
 | a 2-D array; an array numbered from 0 | an invalid value after export; `[0:1]={7,8}` exported as `[7, 8]` | broken export, **silent corruption** | the array literal built from nested JSON; another lower bound refused | done, and see below |
 | a `jsonb` document, an array or a timestamp in a generated migration | compact with sorted keys without the database, in jsonb's own spelling with it; a timestamp in RFC 3339 or as `2026-01-01 10:00:00+00`: one edit, two files | unstable output | one spelling on both paths; an export writes jsonb's | done |
+| an unquoted number with more digits than a `float64` holds, in a `numeric` column | read exactly; a `float64` field, a common model of a price, stores it rounded | phantom drift, wrong value | an `ambiguous value`, unless quoted | done |
 | keys one value to their type, in several groups | reported in the order the server's aggregate gave the groups | unstable output | in the order of the rows | done |
 | a type or a function a cast names that cannot be found | every value of the column an `invalid value` with that error | misleading | an error the cast raises for NULL too stops the command | done |
 | a column the table does not have, in `check` | an `unknown column` finding, and again a refusal as a column written on one side only | noise | the lint takes what it reports out of the comparison | done |

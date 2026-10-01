@@ -47,6 +47,11 @@ type Entry struct {
 	// readings: the ref column of the row a reference names, or the field a
 	// template copies. Any other column decides for itself.
 	from map[string]source
+	// asFloat holds, for a fixture row, the columns holding an unquoted
+	// number a float64 field holds as another number, with that one; see
+	// floatReading. In a numeric column only the model's Go type says which
+	// the database holds, and Canonicalize reports it.
+	asFloat map[string]string
 	// folded holds, for a key column whose type holds values equal that
 	// differ as text (citext), the column's value as the type compares it,
 	// as PostgreSQL lower-cases it. Set where the catalog was read; see
@@ -148,6 +153,12 @@ func (s *Snapshot) clone() *Snapshot {
 				c.from = make(map[string]source, len(e.from))
 				for col, src := range e.from {
 					c.from[col] = src
+				}
+			}
+			if e.asFloat != nil {
+				c.asFloat = make(map[string]string, len(e.asFloat))
+				for col, text := range e.asFloat {
+					c.asFloat[col] = text
 				}
 			}
 			if e.folded != nil {

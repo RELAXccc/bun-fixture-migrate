@@ -3,6 +3,7 @@ package fixturemigrate
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
@@ -152,6 +153,9 @@ type reading struct {
 	// json is what a json or jsonb column, or a timestamptz one, holds in
 	// place of the value, when that is something else; see Cell.JSONText.
 	json string
+	// float is what a float64 field holds of an unquoted number, when that
+	// is not the number: 9007199254740993 is 9007199254740992 there.
+	float string
 	// copied is, for a template copying a field other than the id, that
 	// field: dbfixture stores what the field holds as fmt prints it, which
 	// its Go type decides.
@@ -213,7 +217,8 @@ func (ix *index) value(model, col string, row Row) (reading, bool, error) {
 	// resolves it.
 	lit := scalarText(cell)
 	if !isRef {
-		return reading{Value: fixturechange.Lit(lit), written: cell.StringText, json: cell.JSONText}, true, nil
+		return reading{Value: fixturechange.Lit(lit), written: cell.StringText, json: cell.JSONText,
+			float: floatReading(cell)}, true, nil
 	}
 	// A reference column holding nothing or 0 points at no row, unless a row
 	// has that id.
@@ -346,6 +351,27 @@ func (ix *index) keyValues(model string, row Row) (fixturechange.Values, error) 
 	return out, nil
 }
 
+// floatReading is what yaml.v3 hands a float64 field of an unquoted number,
+// written canonically, when that is not the number itself, and "" otherwise:
+// a float64 holds 9007199254740993 as 9007199254740992, and
+// 0.1234567890123456789 as 0.12345678901234568. A quoted number a float64
+// field does not load at all, so it has none.
+func floatReading(c Cell) string {
+	if c.Tag != "!!int" && c.Tag != "!!float" {
+		return ""
+	}
+	exact := scalarText(c)
+	f, err := strconv.ParseFloat(exact, 64)
+	if err != nil {
+		return ""
+	}
+	canon, ok := canonicalDecimal(strconv.FormatFloat(f, 'g', -1, 64))
+	if !ok || canon == exact {
+		return ""
+	}
+	return canon
+}
+
 func isZero(v fixturechange.Value) bool {
 	if v.Ref != nil {
 		return false
@@ -472,6 +498,12 @@ func (e *Entry) record(col string, r reading) {
 			e.asJSON = map[string]string{}
 		}
 		e.asJSON[col] = r.json
+	}
+	if r.float != "" {
+		if e.asFloat == nil {
+			e.asFloat = map[string]string{}
+		}
+		e.asFloat[col] = r.float
 	}
 	if r.copied != nil {
 		if e.copied == nil {

@@ -633,3 +633,46 @@ func TestReviewAnErrorOfTheCastItselfIsNoInvalidValue(t *testing.T) {
 		}
 	})
 }
+
+type RvNumF struct {
+	bun.BaseModel `bun:"table:rv_num_f"`
+	ID            int64   `bun:"id,pk"`
+	Name          string  `bun:"name,notnull"`
+	N             float64 `bun:"n"`
+}
+
+type RvNumS struct {
+	bun.BaseModel `bun:"table:rv_num_s"`
+	ID            int64  `bun:"id,pk"`
+	Name          string `bun:"name,notnull"`
+	N             string `bun:"n,type:numeric"`
+}
+
+// An unquoted number in a numeric column is what the model's field makes of
+// it: a float64 rounds 0.1234567890123456789 and 9007199254740993, a string
+// keeps them. Only the model knows which it has, so such a number is an
+// ambiguous value; quoted, a float64 field cannot load it, and it is the
+// number.
+func TestReviewALongNumberInANumericColumnDependsOnTheField(t *testing.T) {
+	l := newLab(t, map[string]*fixturemigrate.Model{
+		"RvNumF": {Table: "rv_num_f", Key: []string{"name"}},
+		"RvNumS": {Table: "rv_num_s", Key: []string{"name"}},
+	}, "rv_num_s",
+		[]string{"DROP TABLE IF EXISTS rv_num_f", "DROP TABLE IF EXISTS rv_num_s",
+			"CREATE TABLE rv_num_f (id bigint PRIMARY KEY, name text NOT NULL UNIQUE, n numeric)",
+			"CREATE TABLE rv_num_s (id bigint PRIMARY KEY, name text NOT NULL UNIQUE, n numeric)"},
+		`SELECT (SELECT coalesce(string_agg(n::text, ',' ORDER BY name), '') FROM rv_num_f) || ' / ' ||
+			(SELECT coalesce(string_agg(n::text, ',' ORDER BY name), '') FROM rv_num_s)`,
+		(*RvNumF)(nil), (*RvNumS)(nil))
+	rows := "    - {id: 1, name: a, n: 0.1234567890123456789}\n    - {id: 2, name: b, n: 9007199254740993}\n" +
+		"    - {id: 3, name: c, n: 12.5}\n"
+	both := "- model: RvNumF\n  rows:\n" + rows + "- model: RvNumS\n  rows:\n" + rows
+	if got := l.seed(both); got != "0.12345678901234568,9007199254740992,12.5 / 0.1234567890123456789,9007199254740993,12.5" {
+		t.Fatalf("the premise changed: %s", got)
+	}
+	l.refused(both, "n is 0.1234567890123456789, which a float64 field stores as 0.12345678901234568",
+		"n is 9007199254740993, which a float64 field stores as 9007199254740992")
+	quoted := "- model: RvNumS\n  rows:\n    - {id: 1, name: a, n: \"0.1234567890123456789\"}\n" +
+		"    - {id: 2, name: b, n: \"9007199254740993\"}\n    - {id: 3, name: c, n: 12.5}\n"
+	l.fidelity("- model: RvNumS\n  rows:\n    - {id: 3, name: c, n: 1}\n", quoted)
+}

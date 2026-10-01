@@ -116,6 +116,18 @@ func Canonicalize(ctx context.Context, db bun.IDB, cfg *Config, snap *Snapshot, 
 					delete(e.AsWritten, col)
 					delete(e.asJSON, col)
 				}
+				if float, ok := e.asFloat[col]; ok && known {
+					delete(e.asFloat, col)
+					if decide.Type == "numeric" && decide.Category != "A" {
+						snap.Findings = append(snap.Findings, Finding{
+							Kind: FindingAmbiguousValue, Model: model, Row: e.label(model),
+							Detail: fmt.Sprintf("%s is %s, which a float64 field stores as %s and an integer, a string "+
+								"or a decimal field as it is, and only the Go model knows which this numeric column "+
+								"has: quote it if the field is no float64, which then cannot load it, or write %s if "+
+								"it is", col, text, float, float),
+						})
+					}
+				}
 				if msg, bad := invalid[text]; bad {
 					snap.Findings = append(snap.Findings, Finding{
 						Kind: FindingInvalidValue, Model: model, Row: e.label(model),
