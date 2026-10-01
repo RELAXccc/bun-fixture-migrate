@@ -60,6 +60,10 @@ names the socket file: `unix://user:password@dbname/var/run/postgresql/.s.PGSQL.
 mode, or a proxy, dropped `SET TRANSACTION READ ONLY`. Connect directly, or through a session-mode
 pool, for the reading commands.
 
+**`row-level security hides rows of X from this role`.** A policy on the table limits what the role
+connecting sees, and master data read through it would lack the rows it hides. Connect as a role with
+`BYPASSRLS`, or as the table's owner while the table is not `FORCE ROW LEVEL SECURITY`.
+
 **`the database is a standby, which accepts no writes, so nothing can be planned`.** `plan` has to
 write to simulate. Point it at the primary or a writable copy; `check` and `status` work on a
 standby.

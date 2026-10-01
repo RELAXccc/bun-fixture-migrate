@@ -34,7 +34,9 @@ command nor its errors repeat a password.
 | `version` | none | nothing |
 
 "Reads" is a `REPEATABLE READ, READ ONLY` transaction: PostgreSQL refuses any write in it, and every
-table is read from one snapshot. Such a command works against a hot standby.
+table is read from one snapshot. Such a command works against a hot standby. It runs with
+`row_security` off, so a role that a row-level security policy limits gets an error instead of the
+rows the policy lets through.
 
 ### scaffold
 

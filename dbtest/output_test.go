@@ -6,6 +6,7 @@ package dbtest_test
 
 import (
 	"encoding/json"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -133,4 +134,48 @@ func TestASyncThatFailsSaysOnlyWhy(t *testing.T) {
 			t.Fatalf("%v: exit %d\n%s%s", args, code, stdout, stderr)
 		}
 	}
+}
+
+// Read through a row-level security policy, master data lacks the rows the
+// policy hides, and nothing says so: an export would write a file without
+// them, and generate would turn that into deletes. A role a policy limits
+// gets an error instead.
+func TestARoleRowLevelSecurityLimitsCannotRead(t *testing.T) {
+	db := connect(t)
+	const role = "bfm_rls_reader"
+	drop := func() {
+		run(t, db, "DROP TABLE IF EXISTS rls_tags", "DO $$ BEGIN IF EXISTS (SELECT FROM pg_roles WHERE rolname = '"+
+			role+"') THEN EXECUTE 'DROP OWNED BY "+role+"'; EXECUTE 'DROP ROLE "+role+"'; END IF; END $$")
+	}
+	drop()
+	t.Cleanup(drop)
+	run(t, db, "CREATE ROLE "+role+" LOGIN",
+		"CREATE TABLE rls_tags (id bigint PRIMARY KEY, code text UNIQUE NOT NULL, tenant_id bigint)",
+		"INSERT INTO rls_tags VALUES (1, 'urgent', NULL), (2, 'later', NULL), (3, 'done', 7)",
+		"ALTER TABLE rls_tags ENABLE ROW LEVEL SECURITY",
+		"CREATE POLICY rls_tags_read ON rls_tags FOR SELECT USING (tenant_id IS NOT NULL OR current_user <> '"+role+"')",
+		"GRANT USAGE ON SCHEMA public TO "+role, "GRANT SELECT ON rls_tags TO "+role)
+	u, err := url.Parse(os.Getenv("BUN_FIXTURE_MIGRATE_POSTGRES"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.User = url.User(role)
+	c := buildCLI(t)
+	c.write("fixture-migrate.yml", `fixture: fixtures/fixture.yml
+out: migrations
+database: env:BFM_TEST_DSN
+models:
+  Tag: {table: rls_tags, ref: code, key: [code], defaults: {tenant_id: ~}}
+`)
+	c.write("fixtures/fixture.yml", "- model: Tag\n  rows:\n    - {id: 1, code: urgent}\n    - {id: 2, code: later}\n"+
+		"    - {id: 3, code: done, tenant_id: 7}\n")
+	for _, args := range [][]string{{"export", "-stdout"}, {"check"}} {
+		code, stdout, stderr := c.run(append(args, "-dsn", u.String())...)
+		if code != 1 || strings.Contains(stdout, "code:") ||
+			!strings.Contains(stderr, "row-level security hides rows of rls_tags from this role") {
+			t.Fatalf("%v: exit %d\n%s%s", args, code, stdout, stderr)
+		}
+	}
+	// The owner, and anyone else the policy does not limit, reads it all.
+	c.must(0, "check")
 }

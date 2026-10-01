@@ -38,6 +38,9 @@ const (
 	QueryCanceled = "57014"
 	// ReadOnlyTransaction is a write inside a READ ONLY transaction.
 	ReadOnlyTransaction = "25006"
+	// InsufficientPrivilege is a privilege the role lacks, and also a query
+	// a row-level security policy would filter while row_security is off.
+	InsufficientPrivilege = "42501"
 	// UnsafeNewEnumValue is a value added to an enum used inside the
 	// transaction that added it.
 	UnsafeNewEnumValue = "55P04"

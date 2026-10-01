@@ -178,7 +178,9 @@ file, the newer truth. Three settings and one loop keep that safe:
   ```
 
   The migration brings every other database to the file; on production itself every change is
-  already made and reports `unchanged`. Review the export's diff like any other change.
+  already made and reports `unchanged`. Review the export's diff like any other change. The
+  read-only role has to see every row of the master data: one a row-level security policy limits
+  is refused, because an export without the rows it hides would delete them everywhere else.
 
 `generate -from-db` is the other direction: it diffs a database against the file and writes the
 migration that makes that database match the file. It is the tool for "production is out of step and
