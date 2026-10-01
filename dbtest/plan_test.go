@@ -391,7 +391,7 @@ func TestPlanAsARoleThatMayNotCreateTheAuditTable(t *testing.T) {
 	db := deferredDB(t)
 	run(t, db, "DROP TABLE IF EXISTS bfm_plan_audit",
 		`DO $$BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'bfm_planner') THEN `+
-			`CREATE ROLE bfm_planner LOGIN; END IF; END$$`,
+			`CREATE ROLE bfm_planner LOGIN; END IF; END$$`, "ALTER ROLE bfm_planner PASSWORD 'bfm-planner'",
 		"REVOKE CREATE ON SCHEMA public FROM bfm_planner", "GRANT USAGE ON SCHEMA public TO bfm_planner",
 		"GRANT SELECT, INSERT, UPDATE, DELETE ON d_items, d_regions TO bfm_planner")
 	t.Cleanup(func() { run(t, db, "DROP TABLE IF EXISTS bfm_plan_audit") })
@@ -408,7 +408,7 @@ func TestPlanAsARoleThatMayNotCreateTheAuditTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u.User = url.User("bfm_planner")
+	u.User = url.UserPassword("bfm_planner", "bfm-planner")
 	out := c.must(1, "plan", "-dsn", u.String())
 	for _, want := range []string{
 		"_fixture_hammer: could not be planned",
