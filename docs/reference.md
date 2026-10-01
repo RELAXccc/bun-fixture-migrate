@@ -215,7 +215,15 @@ value no row holds in a migration of its own first, and the others in the next. 
 `DEFERRABLE` constraint orders nothing, and any trade gets through it. Where the files do not write
 every column of the index, or without the database, where the index is a guess, such a circle is a
 warning instead, and so is one the waits for an index's values close with the waits for the rows
-the changes point at: an item giving its position up to a new item it then points at. A row whose ref value changes, a country renamed from Germany to
+the changes point at: an item giving its position up to a new item it then points at.
+
+Two kinds of circle are not found yet, and the migration fails on the index, which `plan` shows: one
+through a partial unique index, which is not among the indexes that order changes, and one through
+a `citext` column, whose values are compared as text (`x` and `X` are two values to the tool). Move
+one of the rows to a free value in a migration of its own first. Without the database, every column
+that no two rows share a value of is guessed to be unique. Rows trading such values, two plans
+swapping prices or tiers, are then warned about as a possible circle even when no index exists.
+With the database configured, only the catalog's indexes are used. A row whose ref value changes, a country renamed from Germany to
 Deutschland, is no change to the rows pointing at it: they point at its id. Models follow their
 references, in file order otherwise, whether or not the new file still mentions them.
 
@@ -537,8 +545,9 @@ changes.
 | `insert` | inserted | left alone: its values are the database's | left alone |
 
 Rows are matched by their natural key. Under `upsert` a row that leaves the files stays in every
-database that has it, and a row the application or a tenant added is not drift; `generate`,
-`check` and `sync` count such rows in a note. Under `insert` the files only seed: a row is written
+database that has it, and a row the application or a tenant added is not drift; `generate` and
+`check` count such rows in a note, in their text and in `left_alone` of their JSON. `sync` does not
+report them: what it leaves alone, `check` lists. Under `insert` the files only seed: a row is written
 once, by the insert, and what it holds afterwards is the database's, the admin's edit included.
 A row a mode leaves alone can be pointed at by the rows the files add, which find it by its `ref`
 value as they find any other.
@@ -546,8 +555,9 @@ value as they find any other.
 - **Renames.** `policy.renames` decides a rename under `sync` and `upsert` alike. Under `insert` a
   rename, a row that kept its id and changed its key, is refused: it would update a row the database
   owns. Put the key back, or give the row of the new key an id of its own to add it beside the old.
-  A key that only changed its spelling to its type, `Go` to `GO` in a `citext` column, finds the same
-  row and is left alone.
+  A key that only changed its spelling to its type, `Go` to `GO` in a `citext` column, of a row
+  without an id finds the same row and is left alone; one whose row kept its id is still refused as a
+  rename (see the known limitations below).
 - **References by a ref value only the files have.** Under `insert`, a row whose `ref` value the
   files change keeps the old one wherever it exists, so a change naming it by the new one, such as a
   new row pointing at it, is refused: it would find nothing there.
@@ -582,6 +592,44 @@ in, so `Revert` inserts the row with the column's default there, and fails where
 `NOT NULL` without one. An insert is taken back by a delete guarded by everything it wrote, so a
 row whose `insert_only` column an operator changed since is skipped as changed. A model with a
 `soft_delete` restores the row it soft-deleted instead, which keeps the column.
+
+**Known limitations.** These are open, and each has a way around it until it is fixed:
+
+- **A cascade reaches kept rows.** A `sync` model with `deletes: cascade`, its own or
+  `policy.deletes`, lets a delete reach every row pointing at it through a foreign key declared `ON
+  DELETE CASCADE`, `SET NULL` or `SET DEFAULT`. Nothing exempts the rows of an `upsert` or `insert`
+  model, including the rows those modes leave to the database, and `generate`'s note that the mode
+  never deletes them is then wrong. Do not set `deletes: cascade` on a model that an `upsert` or
+  `insert` model points at. Under `allow`, the run time refuses a delete while rows still point at
+  the row.
+- **Pairing by id against a database.** `check`, `sync` and `generate -from-db` pair a database row
+  with a file row by id before they pair by natural key, under every mode. A row that a tenant added
+  under the id that the files give to a new row is therefore taken for a rename of that row. Under
+  `policy.renames: update`, `sync` renames the tenant's row into the master row and keeps what points
+  at it; under `insert` it is reported as a refused rename. Under `upsert` and `insert`, use `ids:
+  database`, whose database ids are never compared, or give new rows ids no database row holds.
+  `generate` from the state file pairs two revisions of the files and is not affected.
+- **Respelled keys under `upsert`, `insert` and `insert_only`.** An export keeps a row of the files
+  by its natural key exactly as written, so a key the database spells differently but its type holds
+  equal (`Go` and `GO` in `citext`) is taken for a row the files do not hold, and is left out. Under
+  `insert`, `generate` refuses such a respelling as a rename when the row kept its id, and the
+  refusal's advice to give the row an id of its own would insert a duplicate. Spell the key as the
+  database does.
+- **The `ref` column under `insert`.** The `ref` column is the database's too, so an admin's change
+  to it is no drift to `check`. A reference that the files write still names the row by the files'
+  value, which in that database finds nothing or another row. For a model that another model points
+  at, use a key column as `ref` (`key: [code]`, `ref: code`).
+- **Export over fixture files that do not read.** When the files exist but do not read, `export`
+  writes every row and column, without the filtering that `upsert`, `insert` and `insert_only` do:
+  a tenant's rows and an operator's values end up in the files. Fix the files first.
+- **Changing a mode.** The state file does not record a model's mode, so switching from `upsert` to
+  `sync` generates nothing for the rows `upsert` kept in existing databases. After changing a mode,
+  run `check` against each database, then `sync` or `generate -from-db` there.
+- **`ids: database` without a default.** Nothing lints an id column that has no sequence, identity
+  or default. Each insert fails at run time on its `NOT NULL`, which `plan` shows.
+- **A unique value a kept row still holds.** Under `upsert`, a new row can take a unique value that
+  a row which left the files, and stays in the database, still holds. It is written without a
+  warning, and the migration fails on the index, which `plan` shows.
 
 ### Soft-deleted rows
 
