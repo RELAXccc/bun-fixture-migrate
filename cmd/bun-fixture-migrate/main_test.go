@@ -480,3 +480,28 @@ func TestGenerateWarnsAboutTheSeedGuard(t *testing.T) {
 		}
 	}
 }
+
+// The last line of a failed command says why, starting with the command's
+// name, however many lines the error came in.
+func TestAnErrorIsOneLine(t *testing.T) {
+	cfg, _ := projectWith(t, strings.Replace(config, "package: migrations\n",
+		"package: migrations\nseed_guard_tabel: plans\nmigrator_name: M\n", 1), oldFixture, oldFixture)
+	code, _, stderr := call(t, "status", "-config", cfg, "-offline")
+	if code != 1 || strings.Count(stderr, "\n") != 1 || !strings.Contains(stderr, "field seed_guard_tabel not found") ||
+		!strings.Contains(stderr, "; line ") {
+		t.Fatalf("exit %d\n%s", code, stderr)
+	}
+	if got := oneLine("a\n  b\n\nc"); got != "a; b; c" {
+		t.Fatal(got)
+	}
+	// git's own sentence, in the middle of one of ours, keeps one period.
+	if _, err := exec.LookPath("git"); err != nil {
+		return
+	}
+	cfg, _ = project(t, oldFixture, oldFixture)
+	gitIn(t, filepath.Dir(cfg), false, "init", "-q")
+	code, _, stderr = call(t, "status", "-config", cfg, "-offline")
+	if code != 1 || !strings.Contains(stderr, "invalid object name 'HEAD'. So nothing says") {
+		t.Fatalf("exit %d\n%s", code, stderr)
+	}
+}

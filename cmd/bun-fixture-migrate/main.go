@@ -130,11 +130,23 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	// the exit code: in a CI log it is the line that says why the job failed.
 	var exit exitError
 	if errors.As(err, &exit) {
-		fmt.Fprintln(stderr, "bun-fixture-migrate:", exit.message)
+		fmt.Fprintln(stderr, "bun-fixture-migrate:", oneLine(exit.message))
 		return exit.code
 	}
-	fmt.Fprintln(stderr, "bun-fixture-migrate:", err)
+	fmt.Fprintln(stderr, "bun-fixture-migrate:", oneLine(err.Error()))
 	return 1
+}
+
+// oneLine is a message as the last line of a failed command prints it: an
+// error that arrived in several lines, from git or a library, has them joined.
+func oneLine(msg string) string {
+	var parts []string
+	for _, line := range strings.Split(msg, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			parts = append(parts, line)
+		}
+	}
+	return strings.Join(parts, "; ")
 }
 
 // version is what the build carries: the module version for a binary from
@@ -836,8 +848,10 @@ func git(dir string, args ...string) ([]byte, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
-		if msg := strings.TrimSpace(stderr.String()); msg != "" {
-			return nil, errors.New(msg)
+		// git ends a sentence with a period, which a message that goes on
+		// after it would double.
+		if msg := strings.TrimSuffix(strings.TrimSpace(stderr.String()), "."); msg != "" {
+			return nil, errors.New(oneLine(msg))
 		}
 		return nil, err
 	}
