@@ -232,6 +232,10 @@ type Finding struct {
 	Row   string
 	// Detail is one sentence an operator can act on.
 	Detail string
+
+	// unsure marks an unbacked-key finding the lint could not decide, which
+	// key_index never makes more than a warning.
+	unsure bool
 }
 
 // FindingKind is what a finding is about.
@@ -261,6 +265,12 @@ const (
 	// two branches each adding the next id leave behind after a merge:
 	// dbfixture cannot load such a file, and no migration can insert both.
 	FindingDuplicateID FindingKind = "duplicate id"
+	// FindingUnbackedKey is a natural key, or the ref column of a model
+	// something references, that no unique index or constraint of the table
+	// makes unique among the model's rows: the database lets the
+	// application add a second row with it. Its Row is the key, "key
+	// [plan_id, code]" or "ref code"; see LintKeys.
+	FindingUnbackedKey FindingKind = "unbacked key"
 )
 
 func (f Finding) String() string { return f.Where() + ": " + f.Detail }
