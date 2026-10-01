@@ -225,7 +225,7 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 		case res.problem == problemBenign:
 			out.Status = StatusUnchanged
 			o.log(ctx, slog.LevelInfo, "fixture change already made", out, where+": "+res.message)
-		case modeFor(set.Policy, res.problem) == fixturechange.ModeError:
+		case modeFor(set.PolicyFor(c.Model), res.problem) == fixturechange.ModeError:
 			out.Status, out.Problem = StatusFailed, res.problem.exported()
 			o.report(out)
 			return &ChangeError{Outcome: out}
@@ -463,10 +463,11 @@ func (p problem) exported() Problem {
 	return ""
 }
 
-// modeFor is what the change set's policy says about one problem. An unset
-// policy field is the strict reading: a change that could not be made fails the
-// migration rather than being recorded as done. A benign outcome, where the
-// database already holds what the change wanted, is never an error.
+// modeFor is what a policy, the one the change's model runs under, says about
+// one problem. An unset policy field is the strict reading: a change that could
+// not be made fails the migration rather than being recorded as done. A benign
+// outcome, where the database already holds what the change wanted, is never an
+// error.
 func modeFor(p fixturechange.Policy, pr problem) fixturechange.Mode {
 	switch pr {
 	case problemBenign:

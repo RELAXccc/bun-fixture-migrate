@@ -54,6 +54,13 @@ type Table struct {
 	// stands; fixtureapply refuses one that could reach outside the
 	// parentheses it is put in.
 	Where string
+	// Policy, when set, is what the changes of this model do when the
+	// database is not in the state they were generated against, in place of
+	// the set's Policy: the configuration's changed_row, missing_row,
+	// id_drift and duplicate_key of the model. A field left empty here is
+	// the set's, so Policy{ChangedRow: ModeWarn} changes that one decision
+	// for this model and no other. Nil is the set's Policy throughout.
+	Policy *Policy
 }
 
 // Tables maps a model name to its table.
@@ -159,6 +166,26 @@ type Set struct {
 	// set runs inside a caller's transaction, whose lock_timeout limits that
 	// wait. Empty means the session's own lock_timeout, which is usually none.
 	LockTimeout string
+}
+
+// PolicyFor is the policy the changes of a model run under: the set's
+// Policy, with every field the model's table sets in its own Policy in its
+// place.
+func (s Set) PolicyFor(model string) Policy {
+	p := s.Policy
+	t, ok := s.Tables[model]
+	if !ok || t.Policy == nil {
+		return p
+	}
+	for _, f := range []struct{ to, from *Mode }{
+		{&p.MissingRow, &t.Policy.MissingRow}, {&p.ChangedRow, &t.Policy.ChangedRow},
+		{&p.IDDrift, &t.Policy.IDDrift}, {&p.DuplicateKey, &t.Policy.DuplicateKey},
+	} {
+		if *f.from != "" {
+			*f.to = *f.from
+		}
+	}
+	return p
 }
 
 // Concat joins parts of a change set's Changes in order. A generated file of

@@ -81,6 +81,11 @@ func Validate(set fixturechange.Set) error {
 				return fmt.Errorf("model %q: where %q %w", model, t.Where, err)
 			}
 		}
+		if t.Policy != nil {
+			if err := t.Policy.Validate(); err != nil {
+				return fmt.Errorf("model %q: %w", model, err)
+			}
+		}
 	}
 	if set.SeedGuardTable != "" {
 		if _, err := quoteIdent(set.SeedGuardTable); err != nil {
