@@ -13,10 +13,10 @@
 # generate" on the merged fixture file.
 #
 # format: 2
-# migration: 20261116100000_fixture_help_centre
-# covers: 20261116100000_fixture_help_centre
-# base: 20261019100000_fixture_plan_order
-# sha256: 28b9996d148b737cb16aa59a2c513cfa7e9df03708bdb53e5b19b6910a2344c1
+# migration: 20261207100000_fixture_support_role
+# covers: 20261207100000_fixture_support_role
+# base: 20261116100000_fixture_help_centre
+# sha256: db9906c5327769f6177c4eab54f911c950c1b3579b3ff67397851fd6986e6b3d
 # ----- 61 lines of fixtures/reference.yml -----
 # Currencies and countries.
 
@@ -340,7 +340,7 @@
       parent_id: '{{ $.Category.analytics.ID }}'
       name: Exports
       position: 2
-# ----- 70 lines of fixtures/access.yml -----
+# ----- 76 lines of fixtures/access.yml -----
 # Master roles, permissions and what each role grants. A tenant's custom
 # roles live in the same tables and are not here.
 
@@ -366,6 +366,10 @@
       id: 100
       code: billing_admin
       name: Billing administrator
+    - _id: support
+      id: 5
+      code: support
+      name: Support agent
 
 - model: Permission
   rows:
@@ -411,6 +415,8 @@
     - {role_id: '{{ $.Role.viewer.ID }}', permission_id: '{{ $.Permission.projects_read.ID }}'}
     - {role_id: '{{ $.Role.billing_admin.ID }}', permission_id: '{{ $.Permission.billing_read.ID }}'}
     - {role_id: '{{ $.Role.billing_admin.ID }}', permission_id: '{{ $.Permission.billing_write.ID }}'}
+    - {role_id: '{{ $.Role.support.ID }}', permission_id: '{{ $.Permission.billing_read.ID }}'}
+    - {role_id: '{{ $.Role.support.ID }}', permission_id: '{{ $.Permission.projects_read.ID }}'}
 # ----- 64 lines of fixtures/i18n.yml -----
 # Translations, by locale and key.
 
