@@ -590,6 +590,41 @@ func (c *Config) Prepare() error {
 		m.derived = set(m.Derived)
 		m.ignored = set(m.Ignore)
 	}
+	return c.refuseCascadeIntoKeptRows()
+}
+
+// refuseCascadeIntoKeptRows refuses a sync model whose deletes cascade while
+// an upsert or insert model points at it. A cascading delete follows the
+// table's foreign keys, not the models' modes: deleting the parent row would
+// take with it the rows of the other model that point at it, rows the files
+// may never have held and that its mode promises never to delete.
+func (c *Config) refuseCascadeIntoKeptRows() error {
+	for _, name := range c.ModelNames() {
+		m := c.Models[name]
+		if m.Mode == OwnSync {
+			continue
+		}
+		cols := make([]string, 0, len(m.References))
+		for col := range m.References {
+			cols = append(cols, col)
+		}
+		sort.Strings(cols)
+		for _, col := range cols {
+			target := m.References[col]
+			p, ok := c.Models[target]
+			if !ok || p.Mode != OwnSync || p.Deletes != DeleteCascade || p.SoftDelete != "" {
+				continue
+			}
+			from := "its deletes"
+			if p.deletesInherited {
+				from = "policy.deletes"
+			}
+			return fmt.Errorf("model %q: %s is cascade, and model %q, under mode %s, points at it through %s: "+
+				"deleting a row of %s would delete the rows of %s that point at it, which mode %s never "+
+				"deletes, the database's own rows among them. Set deletes: refuse on %s, or mode sync on %s",
+				target, from, name, m.Mode, col, target, name, m.Mode, target, name)
+		}
+	}
 	return nil
 }
 

@@ -59,6 +59,12 @@ and is recorded as applied. Name the table of a model.
 `deletes` only applies under `mode: sync`; a model under `upsert` or `insert` deletes nothing. Take
 `deletes` off the model, or its `mode`. A `deletes` the model inherits from the policy block is fine.
 
+**`model "P": its deletes is cascade, and model "C", under mode upsert, points at it`** (or
+`policy.deletes is cascade`). Deleting a row of P would delete, through the foreign key, the rows of
+C that point at it, and C's mode promises never to delete one, least of all the rows the database
+added itself. Set `deletes: refuse` on P, so that a delete with rows still pointing at it fails
+instead, or put C under `mode: sync` if the files own all of its rows.
+
 **`model "X": insert_only column "code" is part of the natural key`** (or the `ref` column, the id,
 or a column in `ignore` or `derived`). An `insert_only` column is one the database owns once the row
 exists, and every row is found by its key and named by its `ref` column, which have to be the
