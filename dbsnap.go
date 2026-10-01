@@ -178,10 +178,7 @@ func DatabaseSnapshot(ctx context.Context, db bun.IDB, cfg *Config, tables map[s
 					// 0 or "" points at no row, unless a row has that id.
 					e.Cells[col] = v
 				case goneAt[target][v.Lit] != "":
-					return nil, fmt.Errorf("%s: %s = %s points at %s %s %s, which is soft-deleted (%s = %s): "+
-						"bun loads it through no relation, and it is no master data. Restore it, or point the row "+
-						"elsewhere", model, col, v.Lit, cfg.QualifiedTable(cfg.Models[target]), cfg.Models[target].ID,
-						v.Lit, cfg.Models[target].SoftDelete, goneAt[target][v.Lit])
+					return nil, pointsAtDeleted(cfg, model, col, target, v.Lit, goneAt[target][v.Lit])
 				default:
 					return nil, fmt.Errorf(
 						"%s: %s = %s points at a row of %s that this snapshot does not hold; "+
@@ -276,6 +273,21 @@ func readColumns(m *Model, table *dbschema.Table, want []string) ([]string, erro
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// pointsAtDeleted is the error for a live row pointing at a soft-deleted
+// one, which bun loads through no relation and which is no master data: a
+// row's reference could only name it by a row the snapshot does not hold.
+func pointsAtDeleted(cfg *Config, model, col, target, id, at string) error {
+	tm := cfg.Models[target]
+	where := fmt.Sprintf("%s: %s = %s points at %s %s %s", model, col, id, cfg.QualifiedTable(tm), tm.ID, id)
+	if zeroTime(at) {
+		return fmt.Errorf("%s, whose %s holds the zero time, which a time.Time soft_delete field without nullzero "+
+			"writes for a live row and this configuration reads as deleted. Give the field nullzero or make it a "+
+			"pointer, and set such rows to NULL", where, tm.SoftDelete)
+	}
+	return fmt.Errorf("%s, which is soft-deleted (%s = %s): bun loads it through no relation, and it is no master "+
+		"data. Restore it, or point the row elsewhere", where, tm.SoftDelete, at)
 }
 
 // readDeleted reads the soft-deleted rows of a model with a soft_delete:
