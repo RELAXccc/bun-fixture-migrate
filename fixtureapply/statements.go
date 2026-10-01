@@ -45,7 +45,7 @@ func (r *runner) insert(ctx context.Context, c fixturechange.Change, t fixturech
 	var args []any
 	explicitID := false
 	for _, col := range sortedColumns(c.New) {
-		expr, a, err := r.value(ctx, c.Model, col, c.New[col])
+		expr, a, err := r.written(ctx, c, col)
 		if err != nil {
 			return outcome{}, err
 		}
@@ -88,7 +88,7 @@ func (r *runner) update(ctx context.Context, c fixturechange.Change, t fixturech
 	var sets []string
 	var args []any
 	for _, col := range sortedColumns(c.New) {
-		expr, a, err := r.value(ctx, c.Model, col, c.New[col])
+		expr, a, err := r.written(ctx, c, col)
 		if err != nil {
 			return outcome{}, err
 		}

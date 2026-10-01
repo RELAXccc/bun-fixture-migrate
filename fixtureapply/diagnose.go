@@ -35,16 +35,20 @@ func (r *runner) diagnose(ctx context.Context, c fixturechange.Change, t fixture
 		return duplicate(t, c, byKey), nil
 	}
 	if byKey == 0 {
+		note, err := r.unresolved(ctx, c.Key)
+		if err != nil {
+			return outcome{}, err
+		}
 		if c.Kind == fixturechange.Delete {
-			return outcome{problem: problemBenign, message: "the row is already gone, nothing to delete"}, nil
+			return outcome{problem: problemBenign, message: "the row is already gone, nothing to delete." + note}, nil
 		}
 		if out, done, err := r.diagnoseMoved(ctx, c, t, table, wanted); err != nil || done {
 			return out, err
 		}
 		return outcome{problem: problemMissing, message: fmt.Sprintf(
-			"no row of %s has %s. The row this change updates is not in the database, so the change cannot be made. "+
-				"Put the row back, or drop this change from the migration",
-			t.Name, keyLabel(c.Key))}, nil
+			"no row of %s has %s.%s The row this change updates is not in the database, so the change cannot be "+
+				"made. Put the row back, or drop this change from the migration",
+			t.Name, keyLabel(c.Key), note)}, nil
 	}
 	if len(wanted) > 0 {
 		already, err := r.count(ctx, c.Model, table, c.Key, wanted)
@@ -76,10 +80,14 @@ func (r *runner) diagnose(ctx context.Context, c fixturechange.Change, t fixture
 				t.Name, keyLabel(c.Key), t.ID, strings.Join(ids, ", "), c.ID)}, nil
 		}
 	}
+	note, err := r.unresolved(ctx, c.Old)
+	if err != nil {
+		return outcome{}, err
+	}
 	return outcome{problem: problemChanged, message: fmt.Sprintf(
 		"%s %s no longer holds the values this change was generated against, so somebody changed it in this "+
-			"database. It was left alone. Compare it with the fixture file and decide which one is right",
-		t.Name, keyLabel(c.Key))}, nil
+			"database.%s It was left alone. Compare it with the fixture file and decide which one is right",
+		t.Name, keyLabel(c.Key), note)}, nil
 }
 
 // diagnoseMoved looks for the row of an update that writes a key column -- a

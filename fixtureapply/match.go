@@ -2,6 +2,7 @@ package fixtureapply
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -83,11 +84,22 @@ func (r *runner) guard(ctx context.Context, c fixturechange.Change, t fixturecha
 // match renders "col IS NOT DISTINCT FROM <value>" for every column, joined by
 // AND. IS NOT DISTINCT FROM rather than = so a NULL compares like any other
 // value.
+//
+// A reference that names no row is a value no row holds, so its column
+// matches nothing. The change then goes through the same diagnosis as any
+// other that found no row, under the policy: a plan whose currency an admin
+// renamed no longer holds what the change was generated against, which is a
+// changed row and not a reason to fail the deploy whatever changed_row says.
 func (r *runner) match(ctx context.Context, model string, values fixturechange.Values) (string, []any, error) {
 	var parts []string
 	var args []any
 	for _, col := range sortedColumns(values) {
 		expr, a, err := r.value(ctx, model, col, values[col])
+		var missing *missingRef
+		if errors.As(err, &missing) {
+			parts = append(parts, "FALSE")
+			continue
+		}
 		if err != nil {
 			return "", nil, err
 		}
@@ -155,6 +167,62 @@ func (r *runner) value(ctx context.Context, model, col string, v fixturechange.V
 	return "?", []any{id}, nil
 }
 
+// written renders a value a statement writes. A reference that names no row
+// cannot be written, whatever the policy says: the only alternatives are a
+// NULL and a guess.
+func (r *runner) written(ctx context.Context, c fixturechange.Change, col string) (string, []any, error) {
+	expr, args, err := r.value(ctx, c.Model, col, c.New[col])
+	var missing *missingRef
+	if errors.As(err, &missing) {
+		return "", nil, fmt.Errorf("%s is to point at %s, so there is nothing to point it at. Put that row back, or "+
+			"change the fixture file and generate the migration again", col, missing)
+	}
+	return expr, args, err
+}
+
+// missingRef is a reference that names no row: the row was renamed or removed
+// in this database, or never added.
+type missingRef struct {
+	ref        fixturechange.Ref
+	table, key string
+}
+
+func (e *missingRef) Error() string {
+	return fmt.Sprintf("%s %q, and no row of %s has %s = %q: it was renamed or removed in this database, or never "+
+		"added", e.ref.Model, e.ref.Key, e.table, e.key, e.ref.Key)
+}
+
+// unresolved says which references among values name no row, as a sentence
+// to add to a diagnosis, or "" when they all do. An operator reading "changed
+// row" alone would look for an edit to the row and find none.
+func (r *runner) unresolved(ctx context.Context, values ...fixturechange.Values) (string, error) {
+	var names []string
+	seen := map[string]bool{}
+	for _, vs := range values {
+		for _, col := range sortedColumns(vs) {
+			ref := vs[col].Ref
+			if ref == nil || seen[ref.Model+"\x00"+ref.Key] {
+				continue
+			}
+			seen[ref.Model+"\x00"+ref.Key] = true
+			_, err := r.resolve(ctx, *ref)
+			var missing *missingRef
+			if errors.As(err, &missing) {
+				names = append(names, fmt.Sprintf("%s %q", ref.Model, ref.Key))
+				continue
+			}
+			if err != nil {
+				return "", err
+			}
+		}
+	}
+	if len(names) == 0 {
+		return "", nil
+	}
+	return fmt.Sprintf(" %s is not in this database under that name, so no row can point at it: it was renamed "+
+		"or removed here.", strings.Join(names, " and ")), nil
+}
+
 // compare is "col IS NOT DISTINCT FROM value", typed. The value is cast to
 // the column's type first, so it compares as what the column would hold:
 // 1.005 in a numeric(10,2) is 1.01, an upper-case uuid is the lower-case one.
@@ -219,7 +287,7 @@ func (r *runner) resolve(ctx context.Context, ref fixturechange.Ref) (string, er
 	}
 	switch len(ids) {
 	case 0:
-		return "", fmt.Errorf("%s %q: no row in %s with %s = %q", ref.Model, ref.Key, t.Name, t.Key, ref.Key)
+		return "", &missingRef{ref: ref, table: t.Name, key: t.Key}
 	case 1:
 		r.refs[cacheKey] = ids[0]
 		return ids[0], nil

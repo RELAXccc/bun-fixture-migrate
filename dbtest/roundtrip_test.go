@@ -269,9 +269,15 @@ func TestAMissingReferenceFailsInsteadOfWritingNull(t *testing.T) {
 			Old: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "free")},
 			New: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "ghost")}},
 	}
-	err := fixtureapply.Apply(context.Background(), db, set, quiet())
-	if err == nil || !strings.Contains(err.Error(), "no row in plans") {
+	var outcomes []fixtureapply.Outcome
+	err := fixtureapply.Apply(context.Background(), db, set, quiet(),
+		fixtureapply.WithReport(func(o fixtureapply.Outcome) { outcomes = append(outcomes, o) }))
+	if err == nil || !strings.Contains(err.Error(),
+		`plan_id is to point at Plan "ghost", and no row of plans has name = "ghost"`) {
 		t.Fatalf("expected a failure naming the missing row, got %v", err)
+	}
+	if len(outcomes) != 1 || outcomes[0].Problem != fixtureapply.ProblemError {
+		t.Fatalf("a reference the change writes fails whatever the policy says: %+v", outcomes)
 	}
 	if got := scan[int64](t, db, `SELECT plan_id FROM features WHERE code = 'api' AND plan_id = 1`); got != 1 {
 		t.Fatalf("the transaction should have rolled back, plan_id = %d", got)
@@ -562,5 +568,78 @@ func TestARenameRunsTwiceAndReverts(t *testing.T) {
 	}
 	if outcomes[0].Status != fixtureapply.StatusUnchanged || !strings.Contains(outcomes[0].Message, "as name=crew") {
 		t.Fatalf("the rename is made already: %+v", outcomes[0])
+	}
+}
+
+// A reference in a guard whose row an admin renamed or removed is a row that no
+// longer holds what the change was generated against, and goes through the
+// policy like any other. It used to fail the deploy outright, whatever
+// changed_row said, which is the admin-UI case the policy exists for.
+func TestAGuardReferenceToARenamedRowFollowsThePolicy(t *testing.T) {
+	db := connect(t)
+	db.RegisterModel((*Currency)(nil), (*Plan)(nil), (*Feature)(nil))
+	reset := func() {
+		t.Helper()
+		resetSchema(t, db)
+		load(t, db, oldFixture)
+		run(t, db, "INSERT INTO currencies (id, code, symbol) VALUES (2, 'USD', '$')",
+			"UPDATE currencies SET code = 'EURO' WHERE code = 'EUR'", // an admin renamed it
+			"UPDATE plans SET name = 'crew' WHERE name = 'team'")     // and this one
+	}
+	tables := fixturechange.Tables{
+		"Currency": {Name: "currencies", ID: "id", Key: "code"},
+		"Plan":     {Name: "plans", ID: "id", Key: "name", Serial: true},
+		"Feature":  {Name: "features", ID: "id", Serial: true},
+	}
+	currency := fixturechange.Change{Model: "Plan", Kind: fixturechange.Update,
+		Key: fixturechange.Values{"name": fixturechange.Lit("free")},
+		Old: fixturechange.Values{"currency_id": fixturechange.RefTo("Currency", "EUR")},
+		New: fixturechange.Values{"currency_id": fixturechange.RefTo("Currency", "USD")}}
+	feature := fixturechange.Change{Model: "Feature", Kind: fixturechange.Update,
+		Key: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "team"), "code": fixturechange.Lit("api")},
+		Old: fixturechange.Values{"quota": fixturechange.Lit("5000")},
+		New: fixturechange.Values{"quota": fixturechange.Lit("6000")}}
+	gone := fixturechange.Change{Model: "Feature", Kind: fixturechange.Delete,
+		Key: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "team"), "code": fixturechange.Lit("sso")},
+		Old: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "team"), "code": fixturechange.Lit("sso"),
+			"quota": fixturechange.Lit("1")}}
+
+	for _, tc := range []struct {
+		name    string
+		change  fixturechange.Change
+		policy  fixturechange.Policy
+		fails   bool
+		status  fixtureapply.Status
+		problem fixtureapply.Problem
+		says    string
+	}{
+		{"an old value, changed_row warn", currency, fixturechange.Policy{}, false,
+			fixtureapply.StatusSkipped, fixtureapply.ProblemChangedRow, `Currency "EUR" is not in this database`},
+		{"an old value, changed_row error", currency, fixturechange.Policy{ChangedRow: fixturechange.ModeError}, true,
+			fixtureapply.StatusFailed, fixtureapply.ProblemChangedRow, `Currency "EUR" is not in this database`},
+		{"the natural key, missing_row error", feature, fixturechange.Policy{}, true,
+			fixtureapply.StatusFailed, fixtureapply.ProblemMissingRow, `Plan "team" is not in this database`},
+		{"the natural key, missing_row warn", feature, fixturechange.Policy{MissingRow: fixturechange.ModeWarn}, false,
+			fixtureapply.StatusSkipped, fixtureapply.ProblemMissingRow, `Plan "team" is not in this database`},
+		{"the natural key of a delete", gone, fixturechange.Policy{}, false,
+			fixtureapply.StatusUnchanged, "", `Plan "team" is not in this database`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reset()
+			before := snapshot(t, db)
+			set := fixturechange.Set{Name: "refs", SeedGuardTable: "plans", Tables: tables, Policy: tc.policy,
+				Changes: []fixturechange.Change{tc.change}}
+			outcomes, err := applyReporting(t, db, set)
+			if (err != nil) != tc.fails {
+				t.Fatalf("Apply: %v", err)
+			}
+			if len(outcomes) != 1 || outcomes[0].Status != tc.status || outcomes[0].Problem != tc.problem ||
+				!strings.Contains(outcomes[0].Message, tc.says) {
+				t.Fatalf("outcomes %+v", outcomes)
+			}
+			if after := snapshot(t, db); after != before {
+				t.Fatalf("nothing may change:\n%s\nwas\n%s", after, before)
+			}
+		})
 	}
 }

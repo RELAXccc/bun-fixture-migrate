@@ -121,7 +121,9 @@ configuration later does not change what an old migration does. At run time `fix
   `dbfixture` will load the new state by itself;
 - runs the whole set in one transaction, under an advisory lock, so two replicas applying it at once
   cannot both insert a row;
-- resolves every reference to a real id first, and fails if one matches no row or more than one;
+- resolves every reference to a real id first. One it writes fails the migration if it matches no
+  row or more than one; one a guard compares with, whose row was renamed or removed here, matches
+  nothing, which is a missing or changed row under the policy like any other;
 - inserts only when no row with that natural key exists, and updates or deletes only while the row
   still holds the values the change was generated against, so a hand edit survives and a second run
   is a no-op;
