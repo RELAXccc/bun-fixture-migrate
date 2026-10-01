@@ -141,7 +141,9 @@ configuration later does not change what an old migration does. At run time `fix
 - logs one line per row, or hands every row's outcome to `fixtureapply.WithReport`.
 
 `Revert` is the same set backwards, every change inverted and guarded the same way. A rename finds
-its row under the name it gave it, so it reverts, and a second run finds it already made.
+its row under the name it gave it, so it reverts, and a second run finds it already made. It assumes
+the migration made every change on this database, including those it found already made; see
+[rolling back](docs/production.md#rolling-back).
 
 ## Three things about bun you may not know
 

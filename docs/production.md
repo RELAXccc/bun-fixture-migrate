@@ -51,7 +51,8 @@ problem, for example:
 ```
 20260930165255: up: 20260930165255_fixture_plan_prices: Plan name=team update: no row of plans has
 name=team. The row this change updates is not in the database, so the change cannot be made. Put the
-row back, or drop this change from the migration
+row back; or, if it is meant to be gone in this database, set MissingRow to "warn" in this migration's
+Policy, and the change is recorded as done here without being made
 ```
 
 Under a migrator built without `WithMarkAppliedOnSuccess(true)` it goes on:
@@ -73,8 +74,10 @@ as applied, whichever way the migrator is built, so the next deploy runs it agai
 2. Decide per problem:
    - **missing row**: the row the change updates or deletes is not there. Somebody deleted or
      renamed it, or renamed a row its natural key points at, which the message then names. Put it
-     back, or, if its absence is right, remove that change from the migration file (it is a plain Go
-     literal) and run `plan` again.
+     back; or, if its absence is right in this database, set `MissingRow: "warn"` in the `Policy` of
+     that migration file and run `plan` again: the change is then skipped here and recorded as done.
+     Do not delete the change from the file: every other database would then never get it, and
+     nothing would say so.
    - **id drift**: the row is there under another id than the file says, or the file's id belongs
      to another row. Something outside the database may name these ids; find out before touching
      them.
@@ -181,6 +184,13 @@ that applied every migration (`status -require-applied`) and baseline that.
 the changes backwards, every one inverted and guarded like the original, so a rollback that finds a
 row changed since the migration ran reports it rather than overwriting it. A rename is looked up
 under the name it gave the row, and named back.
+
+A rollback assumes the migration made every one of its changes on this database: nothing records
+which ones it made. A change the migration found already made -- the row already held the new value
+through some other path, or was already there -- is rolled back all the same: the update writes the
+old value, which this database may never have held, and the inserted row is deleted. Before rolling
+back a database where the migration reported `unchanged` changes, look at those rows. Where a row
+does not hold what the migration writes, the change is not rolled back and the log says so.
 
 A rolled-back migration is pending again, and the next deploy runs it again. To undo the change for
 good, revert the commit that brought the migration, the fixture edit and the state file, together,

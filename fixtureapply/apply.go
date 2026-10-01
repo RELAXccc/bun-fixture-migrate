@@ -87,6 +87,13 @@ const advisoryLock int64 = 0x62666d0001
 // insert becomes a delete guarded by the values it wrote, an update swaps old
 // and new, a delete becomes an insert of the row it removed.
 //
+// It assumes Apply made every change of the set on this database, because
+// nothing records which ones it made. A change Apply found already made -- the
+// row already held the new values, or was already there -- is reverted all
+// the same: the update writes the old value, which this database may never
+// have held, and the insert's row is deleted. Where a row does not hold what
+// the migration writes, the change is not reverted and its outcome says so.
+//
 // It takes no record back. When it fails under a migrator that unrecords
 // before running (bun's default), the migration is left looking unapplied
 // while its changes are still in the database; that is harmless, because the
@@ -133,7 +140,7 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 		}
 	}
 
-	r := &runner{tx: tx, set: set, refs: map[string]string{}, resync: map[string]bool{},
+	r := &runner{tx: tx, set: set, revert: revert, refs: map[string]string{}, resync: map[string]bool{},
 		types: map[string]map[string]colType{}}
 	order := make([]int, len(set.Changes))
 	for i := range order {
@@ -364,9 +371,13 @@ func movedKey(key, values fixturechange.Values) (fixturechange.Values, bool) {
 }
 
 type runner struct {
-	tx   bun.IDB
-	set  fixturechange.Set
-	refs map[string]string // model\x00key -> resolved id
+	tx  bun.IDB
+	set fixturechange.Set
+	// revert is true while Revert runs the inverted changes, whose rows are
+	// compared with what the migration wrote rather than with what it was
+	// generated against.
+	revert bool
+	refs   map[string]string // model\x00key -> resolved id
 	// resync collects the models that got an explicit id written into a
 	// sequence-backed table.
 	resync map[string]bool

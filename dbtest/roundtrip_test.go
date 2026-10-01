@@ -371,6 +371,12 @@ func TestAnUpdateOfAMissingRowFailsInsteadOfBeingRecorded(t *testing.T) {
 	if !strings.Contains(err.Error(), "no row of plans has name=team") {
 		t.Fatalf("the error has to say which row: %v", err)
 	}
+	// Dropping the change from the file would keep it from every other
+	// database too; the policy of this one migration is the remedy.
+	if !strings.Contains(err.Error(), `set MissingRow to "warn" in this migration's Policy`) ||
+		strings.Contains(err.Error(), "drop this change") {
+		t.Fatalf("the error has to name a remedy that keeps the change for other databases: %v", err)
+	}
 	// And the transaction rolled back, so the insert that came before the
 	// failing update is gone too.
 	if got := scan[int64](t, db, `SELECT count(*) FROM plans WHERE name = 'pro'`); got != 0 {
@@ -921,5 +927,38 @@ func TestAGeometricValueIsComparedAsItself(t *testing.T) {
 		if err != nil || len(outcomes) != 1 || outcomes[0].Status != want {
 			t.Fatalf("want %s: %v %+v", want, err, outcomes)
 		}
+	}
+}
+
+// Revert compares each row with what the migration writes, and nothing records
+// whether the migration wrote it on this database. Where the row does not hold
+// it, the change is not reverted, and the outcome says so in those terms
+// rather than as a row the change was generated against.
+func TestARevertSaysWhatItLeftAlone(t *testing.T) {
+	db := testDB(t)
+	seed(t, db)
+	ctx := context.Background()
+	set := changeSet()
+	if err := fixtureapply.Apply(ctx, db, set, quiet()); err != nil {
+		t.Fatal(err)
+	}
+	run(t, db, "UPDATE plans SET price_cents = 3333 WHERE name = 'team'")
+	var outcomes []fixtureapply.Outcome
+	if err := fixtureapply.Revert(ctx, db, set, quiet(),
+		fixtureapply.WithReport(func(o fixtureapply.Outcome) { outcomes = append(outcomes, o) })); err != nil {
+		t.Fatalf("Revert: %v", err)
+	}
+	var team fixtureapply.Outcome
+	for _, o := range outcomes {
+		if o.Index == 2 {
+			team = o
+		}
+	}
+	if team.Status != fixtureapply.StatusSkipped ||
+		!strings.Contains(team.Message, "does not hold what the migration writes, so this change was not reverted") {
+		t.Fatalf("the revert has to say why it left the row alone: %+v", team)
+	}
+	if got := scan[int64](t, db, "SELECT price_cents FROM plans WHERE name = 'team'"); got != 3333 {
+		t.Fatalf("price_cents = %d", got)
 	}
 }

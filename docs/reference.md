@@ -312,7 +312,7 @@ does, and is tested under `pgdriver` and `pgx`.
 | Function | |
 | --- | --- |
 | `Apply(ctx, db, set, opts...)` | run a change set in one transaction; see [what a migration does](../README.md#what-a-generated-migration-does) |
-| `Revert(ctx, db, set, opts...)` | the same set backwards, every change inverted |
+| `Revert(ctx, db, set, opts...)` | the same set backwards, every change inverted; it assumes `Apply` made every change on this database ([rolling back](production.md#rolling-back)) |
 | `Validate(set)` | check a set without a database |
 | `SyncSequences(ctx, db, tables...)` | move the sequences of serial and identity columns past the values present, forward only; after a `dbfixture` seed |
 | `WithLogger(fn)` | where the per-row lines go; default `log.Printf` |

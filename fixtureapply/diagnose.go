@@ -45,10 +45,16 @@ func (r *runner) diagnose(ctx context.Context, c fixturechange.Change, t fixture
 		if out, done, err := r.diagnoseMoved(ctx, c, t, table, wanted); err != nil || done {
 			return out, err
 		}
+		what := "The row this change updates is not in the database, so the change cannot be made"
+		if r.revert {
+			what = "The row this change reverts is not in the database, so it cannot be reverted"
+		}
+		// Not "drop the change from the migration": every other database
+		// would then never get it, and nothing would say so.
 		return outcome{problem: problemMissing, message: fmt.Sprintf(
-			"no row of %s has %s.%s The row this change updates is not in the database, so the change cannot be "+
-				"made. Put the row back, or drop this change from the migration",
-			t.Name, keyLabel(c.Key), note)}, nil
+			"no row of %s has %s.%s %s. Put the row back; or, if it is meant to be gone in this database, set "+
+				"MissingRow to \"warn\" in this migration's Policy, and the change is recorded as done here "+
+				"without being made", t.Name, keyLabel(c.Key), note, what)}, nil
 	}
 	if err := r.stopped(ctx, c, t, table); err != nil {
 		return outcome{}, err
@@ -86,6 +92,13 @@ func (r *runner) diagnose(ctx context.Context, c fixturechange.Change, t fixture
 	note, err := r.unresolved(ctx, c.Old)
 	if err != nil {
 		return outcome{}, err
+	}
+	if r.revert {
+		return outcome{problem: problemChanged, message: fmt.Sprintf(
+			"%s %s does not hold what the migration writes, so this change was not reverted: the row changed after "+
+				"the migration ran, or the migration never wrote it in this database.%s It was left alone. Compare "+
+				"it with the fixture file as it was before the migration and decide which one is right",
+			t.Name, keyLabel(c.Key), note)}, nil
 	}
 	return outcome{problem: problemChanged, message: fmt.Sprintf(
 		"%s %s no longer holds the values this change was generated against: it was changed in this database, or "+
@@ -199,6 +212,12 @@ func (r *runner) diagnoseInsert(ctx context.Context, c fixturechange.Change, t f
 	}
 	if same > 0 {
 		return outcome{problem: problemBenign, message: "the row is already there with these values, nothing to insert"}, nil
+	}
+	if r.revert {
+		return outcome{problem: problemChanged, message: fmt.Sprintf(
+			"%s %s is there again and holds other values than the row the migration deleted, so nothing was "+
+				"inserted. Compare it with the fixture file as it was before the migration and decide which one is "+
+				"right", t.Name, keyLabel(c.Key))}, nil
 	}
 	return outcome{problem: problemChanged, message: fmt.Sprintf(
 		"%s %s already exists and holds different values, so nothing was inserted: it was added or changed in this "+
