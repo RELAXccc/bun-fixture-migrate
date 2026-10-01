@@ -93,6 +93,14 @@ into the file, either would be a change of every row to `generate`. A model the 
 yet is written whole, ids included, unless a default other than a sequence makes its ids up, as
 `gen_random_uuid()` does. Fixture files that cannot be read are replaced whole, with a note.
 
+It writes what the fixture files own and nothing the configuration gives to the database (see
+[who owns what](#who-owns-what)): of a model under `mode: upsert` or `insert` the files hold, only
+the rows they hold, so a tenant's rows never reach the file; in a row the files hold, the files' own
+value of every `insert_only` column, and under `mode: insert` of every column but the key and the
+`ref` column, so an operator's toggle is not written into the file new databases are seeded from;
+and no id of a model under `ids: database`, whose rows the file names by their anchors. A model the
+files do not hold yet is written whole, whatever its mode: that is how it is first taken into them.
+
 Before it reads a row, it checks the configuration against the catalog: a key column or a reference
 column the table does not have is a sentence naming the model and the column (exit 1), as it is for
 `check` and `generate -from-db`.
@@ -110,6 +118,14 @@ Compares the database with the fixture files and reports every difference, every
 difference `generate` would refuse. Exit 3 for a difference, a refusal or a finding the policy makes
 an error; a finding the policy makes a warning is reported and leaves the exit code 0. A column the
 fixture files write and the table does not have is not read: it is the `unknown column` finding.
+
+What the configuration gives to the database (see [who owns what](#who-owns-what)) is no difference
+and leaves the exit code 0; a last block counts it per model, such as `Role: 3 rows only in the
+database, which mode upsert never deletes`, so nobody wonders whether check saw it. A difference in
+which the database holds the column's literal default and the file a null or the type's zero gets a
+`hint:` line: bun writes `DEFAULT` for a nil pointer, a zero in a `nullzero` field and a zero in a
+field with a `default:` tag, on an `INSERT` and, since bun v1.2.17, on an `UPDATE` of a model, so a
+seed or an admin UI left the default there.
 
 | Flag | |
 | --- | --- |
@@ -377,10 +393,13 @@ listed stops every command.
 | `defaults` | | what a column means when a row leaves it out; `~` is NULL |
 | `derived` | | columns the application recalculates: never compared, written or exported |
 | `ignore` | | columns that take no part |
-| `deletes` | `policy.deletes` | `allow`, `refuse` or `cascade` |
+| `deletes` | `policy.deletes` | `allow`, `refuse` or `cascade`; only under `mode: sync`, and refused next to `mode: upsert` or `insert`, under which nothing is deleted |
 | `array_nulls` | `policy.array_nulls` | `refuse` or `keep`, for the model's array columns |
 | `changed_row`, `missing_row`, `id_drift`, `duplicate_key` | the policy block's | the [policy](#policy) for this model's rows alone: translations an admin UI edits at `changed_row: warn`, prices at `error`. Written into the migration, in the model's table, only when set |
 | `where` | | an SQL predicate limiting which rows are master data; your SQL, used as written. A generated migration carries it: every statement, natural-key lookup and reference for the model sees only those rows, and a row it writes must hold it. A `;` or a parenthesis it does not open is refused |
+| `mode` | `policy.mode` | `sync`, `upsert` or `insert`: which of the model's rows the fixture files own; see [who owns what](#who-owns-what) |
+| `insert_only` | | columns an insert writes and the database owns afterwards, an operator's `enabled` on a feature flag: never compared, updated or guarded on. Not a column of the key, the `ref` column, the id, nor one in `ignore` or `derived` |
+| `ids` | `file` | `file`, or `database` for a table the application inserts into too: the database gives every row its id, which a migration never writes, nothing compares and export never writes. The key and the `ref` column cannot be the id |
 
 ### policy
 
@@ -395,6 +414,7 @@ listed stops every command.
 | `renames` | refuse, update | refuse | a row that kept its id and changed its natural key |
 | `deletes` | allow, refuse, cascade | allow | a row that left the file. `allow` fails while other rows point at it; `cascade` lets the foreign keys' ON DELETE act |
 | `array_nulls` | refuse, keep | refuse | a null inside a sequence in an array column: `refuse` reports it and refuses a change carrying it, because a `[]string` field drops it and a `[]*string` one keeps it; `keep` says the models' array fields keep it. A model can override it |
+| `mode` | sync, upsert, insert | sync | which rows of a model the fixture files own, for every model that does not say; see [who owns what](#who-owns-what) |
 
 `id_drift`, `missing_row`, `changed_row` and `duplicate_key` are copied into every generated
 migration, so changing them later does not change what an existing migration does. A model overrides
@@ -406,6 +426,68 @@ renumbered rows and shared keys, and its run-time policies are written into the 
 ```go
 "Translation": {Name: "translations", ID: "id", Key: "key", Policy: &fixturechange.Policy{ChangedRow: "warn"}},
 ```
+
+### Who owns what
+
+By default the fixture files own every row and every column of a model: a row the database has and
+the files do not is drift, and `generate` deletes it. Teams split that ownership: finance edits
+prices in an admin UI, operators toggle feature flags in production, tenants add rows to shared
+tables, a sequence numbers the rows. Three keys of a model say so, and every command reads them the
+same way: `generate` from the state file and with `-from-db`, `check`, `status`, `sync`, `export`,
+`baseline`. `plan` and `apply` run the generated sets, which hold fewer changes; nothing at run time
+changes.
+
+| `mode` | a row only the files hold | a row both hold | a row only the database holds |
+| --- | --- | --- | --- |
+| `sync` (default) | inserted | updated where they differ | deleted, under `deletes` |
+| `upsert` | inserted | updated where they differ | left alone: no drift, no delete |
+| `insert` | inserted | left alone: its values are the database's | left alone |
+
+Rows are matched by their natural key. Under `upsert` a row that leaves the files stays in every
+database that has it, and a row the application or a tenant added is not drift; `generate`,
+`check` and `sync` count such rows in a note. Under `insert` the files only seed: a row is written
+once, by the insert, and what it holds afterwards is the database's, the admin's edit included.
+A row a mode leaves alone can be pointed at by the rows the files add, which find it by its `ref`
+value as they find any other.
+
+- **Renames.** `policy.renames` decides a rename under `sync` and `upsert` alike. Under `insert` a
+  rename, a row that kept its id and changed its key, is refused: it would update a row the database
+  owns. Put the key back, or give the row of the new key an id of its own to add it beside the old.
+  A key that only changed its spelling to its type, `Go` to `GO` in a `citext` column, finds the same
+  row and is left alone.
+- **References by a ref value only the files have.** Under `insert`, a row whose `ref` value the
+  files change keeps the old one wherever it exists, so a change naming it by the new one, such as a
+  new row pointing at it, is refused: it would find nothing there.
+- **Deletes.** `deletes` only means something under `sync`. A model that sets it next to `mode:
+  upsert` or `insert` is refused; one that inherits `policy.deletes` is fine.
+- **Models pointing at each other.** A `sync` model whose row a kept row points at cannot delete that
+  row: the delete fails at run time, as any delete of a row others point at does without `deletes:
+  cascade`. Give the model the kept rows point at a mode that keeps its rows too.
+
+`insert_only: [columns]` is a column the insert writes, and the database owns from then on: the
+`enabled` of a feature flag, set when the flag is created and toggled in production afterwards.
+`check` and `status` do not compare it, an update never writes it, and a delete's guard leaves it
+out, or the guard would miss a row an operator changed. `generate` notes how many rows hold another
+value in it. Unlike `ignore`, which is never written, and `derived`, which the application
+recalculates and is never written either, it is the files' until the row exists. An export writes
+the files' value of it in a row the files hold, so the file new databases are seeded from keeps the
+value a new row starts with; in a row new to the files, the database's.
+
+`ids: database` is a table the application inserts into too, whose sequence or identity numbers
+every row: a fixture file's ids would collide with it. The files may still carry ids, for their
+references to resolve against and for a rename between two revisions of them to be told from an
+insert and a delete; a migration never writes one, nothing compares one with a database's, and id
+drift is never reported. An insert leaves the id to the database, a rename finds its row by the old
+natural key alone, and an export writes no id and names the rows by their anchors. Against a
+database, where the files' ids say nothing, a changed key is a row only the database holds and one
+only the files hold, as for a file without ids. The id column needs a sequence, an identity or a
+default, or an insert without the id fails. A fresh seed with `dbfixture` writes the files' ids, as
+it always does: move the sequence after it with `fixtureapply.SyncSequences`.
+
+What a revert cannot do: a delete is put back from its guard, which an `insert_only` column is not
+in, so `Revert` inserts the row with the column's default there, and fails where the column is
+`NOT NULL` without one. An insert is taken back by a delete guarded by everything it wrote, so a
+row whose `insert_only` column an operator changed since is skipped as changed.
 
 ## JSON output
 
@@ -433,8 +515,11 @@ same call, so a program reading the command and one calling the library see the 
   "warnings": [{"model": "Plan", "key": "Plan/name=team", "reason": "..."}],
   "changes": [
     {"model": "Plan", "kind": "update", "key": {"name": "team"},
-     "database": {"price_cents": "2200"}, "file": {"price_cents": "2500"}}
-  ]
+     "database": {"price_cents": "2200", "seats": "1"}, "file": {"price_cents": "2500", "seats": "0"},
+     "hints": {"seats": "the column defaults to 1, and bun writes DEFAULT for ..."}}
+  ],
+  "left_alone": [{"model": "Role", "mode": "upsert", "rows": 3, "changed": 0},
+                 {"model": "Flag", "mode": "sync", "rows": 0, "changed": 0, "columns": {"enabled": 2}}]
 }
 ```
 
@@ -443,7 +528,12 @@ kind, `error` or `warn`; a `warn` finding is listed and leaves `agree` true. A c
 migration from the database to the file would do: an `insert` is a row only the file has, a `delete`
 one only the database has. A change's `database` and `file` are left out when empty: an insert has
 no `database`, a delete no `file`. `warnings` are differences the policy lets a migration carry on
-past, such as a renumbered row under `id_drift: warn`; they leave `agree` as it is.
+past, such as a renumbered row under `id_drift: warn`; they leave `agree` as it is. A change's
+`hints` say, per column, why it differs where check can tell, and are left out when there are none.
+`left_alone` counts, per model, what the configuration gives to the database and is no drift: `rows`
+only the database holds under `mode: upsert` or `insert`, rows `changed` that `mode: insert` never
+updates, and per `insert_only` column the rows holding another value; `columns` is left out when
+there are none.
 
 The `row` of a finding and the `key` of a refusal name the row for a person, as
 `Model/column=value/…`, with a NULL as `NULL` and a reference as `Model(key)`. Two rows can read
@@ -519,6 +609,7 @@ field's type could settle, such as a null inside a sequence), `unknown column`.
   "not_in_state": [],
   "problems": [],
   "left_out": [],
+  "left_alone": [],
   "notes": []
 }
 ```
@@ -533,6 +624,7 @@ field's type could settle, such as a null inside a sequence), `unknown column`.
 | `refusals`, `warnings` | as in [check](#check-output): what needs a hand-written migration, and what the policy lets the migration carry on past |
 | `not_in_state`, `problems` | as in [status](#status-output): fixture migrations the state file's history does not include, and what is wrong, which refuses unless `-dry-run` |
 | `left_out` | the changes the state file records as left out once this run wrote it, `-allow-partial`'s refusals included |
+| `left_alone` | as in [check](#check-output), from the base to the files: a row that left the files of an `upsert` model, a row `mode: insert` does not update, an `insert_only` column; no change, and nothing the migration does |
 | `notes` | what generate says and carries on past: no state file yet, so the diff is against `HEAD`; a migration that sorts after this one; a change set written in parts; a missing seed guard; the package it goes into |
 | `source` | with `-dry-run` only: the migration's Go source |
 
@@ -704,7 +796,7 @@ the same refusals, and returns a result that, encoded as JSON, is what the comma
 
 | Method | Returns |
 | --- | --- |
-| `Check(ctx, db)` | `*CheckReport`: `Agree`, the `Diff` with the database on the left, the `Findings`; `Lines()` is the report as `check` prints it |
+| `Check(ctx, db)` | `*CheckReport`: `Agree`, the `Diff` with the database on the left, the `Findings`, the `Hints` of the differences by change and column; `Lines()` is the report as `check` prints it |
 | `Export(ctx, db, ExportOptions{AllColumns})` | `*Exported`: the `Files` export would write, the `Findings`, the comment lines each drops; `Write()` writes them over the fixture files |
 | `Generate(ctx, db, GenerateOptions{...})` | `*Generated`: the `Diff`, the migration's `ID`, `Path` and `Source`, the `State` that goes with it, the findings, the warnings, the state's history; `Write()` writes the migration and the state file |
 | `Baseline(ctx, db, BaselineOptions{From, Old, Force})` | `*Baselined`: the `State` to record, and why it is refused when it is; `Write()` writes it |
@@ -742,7 +834,10 @@ before it, or nil.
 Under the project, `fixturemigrate.Compute(cfg, old, next)` diffs two snapshots into a `*Result`:
 `Changes` in the order they apply, `Refusals` that need a hand-written migration, and `Warnings` the
 policy lets a migration carry on past (a renumbered row under `id_drift: warn`). Only refusals stop
-a migration from being written.
+a migration from being written. Its `LeftAlone` counts what the configuration gives to the database,
+per model, and `LeftAloneLines()` says it as `check` and `generate` do. `KeepOwned(ctx, db, cfg,
+tables, files, snap)` takes out of a database snapshot what an export leaves to the database, as
+`Export` does before it writes.
 
 `fixturemigrate.Sync(ctx, db, cfg, files, SyncOptions{DryRun, Logf})` is the `sync` command on
 files the program read, returning a `*SyncResult` with the diff, the findings and the outcomes;

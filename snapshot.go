@@ -80,14 +80,29 @@ type Entry struct {
 }
 
 // Full is every column an insert writes or a delete guards on: the compared
-// columns plus the id when the row has one.
+// columns plus the id when the row has one, and the model's ids are the
+// files' (ids: database leaves them to every database).
 func (e *Entry) Full(m *Model) fixturechange.Values {
 	out := make(fixturechange.Values, len(e.Cells)+1)
 	for col, v := range e.Cells {
 		out[col] = v
 	}
-	if e.ID != "" {
+	if e.ID != "" && !m.idsFromDatabase() {
 		out[m.ID] = fixturechange.Lit(e.ID)
+	}
+	return out
+}
+
+// owned is the part of values the fixture files own in a row the database
+// holds: what a delete is guarded by. An insert_only column is the
+// database's once the row exists, and a guard on it would miss a row an
+// operator changed.
+func owned(m *Model, values fixturechange.Values) fixturechange.Values {
+	out := make(fixturechange.Values, len(values))
+	for col, v := range values {
+		if col == m.ID || m.ownsValue(col) {
+			out[col] = v
+		}
 	}
 	return out
 }
@@ -117,10 +132,18 @@ type Snapshot struct {
 	// table, once the catalog has been read for the snapshot (by
 	// DatabaseSnapshot or Canonicalize); nil while nobody has looked.
 	unique map[string][][]string
+	// tables holds, per model, its table as the catalog read for the
+	// snapshot describes it, as unique does; check reads the column
+	// defaults from it.
+	tables map[string]*dbschema.Table
 }
 
-// noteUniques records the unique indexes of a model's table.
+// noteUniques records the unique indexes of a model's table, and the table.
 func (s *Snapshot) noteUniques(model string, table *dbschema.Table) {
+	if s.tables == nil {
+		s.tables = map[string]*dbschema.Table{}
+	}
+	s.tables[model] = table
 	if s.unique == nil {
 		s.unique = map[string][][]string{}
 	}

@@ -242,10 +242,21 @@ a column with a default) is a fault in the file, and the lint says so.
 When comparing against a database, only the columns the fixture files mention are read. A column no
 fixture row writes is not master data, and a difference in it is not drift.
 
+A column the model lists in `insert_only` is written by the insert of a row and compared nowhere
+afterwards: a row that writes it is held to it only while the row does not exist. Under `mode:
+insert` that holds for every column of a row, and under `mode: upsert` and `insert` a row the
+database holds and the files do not is no difference either; see
+[who owns what](reference.md#who-owns-what).
+
+A model under `ids: database` may still write ids: they are what a reference written as a plain id,
+`role_id: 3`, and a `pk3` anchor resolve against inside the files, and what tells a rename between two
+revisions of the files from an insert and a delete. A migration never writes them, and nothing holds
+them against a database's ids.
+
 Every configured model is compared, though. A model the files hold no block of has no rows in a fresh
 seed, so `check` reports its rows as in the database only and `sync` deletes them, under the model's
-`deletes`, as `generate` does when a block leaves the files. Its rows are read whole, as those of a
-block that holds no row are.
+`deletes`, as `generate` does when a block leaves the files; under `mode: upsert` or `insert` they are
+the database's, and left alone. Its rows are read whole, as those of a block that holds no row are.
 
 ## What it refuses
 

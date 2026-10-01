@@ -55,6 +55,29 @@ type jsonCheckChange struct {
 	Key   map[string]any `json:"key"`
 	Old   map[string]any `json:"database,omitempty"`
 	New   map[string]any `json:"file,omitempty"`
+	// Hints say, per column, why a value differs where check can tell.
+	Hints map[string]string `json:"hints,omitempty"`
+}
+
+// jsonLeftAlone is what a comparison left to the database in one model,
+// because the configuration says the database owns it; see LeftAlone.
+type jsonLeftAlone struct {
+	Model   string         `json:"model"`
+	Mode    string         `json:"mode"`
+	Rows    int            `json:"rows"`
+	Changed int            `json:"changed"`
+	Columns map[string]int `json:"columns,omitempty"`
+}
+
+func jsonLeftAlones(res *Result) []jsonLeftAlone {
+	out := []jsonLeftAlone{}
+	if res == nil {
+		return out
+	}
+	for _, a := range res.LeftAlone {
+		out = append(out, jsonLeftAlone{a.Model, string(a.Mode), a.Rows, a.Changed, a.Columns})
+	}
+	return out
 }
 
 // jsonChange is a change of a migration, from the base to the fixture files.
@@ -85,18 +108,19 @@ func orEmpty[T any](list []T) []T {
 // MarshalJSON is the report as check -json prints it.
 func (r CheckReport) MarshalJSON() ([]byte, error) {
 	out := struct {
-		Agree    bool              `json:"agree"`
-		Findings []ReportedFinding `json:"findings"`
-		Refusals []jsonRefusal     `json:"refusals"`
-		Warnings []jsonRefusal     `json:"warnings"`
-		Changes  []jsonCheckChange `json:"changes"`
+		Agree     bool              `json:"agree"`
+		Findings  []ReportedFinding `json:"findings"`
+		Refusals  []jsonRefusal     `json:"refusals"`
+		Warnings  []jsonRefusal     `json:"warnings"`
+		Changes   []jsonCheckChange `json:"changes"`
+		LeftAlone []jsonLeftAlone   `json:"left_alone"`
 	}{Agree: r.Agree, Findings: reportFindings(r.cfg, r.Findings), Refusals: []jsonRefusal{},
-		Warnings: []jsonRefusal{}, Changes: []jsonCheckChange{}}
+		Warnings: []jsonRefusal{}, Changes: []jsonCheckChange{}, LeftAlone: jsonLeftAlones(r.Diff)}
 	if r.Diff != nil {
 		out.Refusals, out.Warnings = jsonRefusals(r.Diff.Refusals), jsonRefusals(r.Diff.Warnings)
-		for _, c := range r.Diff.Changes {
+		for i, c := range r.Diff.Changes {
 			out.Changes = append(out.Changes, jsonCheckChange{c.Model, string(c.Kind), jsonValues(c.Key),
-				jsonValues(c.Old), jsonValues(c.New)})
+				jsonValues(c.Old), jsonValues(c.New), r.Hints[i]})
 		}
 	}
 	return json.Marshal(out)
@@ -140,11 +164,13 @@ func (g Generated) MarshalJSON() ([]byte, error) {
 		NotInState []string          `json:"not_in_state"`
 		Problems   []string          `json:"problems"`
 		LeftOut    []string          `json:"left_out"`
+		LeftAlone  []jsonLeftAlone   `json:"left_alone"`
 		Notes      []string          `json:"notes"`
 		Source     string            `json:"source,omitempty"`
 	}{Migration: g.ID, DryRun: g.dryRun, Written: orEmpty(g.Written), Summary: []string{},
 		Changes: []jsonChange{}, Refusals: []jsonRefusal{}, Warnings: []jsonRefusal{},
-		NotInState: orEmpty(g.NotInState), Problems: orEmpty(g.Problems), LeftOut: orEmpty(g.LeftOut)}
+		NotInState: orEmpty(g.NotInState), Problems: orEmpty(g.Problems), LeftOut: orEmpty(g.LeftOut),
+		LeftAlone: jsonLeftAlones(g.Diff)}
 	out.Findings = reportFindings(g.cfg, append(append([]Finding{}, g.Findings...), g.Lint...))
 	out.Notes = append(append([]string{}, g.Notes...), g.Warnings...)
 	if g.Diff != nil {

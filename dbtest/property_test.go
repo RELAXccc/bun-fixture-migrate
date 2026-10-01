@@ -19,6 +19,14 @@ package dbtest_test
 // sync goes, the database against the file. The seed is fixed, so a failure
 // is the same failure on every run, and the message says which iteration it
 // was.
+//
+// Every pair gives each model a mode, sync, upsert or insert, and the nodes
+// some insert_only columns, so what the database holds after the change set
+// is the new file only where the files own it: a row upsert and insert keep,
+// a value insert and insert_only leave, is the old one. A model a model that
+// keeps its rows points at keeps its rows too, or a delete would fail on
+// them, as it does in a deployment. The database then agrees with the new
+// file as check reads it, and exports, by what the files own, as it.
 
 import (
 	"context"
@@ -151,7 +159,7 @@ func ptCurSubset(r *rand.Rand) []int {
 // ptPair draws an old state and a new one made from it: rows deleted, rows
 // added under ids and names nobody had, rows renamed to a name nobody had,
 // and every other value drawn again.
-func ptPair(r *rand.Rand, iteration int) (*ptState, *ptState) {
+func ptPair(r *rand.Rand, iteration int, renames bool) (*ptState, *ptState) {
 	var oldNodes []*ptNode
 	slots := r.Perm(10)
 	for id := 1; id <= 8; id++ {
@@ -169,7 +177,7 @@ func ptPair(r *rand.Rand, iteration int) (*ptState, *ptState) {
 	// run a set with one twice or revert it yet, and those checks should
 	// still see most pairs.
 	rename := -1
-	if len(old.nodes) > 0 && r.Intn(4) == 0 {
+	if len(old.nodes) > 0 && r.Intn(4) == 0 && renames {
 		rename = r.Intn(len(old.nodes))
 	}
 	var newNodes []*ptNode
@@ -236,6 +244,121 @@ func ptPair(r *rand.Rand, iteration int) (*ptState, *ptState) {
 		}
 	}
 	return old, ptDraw(r, curs, newNodes)
+}
+
+// ptModes is what a pair gives each model to own: its mode, and the nodes'
+// insert_only columns.
+type ptModes struct {
+	cur, node, link fixturemigrate.Ownership
+	insertOnly      []string
+}
+
+// ptDrawModes draws the modes of a pair. A model whose rows a mode keeps
+// points only at models that keep theirs: a delete of a row a kept row
+// points at fails, in a deployment as here.
+func ptDrawModes(r *rand.Rand) ptModes {
+	all := []fixturemigrate.Ownership{fixturemigrate.OwnSync, fixturemigrate.OwnUpsert, fixturemigrate.OwnInsert}
+	m := ptModes{cur: all[r.Intn(3)], node: fixturemigrate.OwnSync, link: fixturemigrate.OwnSync}
+	if m.cur != fixturemigrate.OwnSync {
+		m.node = all[r.Intn(3)]
+	}
+	if m.node != fixturemigrate.OwnSync {
+		m.link = all[r.Intn(3)]
+	}
+	for _, col := range []string{"price", "note"} {
+		if r.Intn(4) == 0 {
+			m.insertOnly = append(m.insertOnly, col)
+		}
+	}
+	return m
+}
+
+func (m ptModes) apply(t *testing.T, cfg *fixturemigrate.Config) {
+	t.Helper()
+	cfg.Models["PtCur"].Mode, cfg.Models["PtNode"].Mode, cfg.Models["PtLink"].Mode = m.cur, m.node, m.link
+	cfg.Models["PtNode"].InsertOnly = m.insertOnly
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (m ptModes) syncOnly() bool {
+	return m.cur == fixturemigrate.OwnSync && m.node == fixturemigrate.OwnSync && m.link == fixturemigrate.OwnSync &&
+		len(m.insertOnly) == 0
+}
+
+// ptOwned is the state a database seeded with old holds once a change set
+// took it to next under the modes: next where the files own it, old where
+// the database does.
+func ptOwned(old, next *ptState, m ptModes) *ptState {
+	out := &ptState{links: map[[2]int]int{}}
+	out.curs = append(out.curs, next.curs...)
+	if m.cur != fixturemigrate.OwnSync {
+		have := map[int]bool{}
+		for _, id := range next.curs {
+			have[id] = true
+		}
+		for _, id := range old.curs {
+			if !have[id] {
+				out.curs = append(out.curs, id)
+			}
+		}
+	}
+	oldNodes, newNodes := map[int]*ptNode{}, map[int]bool{}
+	for _, n := range old.nodes {
+		oldNodes[n.id] = n
+	}
+	var nodes []*ptNode
+	for _, n := range next.nodes {
+		newNodes[n.id] = true
+		c := *n
+		if o, ok := oldNodes[n.id]; ok {
+			if m.node == fixturemigrate.OwnInsert {
+				c = *o
+			}
+			for _, col := range m.insertOnly {
+				switch col {
+				case "price":
+					c.price = o.price
+				case "note":
+					c.note = o.note
+				}
+			}
+		}
+		nodes = append(nodes, &c)
+	}
+	if m.node != fixturemigrate.OwnSync {
+		for _, n := range old.nodes {
+			if !newNodes[n.id] {
+				c := *n
+				nodes = append(nodes, &c)
+			}
+		}
+	}
+	// dbfixture resolves a parent above its children.
+	placed := map[int]bool{0: true}
+	for len(out.nodes) < len(nodes) {
+		for _, n := range nodes {
+			if !placed[n.id] && placed[n.parent] {
+				placed[n.id] = true
+				out.nodes = append(out.nodes, n)
+			}
+		}
+	}
+	for k, q := range next.links {
+		out.links[k] = q
+		if o, ok := old.links[k]; ok && m.link == fixturemigrate.OwnInsert {
+			out.links[k] = o
+		}
+	}
+	if m.link != fixturemigrate.OwnSync {
+		for k, q := range old.links {
+			if _, ok := next.links[k]; !ok {
+				out.links[k] = q
+			}
+		}
+	}
+	return out
 }
 
 // wasHeldBy reports whether the old row that held a slot is still there, so
@@ -385,9 +508,15 @@ func TestPropertyAChangeSetTakesTheDatabaseFromOneFileToTheNext(t *testing.T) {
 		iterations = n
 	}
 	r := rand.New(rand.NewSource(20261001))
-	var renamed, viaDB, noRerun int
+	var renamed, viaDB, noRerun, owned, noRevert int
 	for i := 0; i < iterations; i++ {
-		old, next := ptPair(r, i)
+		modes := ptDrawModes(r)
+		modes.apply(t, cfg)
+		if !modes.syncOnly() {
+			owned++
+		}
+		// A rename is an update of the key, which mode insert never writes.
+		old, next := ptPair(r, i, modes.node != fixturemigrate.OwnInsert)
 		// Against the database as between two files, a model the file does
 		// not mention has no rows, as in a fresh seed of the file.
 		viaFile := i%2 == 0
@@ -396,9 +525,10 @@ func TestPropertyAChangeSetTakesTheDatabaseFromOneFileToTheNext(t *testing.T) {
 		oldText, newText := old.yaml(!viaFile), next.yaml(!viaFile)
 		fail := func(format string, args ...any) {
 			t.Helper()
-			t.Fatalf("iteration %d: %s\n--- old\n%s--- new\n%s", i, fmt.Sprintf(format, args...), oldText, newText)
+			t.Fatalf("iteration %d (%+v): %s\n--- old\n%s--- new\n%s", i, modes, fmt.Sprintf(format, args...),
+				oldText, newText)
 		}
-		wantNew := seed(newText)
+		wantNew := seed(ptOwned(old, next, modes).yaml(!viaFile))
 		wantOld := seed(oldText)
 
 		var set fixturechange.Set
@@ -518,11 +648,39 @@ func TestPropertyAChangeSetTakesTheDatabaseFromOneFileToTheNext(t *testing.T) {
 			fail("the change set does not reproduce the new file\n got %s\nwant %s\n%s", got, wantNew, describe())
 		}
 
-		// The database exports as the new file.
+		// The database agrees with the new file, as check compares them:
+		// what the files do not own is no difference.
+		read(func(tx bun.Tx) {
+			head := fixtureSnapshot(t, cfg, newText, "new")
+			if err := fixturemigrate.Canonicalize(ctx, tx, cfg, head, tables); err != nil {
+				fail("Canonicalize: %v", err)
+			}
+			database, err := fixturemigrate.DatabaseSnapshot(ctx, tx, cfg, tables,
+				fixturemigrate.SnapshotOptions{Columns: head.Columns, Order: head.Order})
+			if err != nil {
+				fail("DatabaseSnapshot: %v", err)
+			}
+			res, err := fixturemigrate.Check(cfg, database, head)
+			if err != nil || len(res.Changes) != 0 || len(res.Refusals) != 0 {
+				fail("check after the change set: %v %+v %+v\n%s", err, res.Changes, res.Refusals, describe())
+			}
+		})
+
+		// The database exports as the new file, as far as the files own it.
 		read(func(tx bun.Tx) {
 			all, err := fixturemigrate.DatabaseSnapshot(ctx, tx, cfg, tables, fixturemigrate.SnapshotOptions{})
 			if err != nil {
 				fail("DatabaseSnapshot: %v", err)
+			}
+			// A model the files hold no block of is exported whole, which is
+			// how one is first taken into them; under upsert or insert the
+			// database keeps rows of one the new file left out, so the
+			// export is held to the file with an empty block of it.
+			held := *next
+			held.omit = false
+			if err := fixturemigrate.KeepOwned(ctx, tx, cfg, tables, fixtureSnapshot(t, cfg, held.yaml(!viaFile), "new"),
+				all); err != nil {
+				fail("KeepOwned: %v", err)
 			}
 			exported, err := fixturemigrate.Export(cfg, all, tables, nil)
 			if err != nil {
@@ -556,13 +714,26 @@ func TestPropertyAChangeSetTakesTheDatabaseFromOneFileToTheNext(t *testing.T) {
 			}
 		}
 
+		// A revert puts a deleted row back from its delete's guard, which an
+		// insert_only column is not in: the row comes back without it.
+		if len(modes.insertOnly) > 0 {
+			deletes := false
+			for _, c := range set.Changes {
+				deletes = deletes || (c.Model == "PtNode" && c.Kind == fixturechange.Delete)
+			}
+			if deletes {
+				noRevert++
+				continue
+			}
+		}
 		apply("revert", fixtureapply.Revert)
 		if got := ptDump(t, db); got != wantOld {
 			fail("revert does not restore the old file\n got %s\nwant %s\n%s", got, wantOld, describe())
 		}
 	}
 	t.Logf("%d pairs, %d through the database, %d with a rename (not run twice, not reverted), "+
-		"%d naming a row they delete (not run twice)", iterations, viaDB, renamed, noRerun)
+		"%d naming a row they delete (not run twice), %d with a model the files do not own whole, "+
+		"%d deleting a row with insert_only columns (not reverted)", iterations, viaDB, renamed, noRerun, owned, noRevert)
 }
 
 // ptDump is a database state as text: every row of every table, references

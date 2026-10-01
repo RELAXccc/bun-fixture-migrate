@@ -1,0 +1,27 @@
+description: |
+  A support role, and roles numbered by the database. Roles go to ids: database:
+  the file keeps the master roles' numbers, which a new database is seeded with,
+  and a migration inserts a master role without its id, so it takes the
+  sequence's next one, as a tenant's custom role does. The support role is
+  numbered 5 in the file; production numbers it from the sequence r05 moved
+  past every master id, staging and the new database from the file.
+steps:
+  - overlay: .
+  - generate: {name: support role, at: "20261207100000"}
+    output: ["Role: 1 insert", "RolePermission: 2 inserts"]
+  # The migration names the role by its code and leaves its id to the
+  # database.
+  - file: migrations/20261207100000_fixture_support_role.go
+    output: ['"code": fixturechange.Lit("support")']
+    absent: ['fixturechange.Lit("5")']
+deploy: [prod, staging]
+after:
+  - sql: SELECT id >= 10000 FROM roles WHERE code = 'support' AND tenant_id IS NULL
+    env: prod
+    want: "true"
+  - sql: >-
+      SELECT string_agg(p.code, ',' ORDER BY p.code) FROM role_permissions rp
+      JOIN roles r ON r.id = rp.role_id JOIN permissions p ON p.id = rp.permission_id
+      WHERE r.code = 'support' AND r.tenant_id IS NULL
+    env: prod
+    want: "billing.read,projects.read"

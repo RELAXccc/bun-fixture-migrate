@@ -464,19 +464,23 @@ type CheckReport struct {
 	// key two rows share, a zero written against a column default, a column
 	// the table does not have. Config.ModeOf says the level of each.
 	Findings []Finding
+	// Hints explain a difference of an update in Diff.Changes, by its index
+	// and the column: a column holding its default where the files have a
+	// null or a zero, which bun writes as DEFAULT.
+	Hints map[int]map[string]string
 
 	cfg *Config
 }
 
 // Drifted reports whether anything at all was found, warnings included.
 func (r *CheckReport) Drifted() bool {
-	return (&CheckResult{Result: r.Diff, Findings: r.Findings}).Drifted()
+	return (&CheckResult{Result: r.Diff, Findings: r.Findings, Hints: r.Hints}).Drifted()
 }
 
 // Lines is the report as check prints it: what is wrong with the files
 // first, then what the database and the files disagree about.
 func (r *CheckReport) Lines() []string {
-	return (&CheckResult{Result: r.Diff, Findings: r.Findings}).Lines()
+	return (&CheckResult{Result: r.Diff, Findings: r.Findings, Hints: r.Hints}).Lines()
 }
 
 // Check compares the database with the fixture files, as the check command
@@ -519,7 +523,7 @@ func (p *Project) Check(ctx context.Context, db bun.IDB) (*CheckReport, error) {
 // does not ignore.
 func newCheckReport(cfg *Config, res *CheckResult) *CheckReport {
 	_, res.Findings = cfg.Worst(res.Findings)
-	return &CheckReport{Agree: res.Agree(cfg), Diff: res.Result, Findings: res.Findings, cfg: cfg}
+	return &CheckReport{Agree: res.Agree(cfg), Diff: res.Result, Findings: res.Findings, Hints: res.Hints, cfg: cfg}
 }
 
 // ExportOptions steers Export.
@@ -601,6 +605,9 @@ func (p *Project) Export(ctx context.Context, db bun.IDB, opts ExportOptions) (*
 		}
 		snap, err := DatabaseSnapshot(ctx, tx, p.Config, tables, snapOpts)
 		if err != nil {
+			return err
+		}
+		if err := KeepOwned(ctx, tx, p.Config, tables, head, snap); err != nil {
 			return err
 		}
 		LintZeroDefaults(p.Config, snap, tables)

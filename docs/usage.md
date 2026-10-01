@@ -220,15 +220,41 @@ generates nothing.
 ## When production data is edited in production
 
 An admin UI or a support script that edits master data in production makes production, not the
-file, the newer truth. Three settings and one loop keep that safe:
+file, the newer truth. First say what the database owns, so that it is no drift at all; see
+[who owns what](reference.md#who-owns-what):
+
+- A column an admin or an operator edits after the row exists, a price in the admin UI, a feature
+  flag's `enabled`: list it in the model's `insert_only`. A new row gets the file's value, and from
+  then on nothing compares, updates or guards on it, and an export keeps the file's value.
+
+  ```yaml
+  Flag:
+    table: flags
+    key: [code]
+    ref: code
+    insert_only: [enabled]
+  ```
+
+- A table whose rows the database owns once they exist, values and all, such as countries an admin
+  maintains after the first seed: `mode: insert`. The file only seeds the rows a database lacks.
+- A table tenants or the application add rows to, next to the master rows: `mode: upsert`, so a row
+  the file does not hold is not drift and is never deleted, and an export writes only the file's
+  rows. Where the database numbers those rows from one sequence, `ids: database` too: a migration
+  then inserts a master row without an id, so it takes the sequence's next one instead of an id a
+  tenant's row may already hold, and the file's rows point at it by name as before. Where a column
+  tells the two kinds of rows apart, `where: tenant_id IS NULL` keeps the tenants' rows out of
+  everything instead.
+
+For what the file does own, three settings and one loop keep the edits safe:
 
 - `policy.changed_row: warn` (the default): a migration that finds a row changed since the file was
   written leaves it alone and says so, instead of overwriting the edit.
-- `check` on a schedule reports the difference, with exit code 3.
+- `check` on a schedule reports the difference, with exit code 3, and counts what the configuration
+  leaves to the database, which is no drift.
 - An admin UI that saves a row through bun, `db.NewUpdate().Model(row)`, writes `DEFAULT` rather than
   NULL for a nil pointer or a zero in a `nullzero` field, since bun v1.2.17, as an insert does.
   Clearing such a field leaves the column's default, so `check` reports the row against a file that
-  says `~`, and an export writes the default into the file.
+  says `~`, with a `hint:` line saying why, and an export writes the default into the file.
 - To take the edits into the file, export from production and generate:
 
   ```

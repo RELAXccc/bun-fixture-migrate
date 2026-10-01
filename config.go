@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -172,7 +173,45 @@ type Policy struct {
 	Deletes DeletePolicy `yaml:"deletes"`
 	// ArrayNulls is the default for Model.ArrayNulls.
 	ArrayNulls ArrayNullsPolicy `yaml:"array_nulls"`
+
+	// Mode is the default for Model.Mode: which rows of a model, and which of
+	// their values, the fixture files own. Default "sync".
+	Mode Ownership `yaml:"mode"`
 }
+
+// Ownership says how much of a model's rows the fixture files own, and so
+// what a difference between them and a database is: drift to report and
+// migrate, or the database's own business.
+type Ownership string
+
+const (
+	// OwnSync is the default: the fixture files own every row of the model.
+	// A row they add is inserted, a value they change is updated, and a row
+	// they do not hold is deleted.
+	OwnSync Ownership = "sync"
+	// OwnUpsert adds and updates the rows the fixture files hold, and never
+	// deletes one: a row a database holds and the files do not, a tenant's
+	// or one the application added, is not drift and nothing deletes it.
+	OwnUpsert Ownership = "upsert"
+	// OwnInsert only seeds: a row the fixture files hold and a database does
+	// not, by natural key, is inserted, and nothing else is written. A row
+	// the database holds is its own from then on, values and all.
+	OwnInsert Ownership = "insert"
+)
+
+// IDSource says who gives a model's rows their ids.
+type IDSource string
+
+const (
+	// IDsFile is the default: the fixture files' ids are the rows' ids. An
+	// insert writes them, and a row under another id is id drift.
+	IDsFile IDSource = "file"
+	// IDsDatabase says the database gives every row its id, from a sequence,
+	// an identity or a default. The fixture files may carry ids for their
+	// references to resolve against, but a migration never writes one,
+	// nothing compares them with a database's, and an export writes none.
+	IDsDatabase IDSource = "database"
+)
 
 // ArrayNullsPolicy says what a null inside a YAML sequence means for the
 // models' array fields. yaml.v3 leaves it out of a []string or []int64 field
@@ -275,8 +314,31 @@ type Model struct {
 	// out of reach of anything untrusted.
 	Where string `yaml:"where"`
 
-	derived map[string]bool
-	ignored map[string]bool
+	// Mode overrides Policy.Mode for this model: sync, upsert or insert; see
+	// Ownership. Deletes only means something under sync, and is refused
+	// with the others.
+	Mode Ownership `yaml:"mode"`
+	// InsertOnly lists columns an insert writes and the database owns
+	// afterwards: a feature flag's enabled, set when the flag is created and
+	// toggled in production from then on. An insert writes them, and
+	// nothing else touches or compares them: no update writes them, no
+	// delete is guarded by them, and check reports no difference in them.
+	// Unlike ignore, which is never written, and derived, which the
+	// application recalculates, they are the file's until the row exists.
+	// A column of the natural key, the ref column or the id cannot be one.
+	InsertOnly []string `yaml:"insert_only"`
+	// IDs says who gives the rows their ids: "file" (default), or "database"
+	// for a table the application inserts into too, whose sequence the
+	// fixture files' ids would collide with; see IDSource. Under database
+	// the natural key and the ref column cannot be the id.
+	IDs IDSource `yaml:"ids"`
+
+	derived    map[string]bool
+	ignored    map[string]bool
+	insertOnly map[string]bool
+	// deletesInherited is set when Deletes was filled in from the policy,
+	// so a second Prepare can tell it from one the model sets.
+	deletesInherited bool
 }
 
 // Defaults maps a column to the value a fixture row that leaves it out stands
@@ -443,6 +505,9 @@ func (c *Config) Prepare() error {
 			return fmt.Errorf("model %q: its id, %s, is also a reference to %s, and the tool reads an id as the "+
 				"row's own value, never as a reference to look up: %s", name, m.ID, target, hint)
 		}
+		if err := m.prepareOwnership(name, c.Policy); err != nil {
+			return err
+		}
 		if m.Deletes == "" {
 			m.Deletes = c.Policy.Deletes
 		}
@@ -508,8 +573,95 @@ func (p *Policy) prepare() error {
 		return fmt.Errorf("policy array_nulls is %q, it has to be %q or %q", p.ArrayNulls,
 			ArrayNullsRefuse, ArrayNullsKeep)
 	}
+	if p.Mode == "" {
+		p.Mode = OwnSync
+	}
+	if !p.Mode.valid() {
+		return fmt.Errorf("policy mode is %q, it has to be %q, %q or %q", p.Mode, OwnSync, OwnUpsert, OwnInsert)
+	}
 	return nil
 }
+
+func (o Ownership) valid() bool { return o == OwnSync || o == OwnUpsert || o == OwnInsert }
+
+// prepareOwnership fills in and checks what a model says about who owns its
+// rows, their values and their ids: mode, insert_only and ids. It runs before
+// Deletes is filled in from the policy, and stays repeatable.
+func (m *Model) prepareOwnership(name string, p Policy) error {
+	if m.Mode == "" {
+		m.Mode = p.Mode
+	}
+	if !m.Mode.valid() {
+		return fmt.Errorf("model %q: mode is %q, it has to be %q, %q or %q", name, m.Mode, OwnSync, OwnUpsert, OwnInsert)
+	}
+	if m.Deletes == "" {
+		m.deletesInherited = true
+	}
+	// Under upsert and insert nothing is deleted, so a deletes the model
+	// sets would say something that never happens.
+	if m.Mode != OwnSync && !m.deletesInherited {
+		return fmt.Errorf("model %q: deletes is %q, but mode is %s, under which no row is ever deleted: deletes "+
+			"only applies under mode sync, so take one of them out", name, m.Deletes, m.Mode)
+	}
+	if m.IDs == "" {
+		m.IDs = IDsFile
+	}
+	if m.IDs != IDsFile && m.IDs != IDsDatabase {
+		return fmt.Errorf("model %q: ids is %q, it has to be %q or %q", name, m.IDs, IDsFile, IDsDatabase)
+	}
+	if m.IDs == IDsDatabase {
+		// The id differs from one database to the next, so nothing that has
+		// to name the same row everywhere can be made of it.
+		if m.Ref == m.ID {
+			return fmt.Errorf("model %q: ids is database, so its %s differs from one database to the next, and "+
+				"references cannot name a row by it: set ref to a column of its own", name, m.ID)
+		}
+		for _, col := range m.keyColumns() {
+			if col == m.ID {
+				return fmt.Errorf("model %q: ids is database, so its %s differs from one database to the next, and "+
+					"cannot be part of the natural key: key on the columns that name a row everywhere", name, m.ID)
+			}
+		}
+	}
+	key := set(m.keyColumns())
+	seen := map[string]bool{}
+	for _, col := range m.InsertOnly {
+		var why string
+		switch {
+		case col == "":
+			why = "is empty"
+		case seen[col]:
+			why = "is listed twice"
+		case col == m.ID:
+			why = "is the id, which is written on an insert and never updated anyway"
+		case key[col]:
+			why = "is part of the natural key, which every row is found by and has to be the files'"
+		case col == m.Ref:
+			why = "is the ref column, which every reference to the model names its row by and has to be the files'"
+		case slices.Contains(m.Ignore, col):
+			why = "is in ignore, which is never written at all"
+		case slices.Contains(m.Derived, col):
+			why = "is in derived, which the application writes, not an insert"
+		}
+		if why != "" {
+			return fmt.Errorf("model %q: insert_only column %q %s", name, col, why)
+		}
+		seen[col] = true
+	}
+	m.insertOnly = seen
+	return nil
+}
+
+// ownsValue reports whether the fixture files own a column's value in a row
+// the database already holds: compare it, update it and guard a delete with
+// it. They own none under mode insert, and no insert_only column.
+func (m *Model) ownsValue(col string) bool {
+	return m.Mode != OwnInsert && !m.insertOnly[col]
+}
+
+// idsFromDatabase reports a model whose ids the database gives: see
+// IDsDatabase.
+func (m *Model) idsFromDatabase() bool { return m.IDs == IDsDatabase }
 
 func (a ArrayNullsPolicy) valid() bool { return a == ArrayNullsRefuse || a == ArrayNullsKeep }
 

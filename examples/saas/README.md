@@ -1,4 +1,4 @@
-# Example: a SaaS application over twelve releases
+# Example: a SaaS application over thirteen releases
 
 A bun application whose master data changes release after release, kept in dbfixture files and
 changed through generated migrations, deployed to databases that are each in a different state.
@@ -21,7 +21,7 @@ Master data, loaded by dbfixture into a new database and changed by fixture migr
 | `PlanPrice` | `plan_prices` | effective-dated, keyed (plan, currency, valid_from), `numeric(12,2)`; invoices point at it |
 | `Feature` | `features` | explicit serial ids, a nullable unit |
 | `PlanFeature` | `plan_features` | a join table with a composite primary key, no id, a nullable quota |
-| `Role`, `Permission`, `RolePermission` | `roles`, `permissions`, `role_permissions` | RBAC; master roles share the table, and the id sequence, with tenants' custom roles (`where: tenant_id IS NULL`) |
+| `Role`, `Permission`, `RolePermission` | `roles`, `permissions`, `role_permissions` | RBAC; master roles share the table, and the id sequence, with tenants' custom roles (`where: tenant_id IS NULL`), which numbers new master roles too (`ids: database`) |
 | `Translation` | `translations` | keyed (locale, key), unicode and multi-line text, 1500 rows in a file of their own |
 | `Category` | `categories` | a tree through `parent_id` |
 
@@ -69,21 +69,23 @@ command is expected to say. The generated migrations and the state file are not 
 | r10 | two branches each add a feature with id 7 and are merged | the state file conflicts on purpose; the runbook's resolution: the id fixed in the fixture file as the merge resolves it, one branch's migration deleted and generated again on top of the other's |
 | r11 | `generate -from-db` against production for the admin's rename; `sort_order` renamed to `position` by SQL | `baseline -force` for the rename, then a reorder |
 | r12 | the help centre: 1500 translations in a fifth file | timing; staging and the on-premises customer catch up, the latter across six releases and the column rename. Probes: rolling back staging, exporting into five files, dropping a change production cannot make |
+| r13 | a support role; roles go to `ids: database` | the migration inserts the role without the id the file gives it, and production numbers it from the sequence, as it numbers the tenants' roles, while a new database is seeded with the file's numbers |
 
 ### What the history found
 
 The history was first replayed against the tool as it then was, and every problem it ran into is
 written down here as a finding, `Fn`. A release that works around a finding still open says so with
 `known: Fn`, in its `release.yml` and in the test, so the workaround can go when the tool is fixed.
-Six have been fixed since; the commit that fixed each is named by its subject. Two of their
+Seven have been fixed since; the commit that fixed each is named by its subject. Three of their
 workarounds are still in the history, as it was made, and harmless now: `Role`'s
-`defaults: {tenant_id: ~}` (F1) and the categories numbered 10 and 11 in r09 (F8).
+`defaults: {tenant_id: ~}` (F1), the master roles' id range of r05 (F3) and the categories numbered
+10 and 11 in r09 (F8).
 
 | | What it was | Now |
 | --- | --- | --- |
 | F1 | `export` wrote every column of the table, including ones the fixture files never write (`roles.tenant_id`), so the runbook's export-then-generate was refused. Worked around with `defaults: {tenant_id: ~}` on `Role` | fixed: an export writes the columns the fixture files hold ("export the columns and ids the fixture files hold, not the database's"); the workaround stays, and changes nothing |
 | F2 | `export` wrote the source database's ids, including the plans' `gen_random_uuid()` keys and the serial ids of prices and translations the file left to the database; adopted, every other database drifted and later deletes were skipped there | fixed by the same change: an id the fixture files leave to the database is not exported |
-| F3 | a table the application inserts into too has no safe id for a new master row: the next id is a tenant's in production, and an id-less row cannot be seeded after rows with ids | open: worked around by moving the sequence to 10000 (`20260504090000_roles_master_id_range`) and numbering master roles below it |
+| F3 | a table the application inserts into too has no safe id for a new master row: the next id is a tenant's in production, and an id-less row cannot be seeded after rows with ids | fixed: `ids: database` leaves every id to the sequence, and the file's ids to the seed ("give a model a mode, insert_only columns and ids the database gives"); r13 adds a master role that way. The id range of r05 stays, as it was made |
 | F4 | references and the insert guard ignored `where`, so a master role whose code a tenant's custom role has was skipped and its grants went to the tenant's role | fixed: a model's `where` holds in every statement a migration runs ("carry a model's where into the migration, and keep every statement inside it") |
 | F5 | `plan -with-sql` runs the SQL and the fixture migrations in one transaction, so a new enum value cannot be used there, and the plan reported a failure the deploy does not have | open, and said: the plan is inconclusive there (exit 1) and names the cause |
 | F6 | `plan -with-sql` leaves the non-transactional effects (`setval`) of the SQL migrations it ran | open: PostgreSQL's sequences are outside every transaction; plan notes such a migration |

@@ -165,6 +165,19 @@ policy:
   # leave nulls out of the file. Override it per model where they differ.
   array_nulls: refuse
 
+  # Which rows of a model the fixture file owns, for every model that does not
+  # say: set mode on a model, below, to override it.
+  #   sync    all of them (default): a row the file adds is inserted, a value it
+  #           changes is updated, a row it does not hold is deleted
+  #   upsert  the rows it holds, inserted and updated; a row only a database
+  #           holds, a tenant's or one the application added, is no drift and
+  #           never deleted, and an export writes only the file's rows
+  #   insert  only the rows a database lacks, by natural key: a row it holds is
+  #           its own from then on, values and all, an admin's edit included
+  # deletes only applies under sync, and a model that sets it next to upsert or
+  # insert is refused. check counts what upsert and insert leave alone.
+  mode: sync
+
 # One entry per model of the fixture file. A model in the file that is not
 # listed here stops the tool: a model nobody configured is a mistake, and a
 # silently skipped model is how a change goes missing.
@@ -236,6 +249,13 @@ models:
     defaults:
       quota: "0"
       enabled: "false"
+    # Columns an insert writes and the database owns from then on: a feature
+    # starts as the file says, and operators turn it on and off in production.
+    # Once the row exists nothing compares them, no update writes them and no
+    # delete is guarded by them, and an export keeps the file's value. Unlike
+    # ignore, they are written; unlike derived, by the insert. Never a column
+    # of the key, the ref column or the id.
+    insert_only: [enabled]
 
   # A table whose identity includes which of a few mutually exclusive columns
   # is set. key_any_of adds, per group, the first column of that group holding
@@ -265,3 +285,19 @@ models:
     # policy.array_nulls for this model's array columns alone: its Go fields
     # are []*string, which keep a null inside a sequence.
     array_nulls: keep
+
+  # A table tenants add roles of their own to, numbered by the same sequence.
+  Role:
+    table: roles
+    key: [code]
+    ref: code
+    # The fixture file adds and updates its roles and never deletes one: a
+    # tenant's role is no drift, and an export writes only the file's roles.
+    mode: upsert
+    # The database gives every role its id, "file" being the default. The file
+    # may still number its roles, for a reference such as role_id: 3 to
+    # resolve, but a migration inserts a role without its id, so it takes the
+    # sequence's next one instead of one a tenant's role holds; nothing
+    # compares the ids, and an export writes none. Neither key nor ref can be
+    # the id then.
+    ids: database

@@ -104,6 +104,11 @@ func generate(o streams, args []string) error {
 		for _, w := range g.Diff.Warnings {
 			fmt.Fprintln(o.stderr, "warning:", w.String())
 		}
+		// What the configuration leaves to the database is no change, said so
+		// a row taken out of an upsert model is not taken for one deleted.
+		for _, line := range g.Diff.LeftAloneLines() {
+			fmt.Fprintln(o.stderr, "note:", line)
+		}
 	}
 	if *dryRun {
 		for _, p := range g.Problems {
@@ -132,8 +137,12 @@ func generate(o streams, args []string) error {
 			if _, err := g.Write(); err != nil {
 				return err
 			}
-			fmt.Fprintf(o.stdout, "wrote %s: %s differs from it only in how it is written, which the state now "+
-				"records too\n", g.StatePath, s.cfg.FixtureLabel())
+			how := "in how it is written"
+			if len(g.Diff.LeftAlone) > 0 {
+				how = "in how it is written and in what the configuration leaves to the database"
+			}
+			fmt.Fprintf(o.stdout, "wrote %s: %s differs from it only %s, which the state now records too\n",
+				g.StatePath, s.cfg.FixtureLabel(), how)
 		}
 		noteLeftOut(o, g.LeftOut)
 		return nil

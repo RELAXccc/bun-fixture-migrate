@@ -224,7 +224,9 @@ func scaffoldModel(tables map[string]*dbschema.Table, t *dbschema.Table, model, 
 	b.WriteString("    # GUESS: proposed because the schema has it. Delete this model unless the\n" +
 		"    # fixture files own the table's rows: a table the application writes, such\n" +
 		"    # as users, orders or sessions, exported into a fixture file is drift after\n" +
-		"    # every deploy, and a migration generated from it overwrites real data.\n")
+		"    # every deploy, and a migration generated from it overwrites real data.\n" +
+		"    # A table of master rows the application adds rows of its own to keeps\n" +
+		"    # them with mode: upsert, and ids: database where it numbers them too.\n")
 	table := t.Name
 	if t.Schema != schema {
 		table = t.Qualified()
@@ -745,4 +747,16 @@ policy:
   # the model has. Set keep if your array fields keep a null; with plain slices,
   # leave nulls out of the file. Override it per model where they differ.
   array_nulls: refuse
+
+  # Which rows of a model the fixture files own; a model sets its own mode.
+  #   sync    all of them (default): rows they add are inserted, values they
+  #           change updated, rows they do not hold deleted
+  #   upsert  the rows they hold, never deleting one: for a table tenants or
+  #           the application add rows to as well
+  #   insert  only the rows a database lacks: a row it holds is its own after
+  # A model can also list insert_only columns, which an insert writes and the
+  # database owns afterwards, a flag operators toggle, and say ids: database
+  # when the database numbers every row, as a table the application inserts
+  # into numbers its own.
+  mode: sync
 `

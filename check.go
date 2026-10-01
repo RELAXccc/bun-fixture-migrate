@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 )
 
@@ -17,6 +18,10 @@ type CheckResult struct {
 	// key two rows share, a zero written against a column default, a column
 	// the table does not have.
 	Findings []Finding
+	// Hints explain a difference an update holds, by the change's index in
+	// Changes and the column: where the database holds the column's default
+	// and the file a null or a zero, which bun writes as DEFAULT.
+	Hints map[int]map[string]string
 }
 
 // Drifted reports whether anything at all was found, warnings included.
@@ -50,7 +55,72 @@ func Check(cfg *Config, database, fixture *Snapshot) (*CheckResult, error) {
 	out := &CheckResult{Result: res}
 	out.Findings = append(out.Findings, database.Findings...)
 	out.Findings = append(out.Findings, fixture.Findings...)
+	for i, c := range res.Changes {
+		if c.Kind != fixturechange.Update {
+			continue
+		}
+		table := database.tables[c.Model]
+		if table == nil {
+			table = fixture.tables[c.Model]
+		}
+		if table == nil {
+			continue
+		}
+		for _, col := range sortedColumns(c.New) {
+			column, ok := table.Column(col)
+			if !ok {
+				continue
+			}
+			if hint := defaultHint(column, c.Old[col], c.New[col]); hint != "" {
+				if out.Hints == nil {
+					out.Hints = map[int]map[string]string{}
+				}
+				if out.Hints[i] == nil {
+					out.Hints[i] = map[string]string{}
+				}
+				out.Hints[i][col] = hint
+			}
+		}
+	}
 	return out, nil
+}
+
+// defaultHint says why a column a database holds its default in and the file
+// a null or a zero differs, "" when that is not the case. bun writes DEFAULT,
+// not the value, for a nil pointer, for a zero in a nullzero field and for a
+// zero in a field with a default, on an INSERT and, since bun v1.2.17, on an
+// UPDATE of a model too: whatever bun wrote the row from such a field, a seed
+// or an admin UI, left the default there. It is the drift that looks the
+// most mysterious, and the lints say it of the file only where the policy
+// does not ignore them.
+func defaultHint(column dbschema.Column, database, file fixturechange.Value) string {
+	if database.IsNull || database.Ref != nil || file.Ref != nil {
+		return ""
+	}
+	def, literal := column.LiteralDefault()
+	if !literal {
+		return ""
+	}
+	var what string
+	switch {
+	case file.IsNull:
+		what = "a nil pointer or a nullzero field"
+	default:
+		zero, known := column.ZeroText()
+		if !known || !sameScalar(file.Lit, zero) {
+			return ""
+		}
+		if hazard, _ := column.ZeroIsNotDefault(); !hazard {
+			return ""
+		}
+		what = "a zero in a field with a default or a nullzero one"
+	}
+	if database.Lit != def && !(numericType(column.Type) && sameScalar(database.Lit, def)) {
+		return ""
+	}
+	return fmt.Sprintf("the column defaults to %s, and bun writes DEFAULT for %s, on INSERT and, since "+
+		"v1.2.17, on UPDATE too, so a row bun wrote holds the default: write %s in the file, or drop the "+
+		"column default", def, what, def)
 }
 
 // Lines is the report, one problem per line or per short block, in the order a
@@ -83,13 +153,14 @@ func (c *CheckResult) Lines() []string {
 		}
 	}
 
-	var ins, upd, del []fixturechange.Change
-	for _, ch := range c.Changes {
+	var ins, del []fixturechange.Change
+	var upd []int
+	for i, ch := range c.Changes {
 		switch ch.Kind {
 		case fixturechange.Insert:
 			ins = append(ins, ch)
 		case fixturechange.Update:
-			upd = append(upd, ch)
+			upd = append(upd, i)
 		default:
 			del = append(del, ch)
 		}
@@ -108,16 +179,28 @@ func (c *CheckResult) Lines() []string {
 	}
 	if len(upd) > 0 {
 		out = append(out, "", "Different in the database and the fixture file:")
-		for _, ch := range upd {
+		for _, i := range upd {
+			ch := c.Changes[i]
 			out = append(out, "  "+ch.Model+" "+keyLabelOf(ch.Key))
 			for _, col := range sortedColumns(ch.New) {
 				out = append(out, fmt.Sprintf("    %s: database %s, file %s",
 					col, ch.Old[col].String(), ch.New[col].String()))
+				if hint := c.Hints[i][col]; hint != "" {
+					out = append(out, "      hint: "+hint)
+				}
 			}
 		}
 	}
 	if len(out) == 0 {
-		return []string{"the database and " + c.Head + " agree"}
+		out = []string{"", "the database and " + c.Head + " agree"}
+	}
+	// What the configuration leaves to the database is no drift, and is
+	// counted only so nobody wonders whether check saw it.
+	if lines := c.LeftAloneLines(); len(lines) > 0 {
+		out = append(out, "", "Left to the database by the configuration, which is no drift:")
+		for _, line := range lines {
+			out = append(out, "  "+line)
+		}
 	}
 	return out[1:]
 }
