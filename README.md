@@ -164,8 +164,8 @@ configuration later does not change what an old migration does. At run time `fix
 `Revert` is the same set backwards, every change inverted and guarded the same way. A rename finds
 its row under the name it gave it, so it reverts, and a second run finds it already made. With an
 `audit_table`, every run records which changes it made, found made already or skipped, and `Revert`
-undoes only the ones it made in that database; without one, it assumes the migration made them all,
-including those it found already made. See [rolling back](docs/production.md#rolling-back).
+undoes only the ones it made in that database, and nothing a second time; without one, it assumes
+the migration made them all, including those it found already made. See [rolling back](docs/production.md#rolling-back).
 
 ## Three things about bun you may not know
 

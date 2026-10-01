@@ -105,8 +105,13 @@ const advisoryLock int64 = 0x62666d0001
 // applied, which is the newest such row and, after a Revert that failed, the
 // ones before it. A change Apply found made already (unchanged) or passed
 // over (skipped) is left as it is, its outcome StatusUnchanged with a message
-// saying why. Without the table, or without such a row, it says so in the log
-// and reverts every change, as it does for a set without an AuditTable.
+// saying why, and so is every change of a run that found the database
+// unseeded. When the set's newest row is a 'down' row, the set is reverted
+// here already -- apply -revert by hand, then bun's Rollback, or two replicas
+// rolling back -- and nothing ran since: every change is left as it is,
+// StatusUnchanged. Without the table, or without a row of the set, it says so
+// in the log and reverts every change, as it does for a set without an
+// AuditTable.
 //
 // That is: it assumes Apply made every change of the set on this database. A
 // change Apply found already made -- the row already held the new values, or
@@ -205,8 +210,9 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 	// Revert undoes what the last Apply here did, which the audit table
 	// says, read under the advisory lock so no other run comes in between.
 	var base Applies
+	var reverted *AuditRecord
 	if revert && set.AuditTable != "" {
-		if base, err = revertBase(ctx, tx, set, o); err != nil {
+		if base, reverted, err = revertBase(ctx, tx, set, o); err != nil {
 			return err
 		}
 	}
@@ -230,6 +236,14 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 		}
 		where := fmt.Sprintf("%s: %s %s %s", set.Name, c.Model, keyLabel(c.Key), c.Kind)
 		out := Outcome{Set: set.Name, Index: i, Model: c.Model, Kind: c.Kind, Key: keyLabel(c.Key)}
+		if reverted != nil {
+			out.Status, out.Message = StatusUnchanged, fmt.Sprintf("not reverted: already reverted here, audit "+
+				"row %d, and no Apply ran since", reverted.ID)
+			o.log(ctx, slog.LevelInfo, "fixture change not reverted, the change set is reverted here already", out,
+				where+": "+out.Message)
+			o.report(out)
+			continue
+		}
 		if base != nil {
 			if made, done, row := base.Made(i, set.Changes[i]); !made {
 				out.Status, out.Message = StatusUnchanged, notMade(base, done, row)
@@ -297,24 +311,43 @@ func finish(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool,
 	return writeAudit(ctx, tx, set, revert, outcomes)
 }
 
-// revertBase is the audit rows of the runs of Apply a Revert undoes, and says
-// in the log what Revert does with them, or without them.
-func revertBase(ctx context.Context, tx bun.IDB, set fixturechange.Set, o options) (Applies, error) {
-	base, err := ApplyRecords(ctx, tx, set)
+// revertBase is the audit rows of the runs of Apply a Revert undoes, or the
+// row of the Revert that undid them already, and says in the log what Revert
+// does with them, or without them.
+func revertBase(ctx context.Context, tx bun.IDB, set fixturechange.Set, o options) (Applies, *AuditRecord, error) {
+	base, reverted, err := ApplyRecords(ctx, tx, set)
 	if pgerr.State(err) == pgerr.InsufficientPrivilege {
-		return nil, fmt.Errorf("%s: the role running the migration may not read the audit table %s, which says what "+
-			"to revert, so nothing was changed: grant it SELECT and INSERT on the table: %w", set.Name, set.AuditTable, err)
+		return nil, nil, fmt.Errorf("%s: the role running the migration may not read the audit table %s, which says "+
+			"what to revert, so nothing was changed: grant it SELECT and INSERT on the table: %w", set.Name,
+			set.AuditTable, err)
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	out := Outcome{Set: set.Name, Index: -1}
-	if len(base) == 0 {
-		out.Message = fmt.Sprintf("%s holds no Apply of this change set that was not reverted since, so every change "+
-			"is reverted, as if the migration had made them all in this database", set.AuditTable)
+	switch {
+	case reverted != nil:
+		// Reverting again would invert the changes the Apply before that
+		// Revert found made or skipped, which the first Revert left alone:
+		// an admin's value overwritten by an old one this database never
+		// held.
+		out.Message = fmt.Sprintf("the change set is reverted here already: the newest row of %s for it, row %d, is "+
+			"the Revert of %s, and no Apply ran since, so nothing is reverted", set.AuditTable, reverted.ID,
+			reverted.AppliedAt.UTC().Format(time.RFC3339))
+		o.log(ctx, slog.LevelWarn, "the change set is reverted here already, nothing is reverted", out,
+			set.Name+": "+out.Message)
+		return nil, reverted, nil
+	case len(base) == 0:
+		out.Message = fmt.Sprintf("%s holds no row of this change set: it never ran here with the audit table, so "+
+			"every change is reverted, as if the migration had made them all in this database", set.AuditTable)
 		o.log(ctx, slog.LevelWarn, "no audit row of the change set, every change is reverted", out,
 			set.Name+": "+out.Message)
-		return nil, nil
+		return nil, nil, nil
+	case base.ran() == nil:
+		out.Message = fmt.Sprintf("the run here was unseeded (row %d of %s): the database was not seeded yet, so "+
+			"nothing was changed, and nothing is reverted", base[0].ID, set.AuditTable)
+		o.log(ctx, slog.LevelInfo, "the change set ran here unseeded, nothing is reverted", out, set.Name+": "+out.Message)
+		return base, nil, nil
 	}
 	made := 0
 	for i, c := range set.Changes {
@@ -333,15 +366,20 @@ func revertBase(ctx context.Context, tx bun.IDB, set fixturechange.Set, o option
 			"did not have is not reverted", base[0].ID, set.AuditTable)
 		o.log(ctx, slog.LevelWarn, "the change set was edited after it ran here", out, set.Name+": "+out.Message)
 	}
-	return base, nil
+	return base, nil, nil
 }
 
 // notMade says why Revert leaves a change alone: no run of Apply in this
 // database made it.
 func notMade(base Applies, done AuditOutcome, row *AuditRecord) string {
 	if row == nil {
+		ran := base.ran()
+		if ran == nil {
+			return fmt.Sprintf("not reverted: the run here was unseeded (audit row %d): nothing was changed, so "+
+				"nothing is reverted", base[0].ID)
+		}
 		return fmt.Sprintf("not reverted: the change set did not hold this change when it ran here, the Apply of %s "+
-			"(row %d)", base[0].AppliedAt.UTC().Format(time.RFC3339), base[0].ID)
+			"(row %d)", ran.AppliedAt.UTC().Format(time.RFC3339), ran.ID)
 	}
 	when := fmt.Sprintf("the Apply of %s (row %d)", row.AppliedAt.UTC().Format(time.RFC3339), row.ID)
 	what := string(done.Status)

@@ -267,6 +267,15 @@ and a rollback undoes only the ones it applied in that database. A change the mi
 -- the row already held the new value through some other path, or was already there -- is left as it
 is, and so is one it skipped: a delete it skipped because somebody had removed the row does not put
 the row back. The log says why for each. `status` against the database shows what the last run did.
+A second rollback with no deploy between them -- `apply -revert` by hand and then the migrator's
+`Rollback`, or two replicas rolling back -- finds the migration reverted already and changes nothing.
+
+With it, a rollback in an environment that was seeded after its migrations ran -- a development
+database, CI, a preview -- reverts nothing. The migrations ran there against the empty database,
+recorded that they did nothing, and the seed then loaded the fixture file with their changes in it;
+the rollback says "the run here was unseeded" for every change and leaves the seeded rows alone.
+Without an audit table, the same rollback reverts every change, as below. To get the old values back
+there, seed again from the fixture file as it was.
 
 Without it, or for a migration that ran before it was set, a rollback assumes the migration made
 every one of its changes on this database, and says so in the log. A change the migration found

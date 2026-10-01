@@ -668,7 +668,7 @@ does, and is tested under `pgdriver` and `pgx`.
 | `WithDryRun()` | for a caller that rolls back: sequences are reported, not moved |
 | `SetSHA256(set)` | the SHA-256 of a canonical encoding of the set, as the audit table records it |
 | `ReadAudit(ctx, db, table)` | the newest row of the audit table for every set it holds, by name; false when the table does not exist |
-| `ApplyRecords(ctx, db, set)` | the rows a `Revert` of the set follows: its `up` rows after its last `down` row, newest first |
+| `ApplyRecords(ctx, db, set)` | the rows a `Revert` of the set follows: its `up` rows after its last `down` row, newest first; and that `down` row when no `up` row follows it, which is a set reverted here already |
 
 A change that fails the set comes back as a `*fixtureapply.ChangeError`, which `errors.As` finds in
 the error bun's migrator returns: its `Outcome` says which change and why, and it unwraps to the
@@ -760,8 +760,13 @@ reported `unchanged` with a message saying why. Not only the newest row: a rever
 bun's default migrator leaves the migration pending with its changes made, and the `Apply` of the next
 migrate finds them all `unchanged`; the run before it made them. A set edited since it ran is matched
 to the run by each change's model, key and kind, and a change the run did not have is not reverted.
-Without such a row, because the table is new or the set ran before it had one, `Revert` inverts every
-change, as it does without an audit table, and logs that it does.
+When the set's newest row is a `down` row, the set is reverted here already and no `Apply` ran
+since: `apply -revert -yes` by hand followed by bun's `Rollback`, or two replicas rolling back. That
+`Revert` changes nothing, reports every change `unchanged`, "already reverted here, audit row N",
+and writes its own `down` row. When the `up` rows all record a run that found the seed guard table
+empty, it changes nothing either: "the run here was unseeded". Without a row of the set, because
+the table is new or the set ran before it had one, `Revert` inverts every change, as it does without
+an audit table, and logs that it does.
 
 The hash is of every field of the set, with every map's keys in order and every field at its zero
 value left out, so a field a later version adds does not change the hash of a set that does not use

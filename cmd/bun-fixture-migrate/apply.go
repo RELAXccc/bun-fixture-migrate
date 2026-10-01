@@ -207,16 +207,18 @@ func readAppliedRW(ctx context.Context, db *bun.DB, table string) (map[string]fi
 }
 
 // revertNote says what a Revert of the set will undo here: what the audit
-// table says Apply made, or, without it, every change.
+// table says Apply made, nothing when it says the set is reverted already,
+// or, without it, every change.
 func revertNote(ctx context.Context, db *bun.DB, set fixturechange.Set) (string, error) {
 	if set.AuditTable == "" {
 		return "the change set has no audit table, so Revert inverts every change, as if the migration had made " +
 			"them all in this database", nil
 	}
 	var base fixtureapply.Applies
+	var reverted *fixtureapply.AuditRecord
 	err := db.RunInTx(ctx, &sql.TxOptions{ReadOnly: true}, func(ctx context.Context, tx bun.Tx) error {
 		var err error
-		base, err = fixtureapply.ApplyRecords(ctx, tx, set)
+		base, reverted, err = fixtureapply.ApplyRecords(ctx, tx, set)
 		return err
 	})
 	if pgerr.State(err) == pgerr.InsufficientPrivilege {
@@ -226,9 +228,21 @@ func revertNote(ctx context.Context, db *bun.DB, set fixturechange.Set) (string,
 	if err != nil {
 		return "", err
 	}
-	if len(base) == 0 {
-		return fmt.Sprintf("%s holds no Apply of this change set since its last Revert, so Revert inverts every "+
-			"change, as if the migration had made them all in this database", set.AuditTable), nil
+	unseeded := len(base) > 0
+	for _, r := range base {
+		unseeded = unseeded && r.Unseeded()
+	}
+	switch {
+	case reverted != nil:
+		return fmt.Sprintf("%s says the change set is reverted here already (row %d, %s), and no Apply ran since, "+
+			"so Revert changes nothing", set.AuditTable, reverted.ID,
+			reverted.AppliedAt.UTC().Format("2006-01-02 15:04:05")), nil
+	case len(base) == 0:
+		return fmt.Sprintf("%s holds no row of this change set, so Revert inverts every change, as if the "+
+			"migration had made them all in this database", set.AuditTable), nil
+	case unseeded:
+		return fmt.Sprintf("%s says the change set ran here unseeded (row %d), when it changed nothing, so Revert "+
+			"changes nothing", set.AuditTable, base[0].ID), nil
 	}
 	made := 0
 	for i, c := range set.Changes {

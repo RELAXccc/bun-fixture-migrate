@@ -141,6 +141,26 @@ func TestAppliesSayWhichChangesWereMade(t *testing.T) {
 	if msg := notMade(Applies{first}, AuditOutcome{}, nil); !strings.Contains(msg, "did not hold this change") {
 		t.Fatalf("notMade: %s", msg)
 	}
+
+	// A run that found the database unseeded changed nothing, whatever the
+	// set holds.
+	unseeded := AuditRecord{ID: 9, Set: set.Name, Direction: DirectionUp, AppliedAt: at,
+		Outcomes: []AuditOutcome{{Index: -1, Status: StatusUnseeded}}}
+	if !unseeded.Unseeded() || first.Unseeded() {
+		t.Fatal("Unseeded")
+	}
+	made, done, row = (Applies{unseeded}).Made(0, set.Changes[0])
+	if made || row != nil {
+		t.Fatal("an unseeded run made nothing")
+	}
+	if msg := notMade(Applies{unseeded}, done, row); !strings.Contains(msg, "the run here was unseeded (audit row 9)") ||
+		strings.Contains(msg, "did not hold") {
+		t.Fatalf("notMade of an unseeded run: %s", msg)
+	}
+	// Seeded since and run again: the run that ran is the one to name.
+	if msg := notMade(Applies{first, unseeded}, AuditOutcome{}, nil); !strings.Contains(msg, "(row 4)") {
+		t.Fatalf("notMade: %s", msg)
+	}
 }
 
 func TestAuditRecordCountsTheChangesOnly(t *testing.T) {
