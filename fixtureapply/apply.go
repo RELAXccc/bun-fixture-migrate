@@ -173,6 +173,9 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 		}
 		out.Rows, out.Message = res.rows, res.message
 		switch {
+		case res.problem == "" && res.message != "":
+			out.Status = StatusApplied
+			o.logf("%s: applied (%s). %s", where, rowCount(res.rows), res.message)
 		case res.problem == "":
 			out.Status = StatusApplied
 			o.logf("%s: applied (%s)", where, rowCount(res.rows))

@@ -21,10 +21,43 @@ func (r *runner) exec(ctx context.Context, c fixturechange.Change) (outcome, err
 	case fixturechange.Insert:
 		return r.insert(ctx, c, t, table)
 	case fixturechange.Update:
+		// id_drift warn or ignore says the ids of this database are not the
+		// fixture file's. A rename guarded by the file's id would then match
+		// nothing and be skipped, and it is the setting such databases use:
+		// the old natural key and the old values find the row on their own,
+		// and onlyRow makes sure it is one row.
+		if c.ID != "" && (r.set.Policy.IDDrift == fixturechange.ModeWarn || r.set.Policy.IDDrift == fixturechange.ModeIgnore) {
+			id := c.ID
+			c.ID = ""
+			out, err := r.update(ctx, c, t, table)
+			if err != nil || out.problem != "" || r.set.Policy.IDDrift != fixturechange.ModeWarn {
+				return out, err
+			}
+			return r.warnID(ctx, c, t, table, id, out)
+		}
 		return r.update(ctx, c, t, table)
 	default:
 		return r.delete(ctx, c, t, table)
 	}
+}
+
+// warnID adds to a rename made without its id guard the warning id_drift: warn
+// promises, when the row is under another id than the fixture file's.
+func (r *runner) warnID(ctx context.Context, c fixturechange.Change, t fixturechange.Table, table, id string,
+	out outcome) (outcome, error) {
+
+	moved, _ := movedKey(c.Key, c.New)
+	n, err := r.count(ctx, c.Model, table, moved, fixturechange.Values{t.ID: fixturechange.Lit(id)})
+	if err != nil || n > 0 {
+		return out, err
+	}
+	ids, err := r.idsFor(ctx, c.Model, table, t, moved)
+	if err != nil {
+		return out, err
+	}
+	out.message = fmt.Sprintf("%s %s is under %s %s, not %s as the fixture file says; id_drift is warn, so it was "+
+		"renamed all the same", t.Name, keyLabel(moved), t.ID, strings.Join(ids, ", "), id)
+	return out, nil
 }
 
 func (r *runner) insert(ctx context.Context, c fixturechange.Change, t fixturechange.Table, table string) (outcome, error) {

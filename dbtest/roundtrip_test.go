@@ -524,6 +524,28 @@ func TestARenameUpdatesTheKeyColumnUnderItsIDGuard(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "under id 5 and not 2") {
 		t.Fatalf("expected the id drift to be named, got %v", err)
 	}
+
+	// id_drift warn and ignore are what a database whose ids are not the
+	// file's runs under: the rename finds its row by the old name alone,
+	// warns about the id under warn, and a second run finds it made. Guarded
+	// by the file's id, it was skipped and recorded.
+	for _, policy := range []fixturechange.Mode{fixturechange.ModeWarn, fixturechange.ModeIgnore} {
+		run(t, db2, "UPDATE plans SET name = 'team' WHERE id = 5")
+		set.Policy.IDDrift = policy
+		outcomes, err := applyReporting(t, db2, set)
+		if err != nil || len(outcomes) != 1 || outcomes[0].Status != fixtureapply.StatusApplied {
+			t.Fatalf("%s: %v %+v", policy, err, outcomes)
+		}
+		if warned := strings.Contains(outcomes[0].Message, "is under id 5, not 2"); warned != (policy == fixturechange.ModeWarn) {
+			t.Fatalf("%s: %+v", policy, outcomes[0])
+		}
+		if got := scan[int64](t, db2, `SELECT id FROM plans WHERE name = 'crew'`); got != 5 {
+			t.Fatalf("%s: crew is %d", policy, got)
+		}
+		if outcomes, err = applyReporting(t, db2, set); err != nil || outcomes[0].Status != fixtureapply.StatusUnchanged {
+			t.Fatalf("%s: a second run: %v %+v", policy, err, outcomes)
+		}
+	}
 }
 
 // A rename written as an update (renames: update) behaves like every other
