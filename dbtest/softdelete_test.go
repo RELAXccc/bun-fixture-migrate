@@ -621,3 +621,41 @@ func TestSoftDeleteWithoutAnIDColumn(t *testing.T) {
 		t.Fatalf("%d live tags", got)
 	}
 }
+
+// E11 at run time: a key two rows hold names the index that let the second
+// one in, and asks for an index only where the table has none.
+func TestADuplicateKeyAtRunTimeNamesTheIndex(t *testing.T) {
+	db := connect(t)
+	ctx := context.Background()
+	run(t, db, "DROP TABLE IF EXISTS dk_categories, dk_regions, dk_tags",
+		"CREATE TABLE dk_categories (id bigint PRIMARY KEY, parent_id bigint, code text NOT NULL, label text, "+
+			"UNIQUE (parent_id, code))",
+		"INSERT INTO dk_categories VALUES (1, NULL, 'root', 'a'), (2, NULL, 'root', 'b')",
+		"CREATE TABLE dk_regions (id bigint PRIMARY KEY, code text NOT NULL, archived boolean NOT NULL, label text)",
+		"CREATE UNIQUE INDEX dk_regions_code_open ON dk_regions (code) WHERE NOT archived",
+		"INSERT INTO dk_regions VALUES (1, 'eu', true, 'a'), (2, 'eu', true, 'b')",
+		"CREATE TABLE dk_tags (id bigint PRIMARY KEY, code text NOT NULL, label text)",
+		"INSERT INTO dk_tags VALUES (1, 'hot', 'a'), (2, 'hot', 'b')")
+	for _, tc := range []struct{ model, table, keyCol, key, want string }{
+		{"Category", "dk_categories", "code", "root", "unique index dk_categories_parent_id_code_key holds NULLs " +
+			"distinct, and lets in a second row with parent_id NULL: declare it NULLS NOT DISTINCT"},
+		{"Region", "dk_regions", "code", "eu", "unique index dk_regions_code_open holds only where (NOT archived), " +
+			"and lets in the rows outside it"},
+		{"Tag", "dk_tags", "code", "hot", "add a unique index on the key so they cannot come back"},
+	} {
+		key := fixturechange.Values{tc.keyCol: fixturechange.Lit(tc.key)}
+		if tc.model == "Category" {
+			key["parent_id"] = fixturechange.Null()
+		}
+		set := fixturechange.Set{Name: "20261001000000_fixture_dup",
+			Tables: fixturechange.Tables{tc.model: {Name: tc.table, ID: "id"}},
+			Changes: []fixturechange.Change{{Model: tc.model, Kind: fixturechange.Update, Key: key,
+				Old: fixturechange.Values{"label": fixturechange.Lit("a")},
+				New: fixturechange.Values{"label": fixturechange.Lit("c")}}}}
+		err := fixtureapply.Apply(ctx, db, set, quiet())
+		if err == nil || !strings.Contains(err.Error(), "2 rows of "+tc.table+" hold") ||
+			!strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v", tc.model, err)
+		}
+	}
+}

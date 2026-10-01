@@ -2,6 +2,7 @@ package fixtureapply
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -9,12 +10,98 @@ import (
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 )
 
-// duplicate is the outcome for a natural key n rows hold.
-func duplicate(t fixturechange.Table, c fixturechange.Change, n int64) outcome {
+// duplicate is the outcome for a natural key n rows hold. It names the
+// unique index that should have kept the second row out, and says why it did
+// not, or asks for one where the table has none.
+func (r *runner) duplicate(ctx context.Context, t fixturechange.Table, c fixturechange.Change, n int64,
+	table string) (outcome, error) {
+
+	advice, err := r.indexAdvice(ctx, table, c.Key)
+	if err != nil {
+		return outcome{}, err
+	}
+	if advice == "" {
+		advice = "add a unique index on the key so they cannot come back"
+	}
 	return outcome{problem: problemDuplicate, message: fmt.Sprintf(
 		"%d rows of %s hold %s. A change finds its row by the natural key, and nothing says which of them the "+
-			"fixture file means, so none was touched. Remove the extra rows, and add a unique index on the key so "+
-			"they cannot come back", n, t.Name, keyLabel(c.Key))}
+			"fixture file means, so none was touched. Remove the extra rows, and %s", n, t.Name, keyLabel(c.Key),
+		advice)}, nil
+}
+
+// indexAdvice names a unique index over columns of a natural key that let a
+// second row with the key in, and what to do about it: one that holds NULLs
+// distinct in a column the key holds NULL in, a partial one, or an invalid
+// one. "" when the table has none, or one that should have refused the row,
+// which a key two rows hold only to this tool's equality, such as a citext
+// one, gets past.
+func (r *runner) indexAdvice(ctx context.Context, table string, key fixturechange.Values) (string, error) {
+	rows, err := r.tx.QueryContext(ctx, `
+SELECT i.indexrelid::regclass::text, i.indisvalid AND i.indisready AND i.indislive,
+       coalesce(pg_get_expr(i.indpred, i.indrelid), ''),
+       coalesce((to_jsonb(i) ->> 'indnullsnotdistinct')::bool, false),
+       array_to_json(ARRAY(SELECT a.attname FROM unnest(i.indkey) WITH ORDINALITY k(n, o)
+             JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.n
+             WHERE k.o <= i.indnkeyatts ORDER BY k.o))::text
+FROM pg_index i
+WHERE i.indrelid = ?::regclass AND i.indisunique AND i.indexprs IS NULL
+ORDER BY 1`, table)
+	if err != nil {
+		return "", fmt.Errorf("read the unique indexes of %s: %w", table, err)
+	}
+	defer rows.Close()
+	var nullable, partial, invalid string
+	for rows.Next() {
+		var name, pred, cols string
+		var valid, nullsNotDistinct bool
+		if err := rows.Scan(&name, &valid, &pred, &nullsNotDistinct, &cols); err != nil {
+			return "", err
+		}
+		var names []string
+		if err := json.Unmarshal([]byte(cols), &names); err != nil {
+			return "", err
+		}
+		within, nulls := len(names) > 0, []string(nil)
+		for _, col := range names {
+			v, ok := key[col]
+			within = within && ok
+			if ok && v.IsNull {
+				nulls = append(nulls, col)
+			}
+		}
+		switch {
+		case !within:
+		case !valid:
+			if invalid == "" {
+				invalid = fmt.Sprintf("unique index %s is invalid, left by a CREATE INDEX CONCURRENTLY that "+
+					"failed: delete the extra rows, then REINDEX INDEX CONCURRENTLY %s", name, name)
+			}
+		case pred != "":
+			if partial == "" {
+				partial = fmt.Sprintf("unique index %s holds only where %s, and lets in the rows outside it: give "+
+					"the model a where that implies it, or give the table a unique index over every row", name, pred)
+			}
+		case len(nulls) > 0 && !nullsNotDistinct:
+			if nullable == "" {
+				nullable = fmt.Sprintf("unique index %s holds NULLs distinct, and lets in a second row with %s "+
+					"NULL: declare it NULLS NOT DISTINCT (PostgreSQL 15 and later), or make %s NOT NULL", name,
+					strings.Join(nulls, " or "), strings.Join(nulls, " and "))
+			}
+		default:
+			// An index over every row that holds the key's NULLs equal
+			// keeps any second row out.
+			return "", rows.Close()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	for _, advice := range []string{nullable, partial, invalid} {
+		if advice != "" {
+			return advice, rows.Close()
+		}
+	}
+	return "", rows.Close()
 }
 
 // diagnose works out why a guarded update or delete matched nothing. The answer
@@ -33,7 +120,7 @@ func (r *runner) diagnose(ctx context.Context, c fixturechange.Change, t fixture
 		return outcome{}, err
 	}
 	if byKey > 1 {
-		return duplicate(t, c, byKey), nil
+		return r.duplicate(ctx, t, c, byKey, table)
 	}
 	if byKey == 0 && c.Kind == fixturechange.Delete {
 		// A row soft-deleted already: a second run, or a replica that came
@@ -208,7 +295,8 @@ func (r *runner) diagnoseMoved(ctx context.Context, c fixturechange.Change, t fi
 		return outcome{}, false, err
 	}
 	if n > 1 {
-		return duplicate(t, fixturechange.Change{Key: moved}, n), true, nil
+		out, err := r.duplicate(ctx, t, fixturechange.Change{Key: moved}, n, table)
+		return out, true, err
 	}
 	if c.ID != "" {
 		withID, err := r.count(ctx, c.Model, table, moved, wanted, fixturechange.Values{t.ID: fixturechange.Lit(c.ID)})
@@ -239,7 +327,7 @@ func (r *runner) diagnoseInsert(ctx context.Context, c fixturechange.Change, t f
 		return outcome{}, err
 	}
 	if byKey > 1 {
-		return duplicate(t, c, byKey), nil
+		return r.duplicate(ctx, t, c, byKey, table)
 	}
 	if byKey == 0 {
 		return outcome{}, fmt.Errorf("no row of %s has %s, and the insert wrote none all the same: a BEFORE trigger "+
