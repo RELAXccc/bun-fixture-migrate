@@ -647,14 +647,6 @@ func exportBytea(model, col, lit string) (string, string, error) {
 	return "[" + strings.Join(parts, ", ") + "]", "", nil
 }
 
-// structured reports a column whose values are JSON as the tool reads them:
-// json and jsonb, and arrays, which are read as JSON arrays. JSON is YAML, so
-// the value is written as it is, a flow mapping or sequence dbfixture decodes
-// into a map, a struct or a slice.
-func structured(c dbschema.Column) bool {
-	return isJSON(c) || c.Category == "A"
-}
-
 // hazardComment is the warning that goes next to a value the fixture loader
 // will not write back. See LintZeroDefaults: bun sends DEFAULT for a zero in a
 // column that has one, so this exact line, loaded back, produces something

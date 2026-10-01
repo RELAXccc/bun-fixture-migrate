@@ -151,7 +151,8 @@ func TestARoleRowLevelSecurityLimitsCannotRead(t *testing.T) {
 	}
 	drop()
 	t.Cleanup(drop)
-	run(t, db, "CREATE ROLE "+role+" LOGIN",
+	// A password, for servers that ask for one, as CI's do.
+	run(t, db, "CREATE ROLE "+role+" LOGIN PASSWORD 'bfm-rls'",
 		"CREATE TABLE rls_tags (id bigint PRIMARY KEY, code text UNIQUE NOT NULL, tenant_id bigint)",
 		"INSERT INTO rls_tags VALUES (1, 'urgent', NULL), (2, 'later', NULL), (3, 'done', 7)",
 		"ALTER TABLE rls_tags ENABLE ROW LEVEL SECURITY",
@@ -161,7 +162,7 @@ func TestARoleRowLevelSecurityLimitsCannotRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u.User = url.User(role)
+	u.User = url.UserPassword(role, "bfm-rls")
 	c := buildCLI(t)
 	c.write("fixture-migrate.yml", `fixture: fixtures/fixture.yml
 out: migrations

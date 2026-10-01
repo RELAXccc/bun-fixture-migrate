@@ -27,7 +27,7 @@ func (r *recorder) Driver() driver.Driver                        { return record
 
 type recorderDriver struct{ r *recorder }
 
-func (d recorderDriver) Open(string) (driver.Conn, error) { return recorderConn{d.r}, nil }
+func (d recorderDriver) Open(string) (driver.Conn, error) { return recorderConn(d), nil }
 
 type recorderConn struct{ r *recorder }
 
