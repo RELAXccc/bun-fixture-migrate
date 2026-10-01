@@ -252,6 +252,13 @@ func TestLongRunningSaaSProject(t *testing.T) {
 func newLongrun(t *testing.T) *longrun {
 	t.Helper()
 	admin := connect(t)
+	var version int
+	if err := admin.QueryRowContext(context.Background(), "SHOW server_version_num").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version < 130000 {
+		t.Skip("the example's plans have gen_random_uuid() keys, which PostgreSQL has built in from 13 on")
+	}
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("no Go toolchain to build with")
 	}
