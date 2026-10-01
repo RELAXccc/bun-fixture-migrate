@@ -33,10 +33,16 @@ func corpus(t *testing.T) []string {
 }
 
 func TestEveryGeneratedFileReadsBackAndValidates(t *testing.T) {
+	shapes := map[string]int{}
 	for _, path := range corpus(t) {
 		src, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
+		}
+		for _, shape := range []string{"fixtureapply.Up(", "fixtureapply.Apply(ctx, db, "} {
+			if strings.Contains(string(src), shape) {
+				shapes[shape]++
+			}
 		}
 		set, isFixture, err := ReadChangeSet(src)
 		if err != nil || !isFixture {
@@ -56,5 +62,10 @@ func TestEveryGeneratedFileReadsBackAndValidates(t *testing.T) {
 				t.Fatalf("%s: %v", path, err)
 			}
 		}
+	}
+	// Both ways a version has registered a set: functions calling Apply and
+	// Revert, and Up and Down.
+	if len(shapes) != 2 {
+		t.Fatalf("the corpus has to hold both registrations: %v", shapes)
 	}
 }

@@ -1,0 +1,27 @@
+- model: Currency
+  rows:
+    - {_id: eur, id: 1, code: EUR, symbol: "€"}
+    - {_id: usd, id: 2, code: USD, symbol: "$"}
+    - {_id: gbp, id: 3, code: GBP, symbol: "£"}
+- model: Plan
+  rows:
+    - _id: free
+      id: 1
+      name: free
+      currency_id: '{{ $.Currency.eur.ID }}'
+      price_cents: 0
+      settings: {sso: false}
+      tags: [basic]
+    - _id: team
+      id: 2
+      name: team
+      currency_id: '{{ $.Currency.eur.ID }}'
+      price_cents: 2000
+      note: "old \"note\""
+      settings: {sso: false, seats: 10}
+      tags: [team, popular]
+- model: Feature
+  rows:
+    - {plan_id: '{{ $.Plan.free.ID }}', code: api, quota: 100}
+    - {plan_id: '{{ $.Plan.team.ID }}', code: api, quota: 5000}
+    - {plan_id: '{{ $.Plan.team.ID }}', code: sso, quota: 1}
