@@ -19,6 +19,9 @@ type options struct {
 	report    func(Outcome)
 	migration string
 	dryRun    bool
+	// nested is true when the change set runs inside a caller's
+	// transaction.
+	nested bool
 }
 
 // WithLogger replaces log.Printf as the destination of the per-row report.
@@ -173,6 +176,11 @@ type Outcome struct {
 // set, whether its statement failed or the policy makes its problem an error.
 // errors.As finds it in what bun's migrator returns, with the change's
 // Outcome as WithReport received it.
+//
+// It is also the error of a lock timeout met while the constraints PostgreSQL
+// defers are checked at the end of the set. That belongs to no change: its
+// Outcome has Index -1 and ProblemLockTimeout, and WithReport does not
+// receive it.
 type ChangeError struct {
 	Outcome Outcome
 	// err is the error of the change's statement; nil when the policy made
@@ -182,6 +190,9 @@ type ChangeError struct {
 
 func (e *ChangeError) Error() string {
 	where := fmt.Sprintf("%s: %s %s %s", e.Outcome.Set, e.Outcome.Model, e.Outcome.Key, e.Outcome.Kind)
+	if e.Outcome.Index < 0 {
+		where = e.Outcome.Set
+	}
 	if e.err != nil {
 		return where + ": " + e.err.Error()
 	}

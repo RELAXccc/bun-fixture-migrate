@@ -54,21 +54,29 @@ import (
 // deploy once more, and nothing happens.
 //
 // So Apply, running under bun's migrator, first looks for that record: the
-// newest row of the migrations table, if it carries this migration's name and
-// was written in the last minute, which is what bun's default mode has just
-// done. If the change set then fails, that row and no other is deleted. A
-// migrator that records on success has made no such row, and a record another
-// process writes while this one runs is not the row found before it ran, so
-// neither is touched. The one exception is RunMigration re-running the newest
-// migration, whose record bun updates in place; after a failure the next
-// migrate runs it again and finds its changes made. The error says whether a
-// record was deleted. The name is the one bun derived from the migration's
-// file name; see WithMigrationName.
+// rows of the migrations table that carry this migration's name, were written
+// in the last minute, and are newer than every other migration's record, which
+// is what bun's default mode has just done -- one row, or one per replica that
+// started the migration at the same moment without bun's Lock. If the change
+// set then fails, those rows and no others are deleted. A migrator that records
+// on success has made no such row, and a record another process writes while
+// this one runs is not among the rows found before it ran, so neither is
+// touched. A replica's record deleted along with this one's, of a run that
+// succeeds, leaves the migration pending with its changes made; the next
+// migrate runs it again and finds every change made. So does RunMigration
+// re-running the newest migration, whose record bun updates in place. The
+// error says whether a record was deleted. The name is the one bun derived
+// from the migration's file name; see WithMigrationName.
+//
+// Two replicas starting together are best kept apart by bun's Lock, or by
+// building the migrator WithUpsert(true), which keeps one record per name;
+// either way only one record of a run is ever there to take back.
 func Apply(ctx context.Context, db bun.IDB, set fixturechange.Set, opts ...Option) error {
 	o := newOptions(opts)
 	if o.migration == "" {
 		o.migration = migrationFromStack()
 	}
+	o.nested = inCallersTx(db)
 	rec := findRecord(ctx, db, set, o)
 	err := db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		return run(ctx, tx, set, false, o)
@@ -101,18 +109,43 @@ const advisoryLock int64 = 0x62666d0001
 // next migrate runs Apply again and every change it finds already made is
 // "unchanged".
 func Revert(ctx context.Context, db bun.IDB, set fixturechange.Set, opts ...Option) error {
+	o := newOptions(opts)
+	o.nested = inCallersTx(db)
 	return db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		return run(ctx, tx, set, true, newOptions(opts))
+		return run(ctx, tx, set, true, o)
 	})
+}
+
+// inCallersTx says whether db is a transaction somebody else began, which a
+// change set runs in a savepoint of.
+func inCallersTx(db bun.IDB) bool {
+	switch db.(type) {
+	case bun.Tx, *bun.Tx:
+		return true
+	}
+	return false
 }
 
 func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o options) error {
 	if err := Validate(set); err != nil {
 		return err
 	}
-	restore, err := session(ctx, tx)
+	restore, lockTimeout, err := session(ctx, tx)
 	if err != nil {
 		return err
+	}
+	if err := rowSecurity(ctx, tx, set, revert); err != nil {
+		return err
+	}
+	// Waiting for another replica's change set is not the wait lock_timeout
+	// is about, whether the set's or one the session has from the DSN. Inside
+	// a caller's transaction the caller's lock_timeout stays: the caller may
+	// hold locks already, as plan does, and set it to bound how long it keeps
+	// them while it waits.
+	if !o.nested {
+		if _, err := tx.ExecContext(ctx, "SELECT set_config('lock_timeout', '0', true)"); err != nil {
+			return fmt.Errorf("set lock_timeout to 0: %w", err)
+		}
 	}
 	// One change set at a time, whoever runs it: two replicas of an
 	// application migrating at the same start-up would otherwise both find a
@@ -121,11 +154,12 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(?)", advisoryLock); err != nil {
 		return fmt.Errorf("wait for another change set to finish: %w", err)
 	}
-	// Only now: waiting for another replica's change set is not the wait
-	// lock_timeout is about.
 	if set.LockTimeout != "" {
-		if restore, err = withLockTimeout(ctx, tx, set.LockTimeout, restore); err != nil {
-			return err
+		lockTimeout = set.LockTimeout
+	}
+	if set.LockTimeout != "" || !o.nested {
+		if _, err := tx.ExecContext(ctx, "SELECT set_config('lock_timeout', ?, true)", lockTimeout); err != nil {
+			return fmt.Errorf("set lock_timeout to %s: %w", lockTimeout, err)
 		}
 	}
 	if restore, err = withDeferredConstraints(ctx, tx, set, restore); err != nil {
@@ -147,7 +181,8 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 	}
 
 	r := &runner{tx: tx, set: set, revert: revert, dryRun: o.dryRun, refs: map[string]string{},
-		resync: map[string]bool{}, advanced: map[string]bool{}, types: map[string]map[string]colType{}}
+		resync: map[string]bool{}, advanced: map[string]bool{}, types: map[string]map[string]colType{},
+		sequences: map[string]string{}}
 	order := make([]int, len(set.Changes))
 	for i := range order {
 		order[i] = i
@@ -211,41 +246,97 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 // time.Time it becomes with an offset, so "2026-01-01 10:00:00" in a fixture
 // file is 10:00 UTC in the seeded database whatever the server's TimeZone. A
 // migration binding the same text has to read it the same way, and a date such
-// as 2026-01-02 has to be year-month-day. The settings are local to the
-// transaction; restore puts back what a caller's own transaction had, and a
-// rollback does that by itself.
-//
-// row_security is turned off as well, which makes PostgreSQL raise an error
-// instead of quietly filtering when a row-level security policy applies to
-// the role. Filtered, a policy that hides a row from UPDATE makes the update
-// change nothing, which reads as a row somebody edited and is skipped, and one
-// that hides the seed guard table's rows makes the whole set a no-op that bun
-// records as applied. A role the policies do not apply to -- the table's owner
-// without FORCE ROW LEVEL SECURITY, a superuser, one with BYPASSRLS -- notices
-// nothing.
-func session(ctx context.Context, tx bun.IDB) (func(context.Context) error, error) {
-	var tz, ds, rs string
-	if err := tx.QueryRowContext(ctx,
-		"SELECT current_setting('TimeZone'), current_setting('DateStyle'), current_setting('row_security')").
-		Scan(&tz, &ds, &rs); err != nil {
-		return nil, fmt.Errorf("read the session's settings: %w", err)
+// as 2026-01-02 has to be year-month-day. IntervalStyle is postgres, as when
+// the generator read the values: it decides how an interval such as
+// '-1 2:03:04' is read, and how one is spelled where intervals compare through
+// their text (see looseEquality). The settings are local to the transaction;
+// restore puts back what a caller's own transaction had, and a rollback does
+// that by itself. restore also puts back lock_timeout, which run changes, and
+// lockTimeout is the session's.
+func session(ctx context.Context, tx bun.IDB) (restore func(context.Context) error, lockTimeout string, err error) {
+	var tz, ds, is string
+	if err := tx.QueryRowContext(ctx, "SELECT current_setting('TimeZone'), current_setting('DateStyle'), "+
+		"current_setting('IntervalStyle'), current_setting('lock_timeout')").
+		Scan(&tz, &ds, &is, &lockTimeout); err != nil {
+		return nil, "", fmt.Errorf("read the session's settings: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, "SELECT set_config('TimeZone', 'UTC', true), "+
-		"set_config('DateStyle', 'ISO, YMD', true), set_config('row_security', 'off', true)"); err != nil {
-		return nil, fmt.Errorf("fix the session's settings: %w", err)
+		"set_config('DateStyle', 'ISO, YMD', true), set_config('IntervalStyle', 'postgres', true)"); err != nil {
+		return nil, "", fmt.Errorf("fix the session's settings: %w", err)
 	}
 	return func(ctx context.Context) error {
 		if _, err := tx.ExecContext(ctx, "SELECT set_config('TimeZone', ?, true), set_config('DateStyle', ?, true), "+
-			"set_config('row_security', ?, true)", tz, ds, rs); err != nil {
+			"set_config('IntervalStyle', ?, true), set_config('lock_timeout', ?, true)", tz, ds, is, lockTimeout); err != nil {
 			return fmt.Errorf("restore the session's settings: %w", err)
 		}
 		return nil
-	}, nil
+	}, lockTimeout, nil
+}
+
+// rowSecurity refuses a change set that a row-level security policy would
+// reach, before any of it runs. Filtered by a policy, an update of a row the
+// policy hides changes nothing, which reads as a row somebody edited and is
+// skipped; a seed guard table whose rows it hides makes the whole set a no-op
+// that bun records as applied; a child table whose rows it hides lets a delete
+// cascade into rows nobody counted.
+//
+// It looks at the tables the set reads and writes, the seed guard table, and
+// the tables whose foreign keys point at a table the set deletes from. A table
+// that only a trigger writes into is not among them: the policy applies to the
+// trigger's rows as to any other write, which is what the trigger's author
+// meant. Turning row_security off would have made those writes fail instead.
+func rowSecurity(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool) error {
+	deletes := map[string]bool{}
+	for _, c := range set.Changes {
+		// Revert turns an insert into a delete, and a delete into an insert.
+		if (c.Kind == fixturechange.Delete) != revert && c.Kind != fixturechange.Update {
+			deletes[c.Model] = true
+		}
+	}
+	var rows []string
+	var args []any
+	add := func(name string, deleted bool) {
+		q, err := quoteIdent(name)
+		if err != nil {
+			return // Validate has refused it already
+		}
+		rows = append(rows, "(?, ?)")
+		args = append(args, q, deleted)
+	}
+	for _, model := range sortedModels(set.Tables) {
+		add(set.Tables[model].Name, deletes[model])
+	}
+	if set.SeedGuardTable != "" {
+		add(set.SeedGuardTable, false)
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	// A table that does not exist is left to the statement that needs it,
+	// which fails with PostgreSQL's own words.
+	query := `WITH t (rel, deleted) AS (SELECT to_regclass(n), d FROM (VALUES ` + strings.Join(rows, ", ") + `) v (n, d))
+SELECT DISTINCT rel::text FROM (
+  SELECT rel FROM t WHERE rel IS NOT NULL
+  UNION ALL
+  SELECT con.conrelid FROM pg_constraint con JOIN t ON con.confrelid = t.rel WHERE t.deleted AND con.contype = 'f'
+) s WHERE row_security_active(rel) ORDER BY 1`
+	var active []string
+	if err := tx.NewRaw(query, args...).Scan(ctx, &active); err != nil {
+		return fmt.Errorf("look for row-level security on the tables of the change set: %w", err)
+	}
+	if len(active) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s: row-level security is active on %s for the role running the migration: a row-level "+
+		"security policy applies to it, which would hide rows from the change set or stop its changes, so nothing "+
+		"was changed. Run migrations as the tables' owner while they are not FORCE ROW LEVEL SECURITY, or as a "+
+		"role with BYPASSRLS", set.Name, strings.Join(active, ", "))
 }
 
 // privilege adds what to do to an error PostgreSQL raised because the role may
-// not do something. With row_security off, that is also how a row-level
-// security policy that applies to the role makes itself known.
+// not do something. A row-level security policy on a table a trigger writes
+// into makes itself known the same way, when the trigger's row does not pass
+// it.
 func privilege(err error) error {
 	if pgerr.State(err) != pgerr.InsufficientPrivilege {
 		return err
@@ -253,29 +344,6 @@ func privilege(err error) error {
 	return fmt.Errorf("%w. The role running the migration lacks a privilege, or a row-level security policy "+
 		"applies to it, which would hide rows from the change set or stop its changes: run migrations as the "+
 		"tables' owner or a role with BYPASSRLS, or grant what is missing. Nothing was changed", err)
-}
-
-// withLockTimeout sets lock_timeout for the rest of the transaction, and
-// returns a restore that also puts the caller's value back.
-func withLockTimeout(ctx context.Context, tx bun.IDB, timeout string,
-	restore func(context.Context) error) (func(context.Context) error, error) {
-
-	var old string
-	if err := tx.QueryRowContext(ctx, "SELECT current_setting('lock_timeout')").Scan(&old); err != nil {
-		return nil, fmt.Errorf("read the session's lock_timeout: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, "SELECT set_config('lock_timeout', ?, true)", timeout); err != nil {
-		return nil, fmt.Errorf("set lock_timeout to %s: %w", timeout, err)
-	}
-	return func(ctx context.Context) error {
-		if err := restore(ctx); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, "SELECT set_config('lock_timeout', ?, true)", old); err != nil {
-			return fmt.Errorf("restore the session's lock_timeout: %w", err)
-		}
-		return nil
-	}, nil
 }
 
 // withDeferredConstraints makes every DEFERRABLE constraint wait for the end of
@@ -288,8 +356,9 @@ func withLockTimeout(ctx context.Context, tx bun.IDB, timeout string,
 // that does not hold fails the set like any other change, inside its
 // transaction, so bun's record is taken back as usual. A constraint that is
 // not DEFERRABLE is checked as it always is. Inside a caller's transaction the
-// constraints are immediate afterwards, which also checks whatever the caller
-// had left deferred.
+// check also covers whatever the caller had left deferred, and afterwards
+// every constraint is back in the mode it is declared with; see
+// deferredByDefault.
 func withDeferredConstraints(ctx context.Context, tx bun.IDB, set fixturechange.Set,
 	restore func(context.Context) error) (func(context.Context) error, error) {
 
@@ -298,11 +367,65 @@ func withDeferredConstraints(ctx context.Context, tx bun.IDB, set fixturechange.
 	}
 	return func(ctx context.Context) error {
 		if _, err := tx.ExecContext(ctx, "SET CONSTRAINTS ALL IMMEDIATE"); err != nil {
+			// A foreign key's check locks the row it points at, and waits
+			// for a session that holds it like any statement of the set.
+			if pgerr.State(err) == pgerr.LockNotAvailable {
+				limit := "the session's lock_timeout"
+				if set.LockTimeout != "" {
+					limit = "the lock timeout of " + set.LockTimeout
+				}
+				out := Outcome{Set: set.Name, Index: -1, Status: StatusFailed, Problem: ProblemLockTimeout,
+					Message: fmt.Sprintf("once every change was made, checking the constraints PostgreSQL defers "+
+						"waited for a lock another session held for longer than %s, so nothing was changed; the "+
+						"change set runs again on the next deploy", limit)}
+				return &ChangeError{Outcome: out, err: fmt.Errorf("%s: %w", out.Message, err)}
+			}
 			return fmt.Errorf("%s: once every change was made, a constraint did not hold, so nothing was "+
 				"changed: %w", set.Name, privilege(err))
 		}
+		if err := deferredByDefault(ctx, tx); err != nil {
+			return err
+		}
 		return restore(ctx)
 	}, nil
+}
+
+// deferredByDefault puts every constraint declared DEFERRABLE INITIALLY
+// DEFERRED back to deferred, after the check at the end of a change set made
+// them all immediate. Inside a caller's transaction -- plan simulating a deploy,
+// a test, a program of its own -- a later statement relying on such a
+// constraint, a child row inserted before its parent, would otherwise fail
+// where the deploy, which commits each migration, succeeds.
+//
+// PostgreSQL does not say which mode a caller had set a constraint to, so it
+// gets the mode it is declared with. SET CONSTRAINTS finds a constraint by its
+// name in its schema, and takes every constraint of that name there: a name
+// that one constraint declared INITIALLY DEFERRED shares with another that is
+// not is left immediate rather than defer the other one too. A schema the role
+// may not use is left out: SET CONSTRAINTS would refuse its name, and nothing
+// the role does reaches its tables.
+func deferredByDefault(ctx context.Context, tx bun.IDB) error {
+	var names string
+	if err := tx.QueryRowContext(ctx, `
+SELECT coalesce(string_agg(quote_ident(n.nspname) || '.' || quote_ident(c.conname), ', '
+                           ORDER BY n.nspname, c.conname), '')
+FROM (SELECT DISTINCT connamespace, conname FROM pg_constraint WHERE condeferrable AND condeferred) c
+JOIN pg_namespace n ON n.oid = c.connamespace
+WHERE NOT pg_is_other_temp_schema(n.oid) AND has_schema_privilege(n.oid, 'USAGE')
+  AND NOT EXISTS (SELECT 1 FROM pg_constraint o
+                  WHERE o.connamespace = c.connamespace AND o.conname = c.conname AND NOT o.condeferred)`).
+		Scan(&names); err != nil {
+		return fmt.Errorf("read the constraints declared INITIALLY DEFERRED: %w", err)
+	}
+	if names == "" {
+		return nil
+	}
+	// The names come from the catalog, quoted, and may hold a ? that bun
+	// would read as a placeholder in the text of the statement.
+	if _, err := tx.ExecContext(ctx, "SET CONSTRAINTS ? DEFERRED", bun.Safe(names)); err != nil {
+		return fmt.Errorf("defer the constraints declared INITIALLY DEFERRED again: %w", err)
+	}
+	return nil
 }
 
 // problem names the three materially different reasons a guarded statement
@@ -426,6 +549,9 @@ type runner struct {
 	advanced map[string]bool
 	// types holds, per model, the types of its table's columns, read once.
 	types map[string]map[string]colType
+	// sequences holds, per model, the sequence of its id column, "" for
+	// none, read once.
+	sequences map[string]string
 }
 
 func tableHasRows(ctx context.Context, tx bun.IDB, table string) (bool, error) {

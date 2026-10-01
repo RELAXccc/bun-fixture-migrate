@@ -35,4 +35,21 @@ func TestArrayLiteral(t *testing.T) {
 			t.Errorf("%s: %v, %v", in, ok, err)
 		}
 	}
+	// PostgreSQL stores none of these, and said so only at deploy time, or
+	// not at all: bun dropped the NUL and stored {ab}.
+	for in, want := range map[string]string{
+		`["a\u0000b"]`:             "NUL",
+		`[{"note": "x\u0000"}]`:    "",
+		`[[[[[[1]]]]]]`:            "",
+		`[[[[[[[1]]]]]]]`:          "at most 6 dimensions",
+		`[[]]`:                     "empty list inside a list",
+		`[[], []]`:                 "empty list inside a list",
+		`[]`:                       "",
+		`[[1, 2], ["x\u0000", 3]]`: "NUL",
+	} {
+		_, ok, err := arrayLiteral(in)
+		if !ok || (want == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), want)) {
+			t.Errorf("%s: %v, %v; want %q", in, ok, err, want)
+		}
+	}
 }

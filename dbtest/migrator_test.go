@@ -231,10 +231,10 @@ func TestAFailedMigrationOfAnEarlierVersionIsNotLeftRecorded(t *testing.T) {
 	}
 }
 
-// What a failing Apply takes back is bounded: the newest record of the table,
-// carrying this migration's name, written within the hour, and only through
-// the migrator's own *bun.DB. Anything else stays, because anything else is
-// not the record bun made a moment ago for this run.
+// What a failing Apply takes back is bounded: the records of this migration
+// newer than every other migration's, written within the minute, and only
+// through the migrator's own *bun.DB. Anything else stays, because anything
+// else is not a record bun made a moment ago for this run.
 func TestOnlyTheMigratorsFreshRecordIsTakenBack(t *testing.T) {
 	db := testDB(t)
 	seed(t, db)
@@ -282,6 +282,17 @@ func TestOnlyTheMigratorsFreshRecordIsTakenBack(t *testing.T) {
 	}
 	if got := scan[int64](t, db, "SELECT count(*) FROM bun_migrations"); got != 1 {
 		t.Fatalf("the other migration's record has to stay, %d rows left", got)
+	}
+
+	// Two replicas recorded it at the same start: both records go.
+	reset("INSERT INTO bun_migrations (name, group_id) VALUES ('20260101000000', 1)",
+		"INSERT INTO bun_migrations (name, group_id) VALUES ('"+name+"', 2)",
+		"INSERT INTO bun_migrations (name, group_id) VALUES ('"+name+"', 2)")
+	if err := apply(db); !errors.Is(err, fixtureapply.ErrRecordRemoved) {
+		t.Fatalf("expected the records taken back, got %v", err)
+	}
+	if count() != 0 {
+		t.Fatal("both fresh records should be gone")
 	}
 
 	for _, c := range []struct {
