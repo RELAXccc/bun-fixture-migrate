@@ -112,6 +112,10 @@ var fixtureChanges20260921120000PlanPrices = fixturechange.Set{
 }
 ```
 
+Values are Go string literals, and whatever the file's comments quote from the data, such as the key
+and reason of a refused row, has its control and invisible characters escaped: a value holding a line
+break cannot end a comment and become code in your migrations package.
+
 No ids in the `Key` maps, and `currency_id` is a name, not a number: rows are found by their
 natural key and references are resolved against the database the migration runs on, because ids
 drift between databases and names do not. The policy is written into the file, so changing the

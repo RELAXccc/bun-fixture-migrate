@@ -1,9 +1,11 @@
 package fixturemigrate
 
 import (
+	"go/ast"
 	"go/format"
 	"go/parser"
 	"go/token"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -96,4 +98,160 @@ func TestNames(t *testing.T) {
 			t.Errorf("VarName(%q) = %q, want %q", tc.in, got, tc.ident)
 		}
 	}
+}
+
+// hostile are strings a column can hold, and so a fixture file and, through
+// generate -from-db, production data: each would end a // comment and become
+// Go code in the application's migrations package, end a string literal, or
+// make a reviewer read something other than what the file holds.
+var hostile = []string{
+	"b\nfunc init() { panic(1) }\n//",
+	"x\r\nvar y = 1",
+	"x\rfunc init() { panic(1) }",
+	"*/ func init() {} /*",
+	"`; func init() {}; var _ = `",
+	`"; func init() {}; var _ = "`,
+	"a\u2028func init() {}\u2029",
+	"\u202e}{ )(tini cnuf",
+	"\ufeffbom",
+	"\x00nul",
+	"\xff\xfe not UTF-8",
+	"tab\there",
+	"\x1b[31mred\x1b[0m",
+	"\x85next line",
+}
+
+// hostileResult carries s in every value, refusal and name the file holds.
+// PostgreSQL cannot store a NUL, so a value holding one is refused before
+// anything is written; the comments still get it.
+func hostileResult(value, text string) *Result {
+	return &Result{
+		Tables: fixturechange.Tables{
+			"Plan":     {Name: "plans", ID: "id", Key: "name", Where: "note IS DISTINCT FROM 'x'"},
+			"Currency": {Name: "currencies", ID: "id", Key: "code"},
+		},
+		Changes: []fixturechange.Change{
+			{Model: "Plan", Kind: fixturechange.Update,
+				Key: fixturechange.Values{"name": fixturechange.Lit(value)},
+				Old: fixturechange.Values{"note": fixturechange.Lit(value), "currency_id": fixturechange.RefTo("Currency", value)},
+				New: fixturechange.Values{"note": fixturechange.Lit(value + "!"), "currency_id": fixturechange.Null()}},
+		},
+		Refusals: []Refusal{{Model: "Plan", Key: "Plan/name=" + text, Reason: "renamed from " + text}},
+		Head:     text,
+		Base:     text,
+	}
+}
+
+// checkDeclarations fails unless src parses and declares exactly what a
+// generated migration declares: its imports, one init and the change set.
+func checkDeclarations(t *testing.T, src []byte, ident string) {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), "gen.go", src, parser.AllErrors|parser.ParseComments)
+	if err != nil {
+		t.Fatalf("the generated file does not parse: %v\n%s", err, src)
+	}
+	var decls []string
+	for _, decl := range file.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			decls = append(decls, "func "+d.Name.Name)
+			if len(d.Body.List) != 1 {
+				t.Fatalf("init holds %d statements:\n%s", len(d.Body.List), src)
+			}
+		case *ast.GenDecl:
+			if d.Tok == token.IMPORT {
+				continue
+			}
+			for _, spec := range d.Specs {
+				for _, name := range spec.(*ast.ValueSpec).Names {
+					decls = append(decls, d.Tok.String()+" "+name.Name)
+				}
+			}
+		}
+	}
+	if got, want := strings.Join(decls, "; "), "func init; var "+ident; got != want {
+		t.Fatalf("the generated file declares %q, want %q:\n%s", got, want, src)
+	}
+}
+
+// Nothing a value, a refused row or a revision name holds gets out of the
+// literal or the comment it is written into.
+func TestRenderKeepsHostileTextInItsPlace(t *testing.T) {
+	cfg := testConfig(t)
+	for _, h := range hostile {
+		value := h
+		if strings.ContainsRune(value, 0) {
+			value = "safe"
+		}
+		res := hostileResult(value, h)
+		src, err := Render(cfg, "x", "20260921120000", res)
+		if err != nil {
+			t.Fatalf("%q: %v", h, err)
+		}
+		checkDeclarations(t, src, VarName("20260921120000", "x"))
+		got, _, err := ReadChangeSet(src)
+		if err != nil {
+			t.Fatalf("%q: %v", h, err)
+		}
+		if !reflect.DeepEqual(got.Changes, res.Changes) || !reflect.DeepEqual(got.Tables, res.Tables) {
+			t.Fatalf("%q reads back as\n%+v\nnot\n%+v", h, got.Changes, res.Changes)
+		}
+		for _, line := range strings.Split(string(src), "\n") {
+			if strings.Contains(line, "panic(") || strings.HasPrefix(strings.TrimSpace(line), "var y") {
+				if !strings.HasPrefix(strings.TrimSpace(line), "//") && !strings.Contains(line, "fixturechange.") {
+					t.Fatalf("%q escaped into code: %q", h, line)
+				}
+			}
+		}
+	}
+}
+
+func TestRenderRefusesANameThatIsNotGo(t *testing.T) {
+	for _, field := range []string{"package", "migrator"} {
+		cfg := testConfig(t)
+		bad := "migrations\nfunc init() { panic(1) }"
+		if field == "package" {
+			cfg.Package = bad
+		} else {
+			cfg.Migrator = bad
+		}
+		res := compute(t, base, replace(t, base, "      price_cents: 2000\n", "      price_cents: 2500\n"))
+		if _, err := Render(cfg, "x", "20260921120000", res); err == nil || !strings.Contains(err.Error(), "not a Go identifier") {
+			t.Fatalf("%s: %v", field, err)
+		}
+	}
+}
+
+// Whatever a value or a comment holds, the file Render writes declares only
+// its own and reads back as the set it runs.
+func FuzzRenderReadsBack(f *testing.F) {
+	for _, h := range hostile {
+		f.Add(h, h)
+	}
+	f.Add(`{"a":"b"}`, "HEAD:fixture.yml")
+	cfg := &Config{Fixture: "fixture.yml", Out: "migrations", Models: map[string]*Model{
+		"Plan": {Table: "plans", Key: []string{"name"}},
+	}}
+	if err := cfg.Prepare(); err != nil {
+		f.Fatal(err)
+	}
+	ident := VarName("20260921120000", "x")
+	f.Fuzz(func(t *testing.T, value, text string) {
+		res := hostileResult(value, text)
+		src, err := Render(cfg, "x", "20260921120000", res)
+		if err != nil {
+			if !strings.ContainsRune(value, 0) {
+				t.Fatalf("%q: %v", value, err)
+			}
+			return
+		}
+		checkDeclarations(t, src, ident)
+		got, ok, err := ReadChangeSet(src)
+		if err != nil || !ok {
+			t.Fatalf("%v %v\n%s", ok, err, src)
+		}
+		if !reflect.DeepEqual(got.Changes, res.Changes) || !reflect.DeepEqual(got.Tables, res.Tables) {
+			t.Fatalf("reads back as\n%+v\nnot\n%+v", got.Changes, res.Changes)
+		}
+	})
 }
