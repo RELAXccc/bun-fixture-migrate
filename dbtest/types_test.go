@@ -548,6 +548,102 @@ func TestTypesTimestampSpellings(t *testing.T) {
 	}
 }
 
+type TyJSON struct {
+	bun.BaseModel `bun:"table:ty_json"`
+
+	ID   int64          `bun:"id,pk"`
+	Name string         `bun:"name,notnull"`
+	Doc  map[string]any `bun:"doc,type:jsonb"`
+	Raw  map[string]any `bun:"raw,type:json"`
+	AnyV any            `bun:"anyv,type:jsonb"`
+}
+
+// jsonb through map[string]any, the documented idiom: a nested timestamp is
+// the time.Time yaml.v3 makes of it, marshalled by encoding/json; a number is
+// a float64; a key is as written. A top-level string an any field holds is a
+// JSON string. ~ is the JSON null to these fields and NULL to a pointer, and
+// is a finding. An export reads back as the database, numbers and all, or is
+// refused where nothing would.
+func TestTypesJSONThroughAMap(t *testing.T) {
+	l := newLab(t, map[string]*fixturemigrate.Model{"TyJSON": {Table: "ty_json", Key: []string{"name"}}}, "ty_json",
+		[]string{"DROP TABLE IF EXISTS ty_json",
+			"CREATE TABLE ty_json (id bigint PRIMARY KEY, name text NOT NULL UNIQUE, doc jsonb, raw json, anyv jsonb)"},
+		`SELECT string_agg(concat_ws('|', name, coalesce(doc::text, '<NULL>'), coalesce(raw::jsonb::text, '<NULL>'),
+			coalesce(anyv::text, '<NULL>')), E'\n' ORDER BY name) FROM ty_json`,
+		(*TyJSON)(nil))
+
+	const v1 = `- model: TyJSON
+  rows:
+    - {id: 1, name: a, doc: {k: 1}, raw: {k: 1}, anyv: 1}
+`
+	l.seed(v1)
+	l.check(v1)
+	l.roundTrip()
+
+	v2 := v1 + `    - id: 2
+      name: b
+      doc: {launch: 2026-01-01, at: 2026-01-01T10:00:00+02:00, nanos: 2026-01-01 10:00:00.1234567, big: 123456789012345678901234567890, prec: 0.1234567890123456789, 017: 017, bin: !!binary SGk=, list: [2026-01-02, 1.50]}
+      raw: {b: 1.50, a: [1, 2.5]}
+      anyv: hello
+`
+	l.fidelity(v1, v2)
+
+	l.refused(v1+"    - {id: 2, name: b, doc: ~, raw: {}, anyv: 1}\n",
+		"doc is null, which in a jsonb column is the JSON null when the model's field is a map")
+
+	// Values written by SQL, as an admin UI writes them.
+	// jsonb keeps the scale a number was written with, and the export and
+	// a seed of it do not: 1.0 and 1 are one value to jsonb and to the
+	// application, so that is how they are compared.
+	l.seed(v1)
+	run(t, l.db, `INSERT INTO ty_json VALUES (2, 'sql', '{"a": 1.0, "b": 1.50, "c": [1.0]}', '{"x": 2.0}', '"str"')`,
+		"DROP TABLE IF EXISTS ty_json_was", "CREATE TABLE ty_json_was AS SELECT * FROM ty_json")
+	data, err := l.export()
+	if err != nil {
+		t.Fatal(err)
+	}
+	export := string(data)
+	if !strings.Contains(export, `doc: {"a": 1, "b": 1.5, "c": [1]}`) || !strings.Contains(export, `anyv: "str"`) {
+		t.Fatalf("numbers are canonical and a JSON string is a YAML string:\n%s", export)
+	}
+	l.check(export)
+	l.seed(export)
+	if same := scan[bool](t, l.db, `SELECT bool_and(w.doc = j.doc AND w.raw::jsonb = j.raw::jsonb AND w.anyv = j.anyv)
+		FROM ty_json_was w JOIN ty_json j USING (id)`); !same {
+		t.Fatalf("the export does not load back as the database:\n%s", export)
+	}
+	run(t, l.db, "DROP TABLE ty_json_was")
+	for _, c := range []struct{ set, want string }{
+		{`anyv = '"true"'`, "a string that is itself JSON"},
+		{`anyv = 'null'`, "null, which a fixture file can only write as ~"},
+		{`doc = NULL`, "is NULL, which a fixture file can only write as ~"},
+		{`doc = '{"big": 123456789012345678901234567890}'`, "more digits than the float64"},
+	} {
+		l.seed(v1)
+		run(t, l.db, "UPDATE ty_json SET "+c.set)
+		if _, err := l.export(); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: expected the export to be refused with %q, got %v", c.set, c.want, err)
+		}
+	}
+	// Under null_default: warn, NULL is written as ~ with the hazard named.
+	l.cfg.Policy.NullDefault = fixturemigrate.ModeWarn
+	l.seed(v1)
+	run(t, l.db, "UPDATE ty_json SET doc = NULL")
+	data, err = l.export()
+	if err != nil || !strings.Contains(string(data), "doc: ~  # ROUND-TRIP HAZARD: a map, slice or any field loads ~ as the JSON null") {
+		t.Fatalf("%v\n%s", err, data)
+	}
+	l.cfg.Policy.NullDefault = fixturemigrate.ModeError
+}
+
+type TyBytes struct {
+	bun.BaseModel `bun:"table:ty_bytes"`
+
+	ID   int64  `bun:"id,pk"`
+	Name string `bun:"name,notnull"`
+	Data []byte `bun:"data"`
+}
+
 type TyBin struct {
 	bun.BaseModel `bun:"table:ty_bin"`
 
@@ -555,6 +651,42 @@ type TyBin struct {
 	Name string `bun:"name,notnull"`
 	Data string `bun:"data,type:bytea"`
 	V    string `bun:"v"`
+}
+
+// A []byte field loads only from a sequence of byte values, so that is what a
+// sequence in a bytea column means and what an export writes. Before, the
+// sequence's JSON text was cast to bytea, and the export wrote "\\x48..."; a
+// !!binary scalar was carried as its base64 text, where a string field gets
+// the bytes it encodes.
+func TestTypesBytea(t *testing.T) {
+	l := newLab(t, map[string]*fixturemigrate.Model{"TyBytes": {Table: "ty_bytes", Key: []string{"name"}}}, "ty_bytes",
+		[]string{"DROP TABLE IF EXISTS ty_bytes",
+			"CREATE TABLE ty_bytes (id bigint PRIMARY KEY, name text NOT NULL UNIQUE, data bytea)"},
+		`SELECT string_agg(concat_ws('|', name, data), E'\n' ORDER BY name) FROM ty_bytes`, (*TyBytes)(nil))
+	const v1 = `- model: TyBytes
+  rows:
+    - {id: 1, name: hello, data: [72, 101, 108, 108, 111]}
+`
+	l.seed(v1)
+	l.check(v1)
+	if export := l.roundTrip(); !strings.Contains(export, "data: [72, 101, 108, 108, 111]") {
+		t.Fatalf("bytea is written as the bytes:\n%s", export)
+	}
+	v2 := `- model: TyBytes
+  rows:
+    - {id: 1, name: hello, data: [72, 105]}
+    - {id: 2, name: bin, data: [0, 255]}
+    - {id: 3, name: empty, data: []}
+`
+	l.fidelity(v1, v2)
+	l.refused(v1+"    - {id: 2, name: big, data: [256]}\n", "which is a sequence a []byte field cannot hold")
+
+	b := newLab(t, map[string]*fixturemigrate.Model{"TyBin": {Table: "ty_bin", Key: []string{"name"}}}, "ty_bin",
+		[]string{"DROP TABLE IF EXISTS ty_bin",
+			"CREATE TABLE ty_bin (id bigint PRIMARY KEY, name text NOT NULL UNIQUE, data bytea, v text)"},
+		`SELECT string_agg(concat_ws('|', name, data, v), E'\n' ORDER BY name) FROM ty_bin`, (*TyBin)(nil))
+	b2 := tyBin1 + "    - {id: 2, name: b, data: !!binary SGVsbG8=, v: x}\n"
+	b.fidelity(tyBin1, b2)
 }
 
 const tyBin1 = "- model: TyBin\n  rows:\n    - {id: 1, name: a, data: x, v: x}\n"
@@ -576,6 +708,128 @@ func TestTypesBinaryTagInATextColumn(t *testing.T) {
 		t.Skip("the fixture reader still takes a !!binary scalar's base64 text for what a string field gets")
 	}
 	b.fidelity(b1, b3)
+}
+
+type TyText struct {
+	bun.BaseModel `bun:"table:ty_text"`
+
+	ID   int64  `bun:"id,pk"`
+	Name string `bun:"name,notnull"`
+	V    string `bun:"v"`
+}
+
+// An export escapes everything YAML would refuse or fold, and writes text
+// that looks like a template as a template that evaluates to it. It parses
+// its output back before it returns it. Before, NEL became a space on the
+// next load, DEL, the C1 controls and U+FFFE made the file unparseable, and
+// "Hello {{ name }}" could not be exported at all.
+func TestTypesExportEscaping(t *testing.T) {
+	l := newLab(t, map[string]*fixturemigrate.Model{"TyText": {Table: "ty_text", Key: []string{"name"}}}, "ty_text",
+		[]string{"DROP TABLE IF EXISTS ty_text",
+			"CREATE TABLE ty_text (id bigint PRIMARY KEY, name text NOT NULL UNIQUE, v text NOT NULL)"},
+		`SELECT string_agg(concat_ws('|', name, encode(convert_to(v, 'UTF8'), 'hex')), E'\n' ORDER BY name) FROM ty_text`,
+		(*TyText)(nil))
+	run(t, l.db, `INSERT INTO ty_text VALUES
+		(1, 'nel', 'a' || chr(133) || 'b'), (2, 'del', 'a' || chr(127) || 'b'), (3, 'c1', 'a' || chr(150) || 'b'),
+		(4, 'fffe', 'a' || chr(65534) || 'b'), (5, 'ls', 'a' || chr(8232) || 'b' || chr(8233)),
+		(6, 'bom', chr(65279) || 'x'), (7, 'controls', E'\t\n\r' || chr(1) || chr(27)),
+		(8, 'quotes', E'"a" \\ ''b'''), (9, 'emoji', 'snow ☃ 𝄞'), (10, 'yes', 'yes'), (11, 'spaces', '  x  ')`)
+	l.roundTrip()
+
+	// Text that looks like a template: dbfixture stores it as it is.
+	run(t, l.db, `INSERT INTO ty_text VALUES (12, 'tpl', 'Hello {{ name }}'), (13, 'gotpl', 'Hi {{ .Name }} "x"'),
+		(14, 'now', '{{ now }}')`)
+	want := l.current()
+	data, err := l.export()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `v: "{{ \"Hello {{ name }}\" }}"`) {
+		t.Fatalf("text that looks like a template is written as a string literal in one:\n%s", data)
+	}
+	if got := l.seed(string(data)); got != want {
+		t.Fatalf("dbfixture does not load the export back as the database\n got %s\nwant %s\n%s", got, want, data)
+	}
+}
+
+type TyFloat struct {
+	bun.BaseModel `bun:"table:ty_float"`
+
+	ID   int64   `bun:"id,pk"`
+	Name string  `bun:"name,notnull"`
+	D    float64 `bun:"d"`
+	R    float32 `bun:"r"`
+	At   string  `bun:"at,type:timestamptz,nullzero"`
+}
+
+// NaN and infinity are exported as YAML spells them for a float, and a
+// timestamp's infinity as text, with a note that a time.Time cannot hold it.
+// A numeric NaN, which no spelling loads alike into a string and a float64,
+// is refused. Before, NaN and Infinity were plain strings no float64 loads.
+func TestTypesSpecialNumbersExport(t *testing.T) {
+	l := newLab(t, map[string]*fixturemigrate.Model{"TyFloat": {Table: "ty_float", Key: []string{"name"}}}, "ty_float",
+		[]string{"DROP TABLE IF EXISTS ty_float",
+			"CREATE TABLE ty_float (id bigint PRIMARY KEY, name text NOT NULL UNIQUE, d float8 NOT NULL, r real NOT NULL, at timestamptz)"},
+		`SELECT string_agg(concat_ws('|', name, d, r, at), E'\n' ORDER BY name) FROM ty_float`, (*TyFloat)(nil))
+	run(t, l.db, `INSERT INTO ty_float VALUES (1, 'nan', 'NaN', 'Infinity', NULL), (2, 'inf', '-Infinity', 1.5, 'infinity'),
+		(3, 'plain', 0.1, 1e-7, '2026-01-01 10:00:00+00')`)
+	export := l.roundTrip()
+	for _, line := range []string{"d: .nan", "r: .inf", "d: -.inf", `at: "infinity"  # a time.Time field cannot hold infinity`} {
+		if !strings.Contains(export, line) {
+			t.Fatalf("missing %q:\n%s", line, export)
+		}
+	}
+	run(t, l.db, "ALTER TABLE ty_float ADD COLUMN n numeric", "UPDATE ty_float SET n = 'NaN' WHERE name = 'nan'")
+	if _, err := l.export(); err == nil || !strings.Contains(err.Error(), "no spelling reads back as itself") {
+		t.Fatalf("a numeric NaN is refused: %v", err)
+	}
+}
+
+type TyGrid struct {
+	bun.BaseModel `bun:"table:ty_grid"`
+
+	ID   int64  `bun:"id,pk"`
+	Name string `bun:"name,notnull"`
+}
+
+// A multidimensional array written by SQL is exported as nested sequences and
+// read back as the array it was; one whose lower bound is not 1 has no YAML
+// spelling and is refused. Before, the nested sequence came back as an
+// invalid value, and [0:1]={7,8} was exported as [7, 8].
+func TestTypesMultidimensionalArrays(t *testing.T) {
+	l := newLab(t, map[string]*fixturemigrate.Model{"TyGrid": {Table: "ty_grid", Key: []string{"name"}}}, "ty_grid",
+		[]string{"DROP TABLE IF EXISTS ty_grid",
+			"CREATE TABLE ty_grid (id bigint PRIMARY KEY, name text NOT NULL UNIQUE, grid integer[], words text[])"},
+		`SELECT string_agg(concat_ws('|', name, grid, words), E'\n' ORDER BY name) FROM ty_grid`, (*TyGrid)(nil))
+	run(t, l.db, `INSERT INTO ty_grid VALUES (1, 'g', '{{1,2},{3,4}}', '{{a,"b c"},{NULL,"{d}"}}'),
+		(2, 'cube', '{{{1},{2}},{{3},{4}}}', '{}'), (3, 'flat', '{1,NULL}', '{x}')`)
+	data, err := l.export()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "grid: [[1, 2], [3, 4]]") || !strings.Contains(string(data), `words: [["a", "b c"], [null, "{d}"]]`) {
+		t.Fatalf("a 2-D array is a nested sequence:\n%s", data)
+	}
+	l.check(string(data))
+
+	run(t, l.db, `INSERT INTO ty_grid VALUES (4, 'lb', '[0:1]={7,8}', '{}')`)
+	if _, err := l.export(); err == nil || !strings.Contains(err.Error(), "lower bound is not 1") {
+		t.Fatalf("an array with another lower bound is refused: %v", err)
+	}
+	// The file and the database disagree about it, as they should: a seed
+	// of [7, 8] is numbered from 1.
+	head := l.read(string(data) + "    - {id: 4, name: lb, grid: [7, 8], words: []}\n")
+	readOnlyDo(t, l.db, func(tx bun.Tx, tables map[string]*dbschema.Table) {
+		database, err := fixturemigrate.DatabaseSnapshot(context.Background(), tx, l.cfg, tables,
+			fixturemigrate.SnapshotOptions{Columns: head.Columns, Order: head.Order})
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := fixturemigrate.Check(l.cfg, database, head)
+		if err != nil || len(res.Changes) != 1 || !strings.Contains(strings.Join(res.Lines(), "\n"), "[0:1]={7,8}") {
+			t.Fatalf("%v\n%s", err, strings.Join(res.Lines(), "\n"))
+		}
+	})
 }
 
 type TyTag struct {

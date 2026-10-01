@@ -308,16 +308,21 @@ func TestFindingsByKindGroupsAndSorts(t *testing.T) {
 	}
 }
 
-// A value dbfixture would read as a template does not load back as itself.
-func TestExportRefusesAValueDbfixtureWouldEvaluate(t *testing.T) {
+// A value dbfixture would read as a template is written as a template whose
+// only action is that value as a string literal, which dbfixture evaluates to
+// the value itself.
+func TestExportWritesTemplateLikeTextAsALiteralTemplate(t *testing.T) {
 	cfg := testConfig(t)
 	state := snap(t, cfg, base, "the database")
 	for _, e := range state.Entries["Currency"] {
-		e.Cells["symbol"] = fixturechange.Lit("{{ now }}")
+		e.Cells["symbol"] = fixturechange.Lit(`Hello {{ .Name }} "x"`)
 	}
-	_, err := Export(cfg, state, testTables(), nil)
-	if err == nil || !strings.Contains(err.Error(), "Currency.symbol") {
-		t.Fatalf("expected the value to be refused, got %v", err)
+	out, err := Export(cfg, state, testTables(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `symbol: "{{ \"Hello {{ .Name }} \\\"x\\\"\" }}"`) {
+		t.Fatalf("the value is not written as a literal template:\n%s", out)
 	}
 }
 
