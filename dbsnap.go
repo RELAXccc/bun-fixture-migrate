@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
@@ -29,6 +30,26 @@ type SnapshotOptions struct {
 type rawRow struct {
 	id     string
 	values map[string]fixturechange.Value
+}
+
+// refValue is what a reference to this row carries: its ref column, or its id
+// when the ref column is the id. A row without an id cannot be pointed at,
+// and nor can one whose ref column is NULL or itself a reference.
+func (r *rawRow) refValue(m *Model) (string, bool) {
+	if r.id == "" {
+		return "", false
+	}
+	if m.Ref == m.ID {
+		return r.id, true
+	}
+	if _, isRef := m.References[m.Ref]; isRef {
+		return "", false
+	}
+	v, ok := r.values[m.Ref]
+	if !ok || v.IsNull {
+		return "", false
+	}
+	return v.Lit, true
 }
 
 // DatabaseSnapshot reads the master data out of a database.
@@ -75,31 +96,51 @@ func DatabaseSnapshot(ctx context.Context, db bun.IDB, cfg *Config, tables map[s
 		snap.Columns[model] = cols
 	}
 
-	// Second pass, in dependency order: resolve the reference columns, build
-	// the natural key out of the resolved values so it matches the fixture
-	// side, and give every row an anchor. A model's targets are finished
-	// before it is reached, which is what makes the single pass enough.
+	// Second pass: what every row is called by the rows that point at it, for
+	// every model before any reference is resolved. A row can point at a row
+	// of its own model that comes later in id order -- a tree whose root was
+	// added after its leaves -- and, in the order a caller passes, at a model
+	// that comes later.
 	refValues := map[string]map[string]string{} // model -> id -> ref value
 	for _, model := range order {
 		m := cfg.Models[model]
 		refValues[model] = map[string]string{}
+		for _, r := range raw[model] {
+			if v, ok := r.refValue(m); ok {
+				refValues[model][r.id] = v
+			}
+		}
+	}
+
+	// Third pass: resolve the reference columns, build the natural key out of
+	// the resolved values so it matches the fixture side, and give every row
+	// an anchor. Columns are taken in name order, so the error a row with two
+	// dangling references gets is the same on every run.
+	for _, model := range order {
+		m := cfg.Models[model]
 		taken := map[string]bool{}
 		for _, r := range raw[model] {
 			e := &Entry{ID: r.id, Cells: fixturechange.Values{}}
-			for col, v := range r.values {
+			for _, col := range sortedColumns(r.values) {
+				v := r.values[col]
 				target, isRef := m.References[col]
-				if !isRef || v.IsNull || isZero(v) {
+				if !isRef || v.IsNull {
 					e.Cells[col] = v
 					continue
 				}
 				ref, ok := refValues[target][v.Lit]
-				if !ok {
+				switch {
+				case ok:
+					e.Cells[col] = fixturechange.RefTo(target, ref)
+				case isZero(v):
+					// 0 or "" points at no row, unless a row has that id.
+					e.Cells[col] = v
+				default:
 					return nil, fmt.Errorf(
 						"%s: %s = %s points at a row of %s that this snapshot does not hold; "+
 							"either that row is outside the model's where clause or the foreign key is dangling",
 						model, col, v.Lit, target)
 				}
-				e.Cells[col] = fixturechange.RefTo(target, ref)
 			}
 			key, err := keyOf(cfg, m, model, e.Cells)
 			if err != nil {
@@ -107,11 +148,6 @@ func DatabaseSnapshot(ctx context.Context, db bun.IDB, cfg *Config, tables map[s
 			}
 			e.Key, e.KeyStr = key, keyString(model, key)
 			e.Anchor = uniqueAnchor(anchorOf(key), r.id, taken)
-			if r.id != "" {
-				if v, ok := e.Cells[m.Ref]; ok && v.Ref == nil && !v.IsNull {
-					refValues[model][r.id] = v.Lit
-				}
-			}
 			snap.Entries[model] = append(snap.Entries[model], e)
 		}
 		snap.reportDuplicates(model)
@@ -208,15 +244,31 @@ func selectQuery(cfg *Config, m *Model, table *dbschema.Table, cols []string) (s
 		query += " WHERE (" + m.Where + ")"
 	}
 	var orderBy []string
+	ordered := map[string]bool{}
 	if hasID {
 		orderBy = append(orderBy, idQuoted)
+		ordered[m.ID] = true
 	}
-	for _, col := range m.Key {
+	for _, col := range m.keyColumns() {
 		q, err := quoteIdent(col)
 		if err != nil {
 			return "", false, fmt.Errorf("key column %w", err)
 		}
-		orderBy = append(orderBy, q)
+		if !ordered[col] {
+			orderBy = append(orderBy, q)
+			ordered[col] = true
+		}
+	}
+	// Without an id nothing says two rows sharing a key, or a key_any_of
+	// group that is unset in both, are not equal, and PostgreSQL may return
+	// such rows in either order. Every other column, as the text it is read
+	// as, settles it, so two runs read the same order.
+	if !hasID {
+		for i, col := range cols {
+			if !ordered[col] {
+				orderBy = append(orderBy, strconv.Itoa(i+1))
+			}
+		}
 	}
 	if len(orderBy) > 0 {
 		query += " ORDER BY " + strings.Join(orderBy, ", ")

@@ -299,6 +299,38 @@ func TestVariantASelfReferencingTree(t *testing.T) {
 	}.run(t)
 }
 
+// A tree whose root came after its leaves: the database returns a child
+// before its parent, in id order. It has to be read all the same, checked
+// against its file, and exported in an order dbfixture can load.
+func TestVariantATreeWhoseParentsCameLater(t *testing.T) {
+	variant{
+		ddl: []string{"DROP TABLE IF EXISTS v_categories",
+			"CREATE TABLE v_categories (id bigint PRIMARY KEY, name text UNIQUE NOT NULL, " +
+				"parent_id bigint REFERENCES v_categories)"},
+		models: []any{(*VCategory)(nil)},
+		config: `models:
+  VCategory:
+    table: v_categories
+    key: [name]
+    references: {parent_id: VCategory}
+`,
+		old: `- model: VCategory
+  rows:
+    - {_id: root, id: 2, name: root, parent_id: ~}
+    - {_id: leaf, id: 1, name: leaf, parent_id: '{{ $.VCategory.root.ID }}'}
+`,
+		next: `- model: VCategory
+  rows:
+    - {_id: root, id: 2, name: root, parent_id: ~}
+    - {_id: top, id: 9, name: top, parent_id: ~}
+    - {_id: branch, id: 5, name: branch, parent_id: '{{ $.VCategory.top.ID }}'}
+    - {_id: leaf, id: 1, name: leaf, parent_id: '{{ $.VCategory.branch.ID }}'}
+    - {_id: twig, id: 3, name: twig, parent_id: '{{ $.VCategory.leaf.ID }}'}
+`,
+		dump: []string{"v_categories"},
+	}.run(t)
+}
+
 // Names that are reserved words, and a mixed-case table and column.
 type VOrder struct {
 	bun.BaseModel `bun:"table:VOrder"`

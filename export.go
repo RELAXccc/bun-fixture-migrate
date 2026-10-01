@@ -1,6 +1,7 @@
 package fixturemigrate
 
 import (
+	"container/heap"
 	"fmt"
 	"sort"
 	"strconv"
@@ -122,8 +123,8 @@ func exportModels(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table
 		m := cfg.Models[model]
 		anchors[model] = map[string]string{}
 		for _, e := range snap.Entries[model] {
-			if v, ok := e.Cells[m.Ref]; ok && v.Ref == nil && !v.IsNull {
-				anchors[model][v.Lit] = e.Anchor
+			if v := e.refValue(m); v != "" {
+				anchors[model][v] = e.Anchor
 			}
 		}
 	}
@@ -134,7 +135,10 @@ func exportModels(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table
 		if table == nil {
 			return nil, fmt.Errorf("model %q: %s is not a table in this database", model, cfg.QualifiedTable(m))
 		}
-		entries := snap.Entries[model]
+		entries, err := loadOrder(cfg, model, snap.Entries[model])
+		if err != nil {
+			return nil, err
+		}
 		if len(entries) == 0 {
 			continue
 		}
@@ -180,6 +184,94 @@ func exportModels(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table
 		b.WriteString("\n")
 	}
 	return []byte(strings.TrimRight(b.String(), "\n") + "\n"), nil
+}
+
+// loadOrder is the order dbfixture can load a model's rows in. It resolves a
+// template against the rows above it, so a row that points at a row of its
+// own model has to come after that row: parents before their children, and
+// otherwise the order the snapshot holds them in, which for a database is id
+// order. A tree whose root was added after its leaves needs that, and a model
+// without a reference to itself keeps its order as it is. Rows that point at
+// each other in a circle load in no order, and are refused.
+func loadOrder(cfg *Config, model string, entries []*Entry) ([]*Entry, error) {
+	m := cfg.Models[model]
+	var self []string
+	for _, col := range sortedKeysOf(m.References) {
+		if m.References[col] == model && !m.skip(col) {
+			self = append(self, col)
+		}
+	}
+	if len(self) == 0 {
+		return entries, nil
+	}
+	// The row a reference names is the one whose anchor it is written with,
+	// which is the last row holding that ref value.
+	byRef := map[string]int{}
+	for i, e := range entries {
+		if v := e.refValue(m); v != "" {
+			byRef[v] = i
+		}
+	}
+	waiting := make([]int, len(entries))
+	children := make([][]int, len(entries))
+	for i, e := range entries {
+		for _, col := range self {
+			ref := e.Cells[col].Ref
+			if ref == nil {
+				continue
+			}
+			// A target that is not in the snapshot is exportValue's to report.
+			if parent, ok := byRef[ref.Key]; ok {
+				waiting[i]++
+				children[parent] = append(children[parent], i)
+			}
+		}
+	}
+	// Of the rows whose parents are all written, the one first in the
+	// snapshot goes next, so the result is the snapshot's order wherever that
+	// order loads.
+	ready := &positions{}
+	for i := range entries {
+		if waiting[i] == 0 {
+			heap.Push(ready, i)
+		}
+	}
+	out := make([]*Entry, 0, len(entries))
+	for ready.Len() > 0 {
+		i := heap.Pop(ready).(int)
+		out = append(out, entries[i])
+		for _, child := range children[i] {
+			if waiting[child]--; waiting[child] == 0 {
+				heap.Push(ready, child)
+			}
+		}
+	}
+	if len(out) < len(entries) {
+		var circle []string
+		for i, e := range entries {
+			if waiting[i] > 0 {
+				circle = append(circle, e.label(model))
+			}
+		}
+		return nil, fmt.Errorf("rows of %s point at each other, or at themselves, through %s in a circle, and dbfixture "+
+			"cannot load such rows in any order: %s. Break the circle in the database, or put %s in ignore",
+			model, strings.Join(self, ", "), strings.Join(circle, "; "), strings.Join(self, ", "))
+	}
+	return out, nil
+}
+
+// positions is a min-heap of row positions.
+type positions []int
+
+func (p positions) Len() int           { return len(p) }
+func (p positions) Less(i, j int) bool { return p[i] < p[j] }
+func (p positions) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
+func (p *positions) Push(x any)        { *p = append(*p, x.(int)) }
+func (p *positions) Pop() any {
+	old := *p
+	x := old[len(old)-1]
+	*p = old[:len(old)-1]
+	return x
 }
 
 // exportColumns is the column order of one model: the table's own order, so the

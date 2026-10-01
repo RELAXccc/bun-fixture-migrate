@@ -511,10 +511,14 @@ func rewriteRefs(cfg *Config, snap *Snapshot, model, from, to string) {
 	}
 }
 
-// refValue is the value a reference to this row carries.
+// refValue is the value a reference to this row carries: its ref column, or
+// its id when the ref column is the id, and "" when it has none.
 func (e *Entry) refValue(m *Model) string {
+	if m.Ref == m.ID {
+		return e.ID
+	}
 	v, ok := e.Cells[m.Ref]
-	if !ok || v.Ref != nil {
+	if !ok || v.Ref != nil || v.IsNull {
 		return ""
 	}
 	return v.Lit

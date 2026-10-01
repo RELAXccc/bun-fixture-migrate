@@ -428,3 +428,99 @@ func TestExportFilesKeepsEachModelInItsFile(t *testing.T) {
 		t.Fatalf("got %q", out[1])
 	}
 }
+
+// treeConfig and treeTables are a category tree: every row may point at a
+// parent in the same table.
+func treeConfig(t *testing.T) *Config {
+	t.Helper()
+	cfg := &Config{Models: map[string]*Model{
+		"Node": {Table: "nodes", References: map[string]string{"parent_id": "Node"}},
+	}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+func treeTables() map[string]*dbschema.Table {
+	return map[string]*dbschema.Table{"public.nodes": {Schema: "public", Name: "nodes", PrimaryKey: []string{"id"},
+		Columns: []dbschema.Column{
+			{Name: "id", Position: 1, Type: "int8"},
+			{Name: "name", Position: 2, Type: "text"},
+			{Name: "parent_id", Position: 3, Type: "int8", Nullable: true},
+		}}}
+}
+
+// treeState is a tree as a database returns it, in id order, where a root
+// was added after the leaves that hang from it.
+func treeState(rows ...[3]string) *Snapshot {
+	s := &Snapshot{Source: "the database", Order: []string{"Node"}, Entries: map[string][]*Entry{},
+		Columns: map[string][]string{"Node": {"name", "parent_id"}}}
+	for _, r := range rows {
+		parent := fixturechange.Null()
+		if r[2] != "" {
+			parent = fixturechange.RefTo("Node", r[2])
+		}
+		key := fixturechange.Values{"name": fixturechange.Lit(r[1])}
+		s.Entries["Node"] = append(s.Entries["Node"], &Entry{Anchor: r[1], ID: r[0], Key: key,
+			KeyStr: keyString("Node", key), Cells: fixturechange.Values{"name": key["name"], "parent_id": parent}})
+	}
+	return s
+}
+
+// dbfixture resolves a template against the rows above it, so a child written
+// before its parent cannot be loaded. The export puts parents first and keeps
+// the id order otherwise.
+func TestExportWritesAParentBeforeItsChildren(t *testing.T) {
+	cfg := treeConfig(t)
+	state := treeState(
+		[3]string{"1", "leaf", "branch"},
+		[3]string{"2", "other", ""},
+		[3]string{"3", "twig", "leaf"},
+		[3]string{"5", "branch", "root"},
+		[3]string{"7", "root", ""},
+	)
+	data, err := Export(cfg, state, treeTables(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var order []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "      name: ") {
+			order = append(order, strings.Trim(strings.TrimPrefix(line, "      name: "), `"`))
+		}
+	}
+	if got := strings.Join(order, ","); got != "other,root,branch,leaf,twig" {
+		t.Fatalf("expected parents first and id order otherwise, got %s\n%s", got, data)
+	}
+	back := snap(t, cfg, string(data), "the export")
+	res, err := Compute(cfg, state, back)
+	if err != nil {
+		t.Fatalf("the export does not load: %v\n%s", err, data)
+	}
+	if len(res.Changes) != 0 || len(res.Refusals) != 0 {
+		t.Fatalf("the export does not reproduce its source: %+v / %+v\n%s", res.Changes, res.Refusals, data)
+	}
+
+	// A file that already loads keeps its order.
+	again, err := Export(cfg, back, treeTables(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(again) != string(data) {
+		t.Fatalf("exporting the export changed it:\n%s\n---\n%s", data, again)
+	}
+}
+
+// Rows pointing at each other in a circle load in no order at all.
+func TestExportRefusesRowsThatPointAtEachOtherInACircle(t *testing.T) {
+	_, err := Export(treeConfig(t), treeState(
+		[3]string{"1", "a", "b"},
+		[3]string{"2", "b", "a"},
+		[3]string{"3", "c", ""},
+	), treeTables(), nil)
+	if err == nil || !strings.Contains(err.Error(), "Node/name=a; Node/name=b") ||
+		strings.Contains(err.Error(), "name=c") {
+		t.Fatalf("expected the two rows of the circle to be named, got %v", err)
+	}
+}

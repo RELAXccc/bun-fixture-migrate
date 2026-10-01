@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 )
 
@@ -209,5 +210,30 @@ func TestIsZero(t *testing.T) {
 		if got := isZero(tc.value); got != tc.want {
 			t.Errorf("isZero(%s) = %v", tc.value, got)
 		}
+	}
+}
+
+// A table without an id is ordered by its key, and then by every other column:
+// two rows sharing a key, or a key_any_of group unset in both, would otherwise
+// come back in whatever order PostgreSQL likes, and so would the export.
+func TestSelectQueryOrdersEveryRowWithoutAnID(t *testing.T) {
+	cfg := testConfig(t)
+	m := &Model{Table: "limits", ID: "id", KeyAnyOf: [][]string{{"plan_id", "addon_id"}}}
+	cfg.Models["Limit"] = m
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	table := &dbschema.Table{Schema: "public", Name: "limits", Columns: []dbschema.Column{
+		{Name: "plan_id", Type: "int8"}, {Name: "addon_id", Type: "int8"}, {Name: "value", Type: "int8"},
+		{Name: "note", Type: "text"}}}
+	query, hasID, err := selectQuery(cfg, m, table, []string{"addon_id", "note", "plan_id", "value"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasID {
+		t.Fatal("the table has no id")
+	}
+	if !strings.HasSuffix(query, `ORDER BY "plan_id", "addon_id", 2, 4`) {
+		t.Fatalf("expected the key_any_of columns, then the rest by position: %s", query)
 	}
 }
