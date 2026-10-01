@@ -810,7 +810,10 @@ type TyGrid struct {
 // spelling and is refused. Before, the nested sequence came back as an
 // invalid value, and [0:1]={7,8} was exported as [7, 8].
 func TestTypesMultidimensionalArrays(t *testing.T) {
-	l := newLab(t, map[string]*fixturemigrate.Model{"TyGrid": {Table: "ty_grid", Key: []string{"name"}}}, "ty_grid",
+	// The table holds NULL elements, which only an array field of pointers
+	// or sql.Null values keeps.
+	l := newLab(t, map[string]*fixturemigrate.Model{"TyGrid": {Table: "ty_grid", Key: []string{"name"},
+		ArrayNulls: fixturemigrate.ArrayNullsKeep}}, "ty_grid",
 		[]string{"DROP TABLE IF EXISTS ty_grid",
 			"CREATE TABLE ty_grid (id bigint PRIMARY KEY, name text NOT NULL UNIQUE, grid integer[], words text[])"},
 		`SELECT string_agg(concat_ws('|', name, grid, words), E'\n' ORDER BY name) FROM ty_grid`, (*TyGrid)(nil))

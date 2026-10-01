@@ -117,12 +117,12 @@ func TestExportStringOfTemplateLikeText(t *testing.T) {
 		if err := tpl.Execute(&out, nil); err != nil || out.String() != s {
 			t.Fatalf("%q: evaluates to %q, %v", s, out.String(), err)
 		}
-		if lit, ok := literalTemplate(back["v"]); !ok || lit != s {
-			t.Fatalf("%q: literalTemplate %q %v", s, lit, ok)
+		if lit, ok := quotedTemplate(back["v"]); !ok || lit != s {
+			t.Fatalf("%q: quotedTemplate %q %v", s, lit, ok)
 		}
 	}
 	for _, s := range []string{"{{ $.Plan.free.ID }}", "{{ now }}", `{{ "a" | printf "%s" }}`, "x {{ \"a\" }}"} {
-		if _, ok := literalTemplate(s); ok {
+		if _, ok := quotedTemplate(s); ok {
 			t.Errorf("%q is not a string literal", s)
 		}
 	}

@@ -501,4 +501,13 @@ policy:
   # Override it per model wherever only you can say whether the rows pointing
   # at one should go with it, be repointed or block it.
   deletes: allow
+
+  # A null inside a sequence, [a, ~, b], in an array column.
+  #   refuse  report it and refuse a change that carries it (default)
+  #   keep    the array holds a NULL element there
+  # yaml.v3 leaves the null out of a []string or []int64 field and keeps it in a
+  # []*string or []sql.NullString one, and the fixture file does not say which
+  # the model has. Set keep if your array fields keep a null; with plain slices,
+  # leave nulls out of the file. Override it per model where they differ.
+  array_nulls: refuse
 `

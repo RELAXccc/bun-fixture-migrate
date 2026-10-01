@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 )
 
@@ -400,7 +401,9 @@ func TestDuplicateKeyThatChangesIsRefused(t *testing.T) {
 	}
 }
 
-func TestInsertsComeBeforeDeletesAndFollowTheFileOrder(t *testing.T) {
+// A delete can free what an insert takes, so deletes go first, children
+// before parents; inserts follow the file's order, parents before children.
+func TestDeletesComeFirstAndInsertsFollowTheFileOrder(t *testing.T) {
 	old := base + `    - plan_id: '{{ $.Plan.team.ID }}'
       code: sso
       quota: 1
@@ -421,7 +424,7 @@ func TestInsertsComeBeforeDeletesAndFollowTheFileOrder(t *testing.T) {
 	for _, c := range res.Changes {
 		order = append(order, string(c.Kind)+" "+c.Model)
 	}
-	want := []string{"insert Plan", "insert Feature", "delete Feature"}
+	want := []string{"delete Feature", "insert Plan", "insert Feature"}
 	if len(order) != len(want) {
 		t.Fatalf("expected %v, got %v", want, order)
 	}
@@ -620,11 +623,16 @@ func TestComputeLeavesItsSnapshotsAlone(t *testing.T) {
 func TestIDDriftPolicy(t *testing.T) {
 	next := replace(t, base, "      id: 2\n      name: team\n", "      id: 7\n      name: team\n")
 
+	// warn reports and carries on: a warning, not a refusal, and the rest of
+	// the row is still migrated.
 	warn := testConfig(t)
 	warn.Policy.IDDrift = ModeWarn
-	res := computeWith(t, warn, base, next)
-	if len(res.Refusals) != 1 || !strings.HasPrefix(res.Refusals[0].Reason, "warning:") {
-		t.Fatalf("expected a warning, got %+v", res.Refusals)
+	res := computeWith(t, warn, base, replace(t, next, "      price_cents: 2000\n", "      price_cents: 2500\n"))
+	if len(res.Refusals) != 0 || len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0].Reason, "changed from 2 to 7") {
+		t.Fatalf("expected one warning and no refusal, got %+v / %+v", res.Warnings, res.Refusals)
+	}
+	if c := only(t, res, "Plan", fixturechange.Update); c.New["price_cents"].Lit != "2500" {
+		t.Fatalf("the rest of the row is migrated: %+v", c)
 	}
 
 	ignore := testConfig(t)
@@ -722,5 +730,413 @@ func TestSwappedNamesAreRefused(t *testing.T) {
 	}
 	if len(res.Changes) != 0 {
 		t.Fatalf("a refused swap writes nothing: %+v", res.Changes)
+	}
+}
+
+// A natural key is compared as one string, which has to be equal exactly when
+// the keys are: values holding the separators, a NULL and the text "NULL", a
+// reference and a text that reads like one are all different keys.
+func TestNaturalKeysThatOnlyReadAlikeAreDifferentKeys(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{
+		"Currency": {Table: "currencies", Ref: "code", Key: []string{"code"}},
+		"Pair":     {Table: "pairs", Key: []string{"a", "b"}},
+		"Code":     {Table: "codes", Key: []string{"code"}, References: map[string]string{"currency": "Currency"}},
+	}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	s := snap(t, cfg, `- model: Currency
+  rows:
+    - {_id: eur, id: 1, code: EUR}
+- model: Pair
+  rows:
+    - {id: 1, a: "x/b=y", b: "z"}
+    - {id: 2, a: "x", b: "y/b=z"}
+- model: Code
+  rows:
+    - {id: 1, code: ~}
+    - {id: 2, code: "NULL"}
+- model: Code
+  rows:
+    - {id: 3, code: x, currency: '{{ $.Currency.eur.ID }}'}
+    - {id: 4, code: y, currency: 0}
+`, "fixture.yml")
+	if len(s.Findings) != 0 {
+		t.Fatalf("no two of these rows share a key: %+v", s.Findings)
+	}
+	codes := s.Entries["Code"]
+	if codes[0].KeyStr == codes[1].KeyStr {
+		t.Fatalf("NULL and the text NULL are one key: %q", codes[0].KeyStr)
+	}
+	ref := keyString("Code", fixturechange.Values{"code": fixturechange.RefTo("Currency", "EUR")})
+	lit := keyString("Code", fixturechange.Values{"code": fixturechange.Lit("Currency(EUR)")})
+	if ref == lit {
+		t.Fatalf("a reference and a text that reads like one are one key: %q", ref)
+	}
+	// The label stays the readable one the reports have always shown.
+	if got := codes[1].label("Code"); got != "Code/code=NULL" {
+		t.Fatalf("label %q", got)
+	}
+
+	// Without an id to tie them together, a row keyed by NULL and one keyed
+	// by the text "NULL" are two rows, not one row that did not change.
+	cfgNoID := &Config{Models: map[string]*Model{"Code": {Table: "codes", Key: []string{"code"}}}}
+	if err := cfgNoID.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	res := computeWith(t, cfgNoID, "- model: Code\n  rows:\n    - {code: \"NULL\", v: 1}\n",
+		"- model: Code\n  rows:\n    - {code: ~, v: 1}\n")
+	if ins, _, del := res.Totals(); ins != 1 || del != 1 {
+		t.Fatalf("expected an insert and a delete, got %+v / %+v", res.Changes, res.Refusals)
+	}
+}
+
+// Two groups of rows sharing a key compare as multisets of whole rows, which
+// tell a NULL from the text "NULL" as well.
+func TestSameRowSetTellsANullFromItsSpelling(t *testing.T) {
+	a := []*Entry{{Cells: fixturechange.Values{"note": fixturechange.Null()}}}
+	b := []*Entry{{Cells: fixturechange.Values{"note": fixturechange.Lit("NULL")}}}
+	if sameRowSet(a, b) {
+		t.Fatal("NULL and the text NULL are the same row")
+	}
+}
+
+// kindsOf is the changes of a result as "kind Model key", in order.
+func kindsOf(res *Result) string {
+	var out []string
+	for _, c := range res.Changes {
+		out = append(out, string(c.Kind)+" "+keyLabel(c.Model, c.Key))
+	}
+	return strings.Join(out, "; ")
+}
+
+// Closing a price and opening the next one in one release: an exclusion
+// constraint, or a partial unique index on the open price, accepts the new
+// open row only once the old one is closed. Updates come before inserts.
+func TestAnUpdateThatFreesAValueComesBeforeTheInsertTakingIt(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{
+		"Plan":  {Table: "plans", Ref: "code", Key: []string{"code"}},
+		"Price": {Table: "prices", Serial: true, Key: []string{"plan_id", "valid_from"}, References: map[string]string{"plan_id": "Plan"}},
+	}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	head := "- model: Plan\n  rows:\n    - {_id: basic, id: 1, code: basic}\n- model: Price\n  rows:\n"
+	old := head + "    - {id: 1, plan_id: '{{ $.Plan.basic.ID }}', valid_from: '2026-01-01', valid_to: ~, cents: 900}\n"
+	next := head + "    - {id: 1, plan_id: '{{ $.Plan.basic.ID }}', valid_from: '2026-01-01', valid_to: '2026-11-01', cents: 900}\n" +
+		"    - {id: 2, plan_id: '{{ $.Plan.basic.ID }}', valid_from: '2026-11-01', valid_to: ~, cents: 1200}\n"
+	got := kindsOf(computeWith(t, cfg, old, next))
+	if got != "update Price/plan_id=Plan(basic)/valid_from=2026-01-01; insert Price/plan_id=Plan(basic)/valid_from=2026-11-01" {
+		t.Fatalf("the old price has to be closed before the new one opens: %s", got)
+	}
+}
+
+// A row moved under a parent inserted in the same set waits for the insert;
+// the parent it leaves is deleted once nothing points at it any more.
+func TestAMoveToANewParentComesBetweenItsInsertAndTheOldParentsDelete(t *testing.T) {
+	old := replace(t, base, "- model: Feature\n", `    - _id: old
+      id: 3
+      name: old
+      currency_id: '{{ $.Currency.eur.ID }}'
+      price_cents: 1
+      seats: 1
+- model: Feature
+`) + "    - plan_id: '{{ $.Plan.old.ID }}'\n      code: sso\n      quota: 1\n"
+	next := replace(t, base, "- model: Feature\n", `    - _id: pro
+      id: 4
+      name: pro
+      currency_id: '{{ $.Currency.eur.ID }}'
+      price_cents: 1
+      seats: 1
+- model: Feature
+`) + "    - plan_id: '{{ $.Plan.pro.ID }}'\n      code: sso\n      quota: 1\n"
+	cfg := testConfig(t)
+	cfg.Models["Plan"].Deletes = DeleteAllow
+	cfg.Models["Feature"].Key = []string{"code", "quota"}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	got := kindsOf(computeWith(t, cfg, old, next))
+	want := "insert Plan/name=pro; update Feature/code=sso/quota=1; delete Plan/name=old"
+	if got != want {
+		t.Fatalf("expected\n%s\ngot\n%s", want, got)
+	}
+}
+
+// A model that leaves the file entirely still comes before the models
+// pointing at it, so its rows are deleted after theirs.
+func TestAModelThatLeftTheFileIsDeletedAfterTheRowsPointingAtIt(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{
+		"Cur":  {Table: "curs", Ref: "code", Key: []string{"code"}},
+		"Plan": {Table: "plans", References: map[string]string{"cur_id": "Cur"}},
+	}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	res := computeWith(t, cfg, `- model: Cur
+  rows:
+    - {_id: usd, id: 1, code: USD}
+- model: Plan
+  rows:
+    - {id: 1, name: a, cur_id: '{{ $.Cur.usd.ID }}'}
+    - {id: 2, name: keep, cur_id: ~}
+`, `- model: Plan
+  rows:
+    - {id: 2, name: keep, cur_id: ~}
+`)
+	if got := kindsOf(res); got != "delete Plan/name=a; delete Cur/code=USD" {
+		t.Fatalf("the plan pointing at the currency has to go first: %s", got)
+	}
+	if strings.Join(res.Order, ",") != "Cur,Plan" {
+		t.Fatalf("model order %v", res.Order)
+	}
+}
+
+// A model split over several blocks keeps its rows in file order, after the
+// models it points at, wherever their blocks are.
+func TestAModelSplitOverBlocksKeepsItsRowOrder(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{
+		"Cur":  {Table: "curs", Ref: "code", Key: []string{"code"}},
+		"Plan": {Table: "plans", References: map[string]string{"cur_id": "Cur"}},
+	}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	res := computeWith(t, cfg, "[]\n", `- model: Plan
+  rows:
+    - {id: 1, name: b, cur_id: ~}
+- model: Cur
+  rows:
+    - {_id: usd, id: 1, code: USD}
+- model: Plan
+  rows:
+    - {id: 2, name: a, cur_id: '{{ $.Cur.usd.ID }}'}
+    - {id: 3, name: c, cur_id: ~}
+`)
+	if got := kindsOf(res); got != "insert Cur/code=USD; insert Plan/name=b; insert Plan/name=a; insert Plan/name=c" {
+		t.Fatalf("got %s", got)
+	}
+}
+
+// Rows of a tree as a database returns them, in id order, where a parent can
+// come after its child: inserts still go parents first, deletes children first.
+func TestATreeIsInsertedParentsFirstAndDeletedChildrenFirst(t *testing.T) {
+	cfg := treeConfig(t)
+	tree := treeState([3]string{"1", "leaf", "root"}, [3]string{"2", "root", ""}, [3]string{"3", "other", ""})
+	empty := &Snapshot{Source: "empty", Order: []string{"Node"}, Entries: map[string][]*Entry{}}
+	res, err := Compute(cfg, empty, tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := kindsOf(res); got != "insert Node/name=root; insert Node/name=leaf; insert Node/name=other" {
+		t.Fatalf("inserts: %s", got)
+	}
+	reversed := treeState([3]string{"1", "root", ""}, [3]string{"2", "leaf", "root"})
+	if res, err = Compute(cfg, reversed, empty); err != nil {
+		t.Fatal(err)
+	}
+	if got := kindsOf(res); got != "delete Node/name=leaf; delete Node/name=root" {
+		t.Fatalf("deletes: %s", got)
+	}
+}
+
+// A unique value can move from one row to another in one set: the row giving
+// it up goes first. Two rows trading values cannot both go first, which means
+// the column is not unique, and they keep their order.
+func TestARowTakingAValueAnotherGivesUpWaitsForIt(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{"Seat": {Table: "seats", Ref: "code", Key: []string{"code"}}}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	old := "- model: Seat\n  rows:\n    - {id: 1, code: b, slot: 3}\n    - {id: 2, code: a, slot: 1}\n"
+	next := "- model: Seat\n  rows:\n    - {id: 1, code: b, slot: 1}\n    - {id: 2, code: a, slot: 2}\n"
+	if got := kindsOf(computeWith(t, cfg, old, next)); got != "update Seat/code=a; update Seat/code=b" {
+		t.Fatalf("a gives slot 1 up, so it goes first: %s", got)
+	}
+	swap := "- model: Seat\n  rows:\n    - {id: 1, code: b, slot: 1}\n    - {id: 2, code: a, slot: 3}\n"
+	if got := kindsOf(computeWith(t, cfg, old, swap)); got != "update Seat/code=b; update Seat/code=a" {
+		t.Fatalf("a trade keeps the file's order: %s", got)
+	}
+}
+
+// A reference finds its row by the ref value alone, so one that two rows
+// hold names neither: categories called "Accessories" under two parents.
+func TestAReferenceToAValueTwoRowsHoldIsRefused(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{"Category": {Table: "categories", Serial: true,
+		Key: []string{"parent_id", "name"}, References: map[string]string{"parent_id": "Category"},
+		Defaults: Defaults{"parent_id": NullDefault}}}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	old := `- model: Category
+  rows:
+    - {_id: root, id: 1, name: Root}
+    - {_id: tools, id: 2, name: Tools, parent_id: '{{ $.Category.root.ID }}'}
+    - {_id: tacc, id: 3, name: Accessories, parent_id: '{{ $.Category.tools.ID }}'}
+    - {_id: garden, id: 4, name: Garden, parent_id: '{{ $.Category.root.ID }}'}
+    - {_id: gacc, id: 5, name: Accessories, parent_id: '{{ $.Category.garden.ID }}'}
+`
+	res := computeWith(t, cfg, old, old+"    - {_id: gloves, id: 6, name: Gloves, parent_id: '{{ $.Category.gacc.ID }}'}\n")
+	if len(res.Changes) != 0 || len(res.Refusals) != 1 || !strings.Contains(res.Refusals[0].Reason,
+		`parent_id points at Category "Accessories", which 2 rows hold (Category/name=Accessories/parent_id=Category(Tools), `+
+			`Category/name=Accessories/parent_id=Category(Garden))`) {
+		t.Fatalf("expected the reference to be refused, got %+v / %+v", res.Changes, res.Refusals)
+	}
+}
+
+// Two branches each adding "the next id" leave a file in which two rows share
+// one. It is a finding, the insert writing that id is refused, and neither
+// row is taken for a rename of the other.
+func TestTwoRowsSharingAnIDAreReportedAndNotTakenForARename(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Policy.Renames = RenameUpdate
+	plans := func(rows string) string {
+		return "- model: Currency\n  rows:\n    - {_id: eur, id: 1, code: EUR}\n- model: Plan\n  rows:\n" + rows
+	}
+	biz := "    - {id: 4, name: biz, currency_id: '{{ $.Currency.eur.ID }}'}\n"
+	max := "    - {id: 4, name: max, currency_id: '{{ $.Currency.eur.ID }}'}\n"
+	merged := snap(t, cfg, plans(biz+max), "merged")
+	if len(merged.Findings) != 1 || merged.Findings[0].Kind != FindingDuplicateID || merged.Findings[0].Row != "id=4" ||
+		!strings.Contains(merged.Findings[0].Detail, "2 rows hold this id (Plan/name=biz, Plan/name=max)") {
+		t.Fatalf("expected the shared id to be reported, got %+v", merged.Findings)
+	}
+	for _, old := range []string{plans(biz), plans(max)} {
+		res := computeWith(t, cfg, old, plans(biz+max))
+		if len(res.Changes) != 0 || len(res.Refusals) != 1 ||
+			!strings.Contains(res.Refusals[0].Reason, "its id, 4, is the id of Plan/name=") {
+			t.Fatalf("expected the insert to be refused, got %+v / %+v", res.Changes, res.Refusals)
+		}
+	}
+}
+
+// A change set names a table qualified with the configured schema, unless
+// that is public: the application's connection may not look anywhere else.
+func TestAChangeSetNamesItsTablesInTheConfiguredSchema(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Schema = "app"
+	cfg.Models["Currency"].Table = "money.currencies"
+	res := computeWith(t, cfg, base, replace(t, base, "      price_cents: 2000\n", "      price_cents: 2500\n"))
+	if got := res.Tables["Plan"].Name; got != "app.plans" {
+		t.Fatalf("Plan is in %q", got)
+	}
+	if got := cfg.RunTimeTable(cfg.Models["Currency"].Table); got != "money.currencies" {
+		t.Fatalf("Currency is in %q", got)
+	}
+	if got := strings.Join(cfg.Schemas(), ","); got != "app,money" {
+		t.Fatalf("schemas %s", got)
+	}
+	public := testConfig(t)
+	res = computeWith(t, public, base, replace(t, base, "      price_cents: 2000\n", "      price_cents: 2500\n"))
+	if got := res.Tables["Plan"].Name; got != "plans" {
+		t.Fatalf("a public table stays as written, got %q", got)
+	}
+}
+
+// An inserted row that leaves out a column other rows write, with no defaults
+// entry for it, would be stored as whatever the model and the database make
+// of nothing, and refused by every comparison afterwards. It is refused now.
+func TestAnInsertLeavingOutAColumnOthersWriteIsRefused(t *testing.T) {
+	next := replace(t, base, "- model: Feature\n", `    - _id: pro
+      id: 3
+      name: pro
+      currency_id: '{{ $.Currency.eur.ID }}'
+      seats: 100
+- model: Feature
+`)
+	res := compute(t, base, next)
+	if len(res.Changes) != 0 || len(res.Refusals) != 1 ||
+		!strings.Contains(res.Refusals[0].Reason, "it leaves out price_cents, which other rows of Plan write") {
+		t.Fatalf("expected the insert to be refused, got %+v / %+v", res.Changes, res.Refusals)
+	}
+	cfg := testConfig(t)
+	cfg.Models["Plan"].Defaults = Defaults{"price_cents": "0"}
+	if res := computeWith(t, cfg, base, next); len(res.Refusals) != 0 || len(res.Changes) != 1 {
+		t.Fatalf("with a default it is an ordinary insert: %+v / %+v", res.Changes, res.Refusals)
+	}
+}
+
+// A file compared with itself changes nothing and refuses nothing, even with
+// two rows sharing a natural key under ids of their own: that is the
+// duplicate-key finding, not a renumbering.
+func TestAFileAgainstItselfRefusesNothingEvenWithADuplicateKey(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{"Plan": {Table: "plans", Key: []string{"name"}}}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	text := "- model: Plan\n  rows:\n    - {id: 2, name: team, price: 1}\n    - {id: 3, name: team, price: 1}\n"
+	s := snap(t, cfg, text, "fixture.yml")
+	if len(s.Findings) != 1 || s.Findings[0].Kind != FindingDuplicateKey {
+		t.Fatalf("expected the duplicate key to be reported once, got %+v", s.Findings)
+	}
+	res := computeWith(t, cfg, text, text)
+	if len(res.Changes) != 0 || len(res.Refusals) != 0 || len(res.Warnings) != 0 {
+		t.Fatalf("identical inputs: %+v / %+v / %+v", res.Changes, res.Refusals, res.Warnings)
+	}
+}
+
+// Only a column no two rows share a value of in either state can be unique,
+// so only such a column makes one change wait for another that gives a value
+// up: here slot, and not cur, whose waits would go the other way round.
+func TestOnlyAColumnThatCouldBeUniqueOrdersChanges(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{"Seat": {Table: "seats", Ref: "code", Key: []string{"code"}}}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	old := `- model: Seat
+  rows:
+    - {id: 1, code: g, slot: 5, cur: EUR}
+    - {id: 2, code: f, slot: 9, cur: USD}
+    - {id: 3, code: h, slot: 1, cur: EUR}
+`
+	next := `- model: Seat
+  rows:
+    - {id: 1, code: g, slot: 9, cur: GBP}
+    - {id: 2, code: f, slot: 2, cur: EUR}
+    - {id: 3, code: h, slot: 1, cur: EUR}
+`
+	if got := kindsOf(computeWith(t, cfg, old, next)); got != "update Seat/code=f; update Seat/code=g" {
+		t.Fatalf("f gives slot 9 up, so it goes first: %s", got)
+	}
+}
+
+// With the catalog read, the unique indexes say which columns order changes
+// by the values they give up, and a column that only happens to hold distinct
+// values does not: here cur, which would have g wait for f's EUR.
+func TestTheCatalogSaysWhichColumnsAreUnique(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{"Seat": {Table: "seats", Ref: "code", Key: []string{"code"}}}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	old := snap(t, cfg, `- model: Seat
+  rows:
+    - {id: 1, code: g, slot: 5, cur: EUR}
+    - {id: 2, code: f, slot: 9, cur: USD}
+`, "old")
+	next := snap(t, cfg, `- model: Seat
+  rows:
+    - {id: 1, code: g, slot: 9, cur: GBP}
+    - {id: 2, code: f, slot: 2, cur: EUR}
+`, "new")
+	guessed := uniqueColumns(cfg, old, next)["Seat"]
+	if !guessed["cur"] || !guessed["slot"] {
+		t.Fatalf("without the catalog both could be unique: %v", guessed)
+	}
+	old.noteUniques("Seat", &dbschema.Table{Uniques: [][]string{{"id"}, {"code"}, {"slot"}, {"cur", "slot"}}})
+	known := uniqueColumns(cfg, old, next)["Seat"]
+	if !known["slot"] || !known["id"] || known["cur"] {
+		t.Fatalf("the catalog says id, code and slot: %v", known)
+	}
+	res, err := Compute(cfg, old, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := kindsOf(res); got != "update Seat/code=f; update Seat/code=g" {
+		t.Fatalf("f gives slot 9 up, so it goes first: %s", got)
+	}
+
+	// A reference is never guessed to be unique: in a few rows it is
+	// distinct by chance more often than not.
+	if cols := uniqueColumns(testConfig(t), snap(t, testConfig(t), base, "base"))["Plan"]; cols["currency_id"] {
+		t.Fatalf("a reference was guessed unique: %v", cols)
 	}
 }

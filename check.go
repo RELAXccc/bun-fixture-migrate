@@ -19,9 +19,9 @@ type CheckResult struct {
 	Findings []Finding
 }
 
-// Drifted reports whether anything at all was found.
+// Drifted reports whether anything at all was found, warnings included.
 func (c *CheckResult) Drifted() bool {
-	return len(c.Changes) > 0 || len(c.Refusals) > 0 || len(c.Findings) > 0
+	return len(c.Changes) > 0 || len(c.Refusals) > 0 || len(c.Warnings) > 0 || len(c.Findings) > 0
 }
 
 // Agree reports whether the database and the fixture files agree as far as
@@ -59,8 +59,8 @@ func Check(cfg *Config, database, fixture *Snapshot) (*CheckResult, error) {
 func (c *CheckResult) Lines() []string {
 	var out []string
 	grouped := FindingsByKind(c.Findings)
-	for _, kind := range []FindingKind{FindingUnknownColumn, FindingInvalidValue, FindingZeroDefault,
-		FindingNullDefault, FindingDuplicateKey} {
+	for _, kind := range []FindingKind{FindingUnknownColumn, FindingInvalidValue, FindingAmbiguousValue,
+		FindingZeroDefault, FindingNullDefault, FindingDuplicateKey, FindingDuplicateID} {
 		list := grouped[kind]
 		if len(list) == 0 {
 			continue
@@ -74,6 +74,12 @@ func (c *CheckResult) Lines() []string {
 		out = append(out, "", "Cannot be migrated as it stands:")
 		for _, r := range c.Refusals {
 			out = append(out, "  "+r.String())
+		}
+	}
+	if len(c.Warnings) > 0 {
+		out = append(out, "", "Warnings, which the policy lets a migration carry on past:")
+		for _, w := range c.Warnings {
+			out = append(out, "  "+w.String())
 		}
 	}
 

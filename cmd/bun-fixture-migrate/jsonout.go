@@ -41,6 +41,9 @@ type checkReport struct {
 	Agree    bool           `json:"agree"`
 	Findings []checkFinding `json:"findings"`
 	Refusals []checkRefusal `json:"refusals"`
+	// Warnings are differences the policy lets a migration carry on past,
+	// such as a renumbered row under id_drift: warn.
+	Warnings []checkRefusal `json:"warnings"`
 	// Changes are what a migration from the database to the fixture file
 	// would do: an insert is a row only the file has, a delete a row only the
 	// database has, and an update's old values are the database's.
@@ -83,9 +86,13 @@ func findingsJSON(cfg *fixturemigrate.Config, findings []fixturemigrate.Finding)
 
 func checkJSON(cfg *fixturemigrate.Config, res *fixturemigrate.CheckResult) checkReport {
 	out := checkReport{Agree: res.Agree(cfg),
-		Findings: findingsJSON(cfg, res.Findings), Refusals: []checkRefusal{}, Changes: []checkChange{}}
+		Findings: findingsJSON(cfg, res.Findings), Refusals: []checkRefusal{}, Warnings: []checkRefusal{},
+		Changes: []checkChange{}}
 	for _, r := range res.Refusals {
 		out.Refusals = append(out.Refusals, checkRefusal{r.Model, r.Key, r.Reason})
+	}
+	for _, w := range res.Warnings {
+		out.Warnings = append(out.Warnings, checkRefusal{w.Model, w.Key, w.Reason})
 	}
 	for _, c := range res.Changes {
 		out.Changes = append(out.Changes, checkChange{c.Model, string(c.Kind), jsonValues(c.Key),

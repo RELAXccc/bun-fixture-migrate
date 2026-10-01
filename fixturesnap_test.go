@@ -136,3 +136,180 @@ func TestATemplateThisToolCannotEvaluateIsAnError(t *testing.T) {
 		t.Fatalf("an ignored column is not read at all: %v", err)
 	}
 }
+
+// bun writes DEFAULT for a zero only in an autoincrement field, so a zero is
+// "no id" in a serial model and an id like any other elsewhere.
+func TestAZeroIDIsAnIDUnlessTheModelIsSerial(t *testing.T) {
+	cfg := testConfig(t)
+	text := `- model: Currency
+  rows:
+    - {id: 0, code: XXX}
+- model: Plan
+  rows:
+    - {id: 0, name: free, currency_id: 0}
+- model: Feature
+  rows:
+    - {id: 0, plan_id: 0, code: api}
+`
+	s := snap(t, cfg, text, "fixture.yml")
+	if got := s.Entries["Currency"][0].ID; got != "0" {
+		t.Fatalf("a zero in a model that is not serial is its id, got %q", got)
+	}
+	if got := s.Entries["Feature"][0].ID; got != "" {
+		t.Fatalf("a zero in a serial model is left to the sequence, got %q", got)
+	}
+	// And a reference holding 0 names the row whose id is 0, where there is
+	// one.
+	if got := planRef(t, s, "free"); got.Ref == nil || got.Ref.Key != "XXX" {
+		t.Fatalf("expected Currency XXX, got %+v", got)
+	}
+	if got := s.Entries["Feature"][0].Cells["plan_id"]; got.Ref == nil || got.Ref.Key != "free" {
+		t.Fatalf("expected Plan free, got %+v", got)
+	}
+}
+
+// A reference carries its row's ref value, and 0012 there is the integer 10
+// or the text 0012 depending on the ref column's type. Both readings travel
+// with the reference, and the ref column is the one whose type decides,
+// whether the reference is a template or a plain id.
+func TestAReferenceKeepsBothReadingsOfItsRow(t *testing.T) {
+	cfg := testConfig(t)
+	text := `- model: Currency
+  rows:
+    - {_id: odd, id: 1, code: 0012}
+    - {_id: ten, id: 2, code: "10"}
+- model: Plan
+  rows:
+    - {id: 1, name: a, currency_id: '{{ $.Currency.odd.ID }}', note: '{{ $.Currency.odd.Code }}'}
+    - {id: 2, name: b, currency_id: 1}
+`
+	s := snap(t, cfg, text, "fixture.yml")
+	for _, e := range s.Entries["Plan"] {
+		if ref := e.Cells["currency_id"].Ref; ref == nil || ref.Key != "10" {
+			t.Fatalf("expected the resolved reading, got %+v", e.Cells["currency_id"])
+		}
+		if e.AsWritten["currency_id"] != "0012" || e.from["currency_id"] != (source{"Currency", "code"}) {
+			t.Fatalf("expected the reading as written and its column, got %q %+v", e.AsWritten, e.from)
+		}
+	}
+	// A template copying a field hands on what that field holds, so the
+	// field's type decides there too.
+	a := s.Entries["Plan"][0]
+	if a.Cells["note"].Lit != "10" || a.AsWritten["note"] != "0012" || a.from["note"] != (source{"Currency", "code"}) {
+		t.Fatalf("got %+v %q %+v", a.Cells["note"], a.AsWritten, a.from)
+	}
+	// Until a type decides, 0012 and "10" are not known to be one key, so
+	// neither is reported as a duplicate of the other.
+	if len(s.Findings) != 0 {
+		t.Fatalf("expected no finding, got %+v", s.Findings)
+	}
+
+	// And a change that needs to know is refused without the database.
+	res := computeWith(t, cfg, text, text+"    - {id: 3, name: c, currency_id: '{{ $.Currency.odd.ID }}'}\n")
+	if len(res.Changes) != 0 || len(res.Refusals) != 1 ||
+		!strings.Contains(res.Refusals[0].Reason, "currency_id points at the Currency whose code is written 0012") {
+		t.Fatalf("expected the insert to be refused, got %+v / %+v", res.Changes, res.Refusals)
+	}
+	// So is a reference whose row only changed its spelling.
+	res = computeWith(t, cfg, text, strings.Replace(text, "code: 0012", "code: 012", 1))
+	for _, r := range res.Refusals {
+		if r.Model == "Plan" && strings.Contains(r.Reason, "written 0012 before and 012 after") {
+			return
+		}
+	}
+	t.Fatalf("expected the respelled reference to be refused, got %+v / %+v", res.Changes, res.Refusals)
+}
+
+// A template copying a field that is itself a template copies whatever
+// dbfixture made of that one, which this tool does not follow.
+func TestACopyOfATemplateIsRefused(t *testing.T) {
+	err := snapErr(t, `- model: Currency
+  rows:
+    - {_id: eur, id: 1, code: EUR}
+- model: Plan
+  rows:
+    - {_id: a, id: 1, name: a, currency_id: '{{ $.Currency.eur.ID }}'}
+    - {id: 2, name: b, currency_id: '{{ $.Currency.eur.ID }}', note: '{{ $.Plan.a.CurrencyID }}'}
+`)
+	if err == nil || !strings.Contains(err.Error(), "which is itself a template") {
+		t.Fatalf("expected the copy to be refused, got %v", err)
+	}
+}
+
+// A key value whose spelling alone changed is the same key in a numeric
+// column and a rename in a text one, and says so.
+func TestARespelledKeyIsNeitherARenameNorNothing(t *testing.T) {
+	text := "- model: Currency\n  rows:\n    - {_id: odd, id: 1, code: 0012}\n"
+	res := computeWith(t, testConfig(t), text, strings.Replace(text, "code: 0012", "code: 012", 1))
+	if len(res.Changes) != 0 || len(res.Refusals) != 1 ||
+		!strings.Contains(res.Refusals[0].Reason, "code is written 0012 before and 012 after") {
+		t.Fatalf("expected one refusal about the spelling, got %+v / %+v", res.Changes, res.Refusals)
+	}
+}
+
+// An alias is the value it names, scalar or not, null included.
+func TestAnAliasReadsAsTheValueItNames(t *testing.T) {
+	d := doc(t, `- model: Plan
+  rows:
+    - {name: a, note: &n "shared", seats: &z ~, tags: &t [x, *n, 017]}
+    - {name: b, note: *n, seats: *z, tags: *t}
+`)
+	got := d[0].Rows[1]
+	if c := got["note"]; c.Structured || c.IsNull || c.Text != "shared" || c.Tag != "!!str" {
+		t.Fatalf("note: %+v", c)
+	}
+	if c := got["seats"]; !c.IsNull {
+		t.Fatalf("seats: %+v", c)
+	}
+	if c := got["tags"]; !c.Structured || c.Text != `["x","shared",15]` || c.StringText != `["x","shared","017"]` {
+		t.Fatalf("tags: %+v", c)
+	}
+}
+
+// dbfixture evaluates a template only in a scalar tagged !!str, and an alias
+// has no tag: it would store the template's text. That is refused.
+func TestAnAliasOfATemplateIsRefused(t *testing.T) {
+	_, err := ParseDoc([]byte(`- model: Plan
+  rows:
+    - {name: a, currency_id: &c '{{ $.Currency.eur.ID }}'}
+    - {name: b, currency_id: *c}
+`))
+	if err == nil || !strings.Contains(err.Error(), "Plan.currency_id: line 4: *c stands for {{ $.Currency.eur.ID }}") {
+		t.Fatalf("expected the alias to be refused, got %v", err)
+	}
+}
+
+// A template of text and string constants evaluates to that text whatever
+// dbfixture evaluates it against: it is how a file stores a value holding
+// "{{ " and " }}", and it reads as that value.
+func TestATemplateOfStringConstantsIsItsText(t *testing.T) {
+	text := replace(t, base, "      seats: 1\n", "      seats: 1\n      note: '{{ \"Hello {{ name }}\" }}, and {{ `{{ more }}` }}'\n")
+	s := snap(t, testConfig(t), replace(t, text, "      seats: 10\n", "      seats: 10\n      greeting: '{{ $.Plan.free.Note }}'\n"),
+		"fixture.yml")
+	free, team := s.Entries["Plan"][0], s.Entries["Plan"][1]
+	if got := free.Cells["note"].Lit; got != "Hello {{ name }}, and {{ more }}" {
+		t.Fatalf("got %q", got)
+	}
+	if got := team.Cells["greeting"].Lit; got != "Hello {{ name }}, and {{ more }}" {
+		t.Fatalf("a copy of it is the same text, got %q", got)
+	}
+	if _, ok := literalTemplate(`{{ "a" | printf "%s" }}`); ok {
+		t.Fatal("a pipeline is not a constant")
+	}
+}
+
+// A row with more than one fault is refused for the same one on every run:
+// the first column by name, not whichever a map hands out first.
+func TestARowWithTwoFaultsIsRefusedForTheSameOneEveryTime(t *testing.T) {
+	text := replace(t, base, "      seats: 10\n",
+		"      seats: 10\n      zz_note: '{{ now }}'\n      aa_note: '{{ $.Currency.gbp.ID }}'\n")
+	first := snapErr(t, text)
+	if first == nil || !strings.Contains(first.Error(), "aa_note") {
+		t.Fatalf("expected aa_note to be named, got %v", first)
+	}
+	for i := 0; i < 50; i++ {
+		if err := snapErr(t, text); err == nil || err.Error() != first.Error() {
+			t.Fatalf("run %d: %v, not %v", i, err, first)
+		}
+	}
+}

@@ -138,6 +138,11 @@ func generate(o streams, args []string) error {
 	for _, r := range res.Refusals {
 		fmt.Fprintln(o.stderr, "refused:", r.String())
 	}
+	// What the policy lets a migration carry on past is said, and stops
+	// nothing.
+	for _, w := range res.Warnings {
+		fmt.Fprintln(o.stderr, "warning:", w.String())
+	}
 
 	dir := *out
 	if dir == "" {

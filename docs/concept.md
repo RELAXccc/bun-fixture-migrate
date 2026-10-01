@@ -72,7 +72,7 @@ These decide every trade-off further down.
 | uuid primary key, `gen_random_uuid()` | no sequence, ids differ everywhere | natural keys; zero uuid known | done |
 | `GENERATED ALWAYS AS IDENTITY` | an explicit id cannot be inserted, by anyone | export leaves the id out; lint | done |
 | composite primary key, m2m join table | no single id | keyed on the natural key only | done |
-| self-referencing model (`parent_id`) | order inside one model | file order, reverse for deletes | done |
+| self-referencing model (`parent_id`) | order inside one model | parents inserted first, children deleted first, exported parents first; read whatever the id order | done |
 | enum types, domains, `citext` | text in, typed out; a domain's own name hides its base type; `Go` and `GO` are one `citext` | PostgreSQL compares; a domain is its base type, its default and `NOT NULL` the column's; keys equal under their type are a duplicate | done |
 | `soft_delete` | a delete is an UPDATE of `deleted_at` | soft-delete aware snapshot and delete | later |
 | schema-qualified table, mixed-case or reserved-word names | quoting | quoted everywhere | done |
@@ -109,6 +109,22 @@ Each was reproduced before it went into this table.
 | `GENERATED ALWAYS` identity exported with ids | the export cannot be loaded | broken export | leave the id out | done |
 | `plan` against a hot standby | "would FAIL" for the wrong reason | misleading | detect `pg_is_in_recovery()` | done |
 | `1.10`, `01234`, `True` unquoted in a text column | dbfixture stores the text as written; the tool resolved it to 1.1, 668, true and saw drift, and a migration would have written those | **silent corruption** | keep both readings, let the column's type decide, refuse without one | done |
+| a reference to a row whose ref value is written `0012` in a `bigint` column | the reference carried `0012` and the row held 10; `sync` on a freshly seeded database repointed the reference at the row whose code is 12 | **silent corruption** | the ref column's type decides what a reference carries; refused without one | done |
+| a tree whose root has a higher id than its leaves | `check`, `export`, `sync` and `generate -from-db` failed with a dangling reference; an export in id order did not load | failed command, broken export | read every row's name before resolving any; export parents first | done |
+| a parent model that leaves the file entirely | its rows were deleted before the rows pointing at them | failed deploy | models ordered by their references across both states | done |
+| closing an effective-dated price and opening the next in one release | the insert ran before the update and hit the one-open-price index | failed deploy | deletes and updates before inserts, each change after what it depends on | done |
+| natural keys `{a: "x/b=y", b: z}` and `{a: x, b: "y/b=z"}`, or a NULL and the text `NULL` | compared as one key | false duplicate, false id drift | an encoding no two keys share | done |
+| `id_drift: warn` | stopped `generate` and `sync` like `error` | blocked deploy | warnings apart from refusals | done |
+| a YAML alias `*name` of a scalar | written as its JSON, quotes and all, or the text `null` | **silent corruption** | an alias is the value it names | done |
+| `~` inside a sequence | `[]string` drops it, `[]*string` keeps it; the tool wrote it | wrong value | finding, and the change refused | done |
+| `~` in a NOT NULL column without a default | no finding; the deploy failed | failed deploy | `invalid value` finding | done |
+| the primary key as the natural key (a currency keyed by its ISO code) | `export`, `check`, `sync` failed: the key was not read | failed command | the key may be the id | done |
+| a primary key `"0"` | read as no id: permanent drift on every reference to it | false drift | a zero is "no id" only in a `serial` model | done |
+| ids 9 and 10 | read in the order of their text, 10 before 9 | broken export of a tree, unstable files | ordered by the column, not its text | done |
+| two rows sharing an id after a merge | taken for a rename; the deploy and a new seed failed | failed deploy | `duplicate id` finding, the insert refused | done |
+| a reference by a name two rows hold (per-parent category names) | written, then failed at deploy | failed deploy | refused | done |
+| `schema: app` with unqualified tables | the migration named `roles`, found in `public` or nowhere | failed deploy or **wrong table** | the change set names the schema | done |
+| `'{{ "Hello {{ name }}" }}'` | refused as a template | refused file | a template of string constants is its text | done |
 | explicit ids from a dbfixture seed | the sequence stays behind; the application's first insert fails | failed insert | `fixtureapply.SyncSequences` after the seed | done |
 | `char(n)` array elements shorter than n | padded on the database side, not on the file side | phantom drift | both read without the padding | done |
 | a domain over integer or `jsonb` | the domain's name was asked instead of its base type: exported as `"5"` and as a quoted string, a zero against the domain's default unreported | broken export, wrong value | the base type everywhere; the domain's default is the column's | done |

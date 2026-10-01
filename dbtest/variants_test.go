@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
 	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
@@ -35,6 +36,9 @@ type variant struct {
 	old, next string
 	// dump lists the tables whose rows make up a database state.
 	dump []string
+	// noRerun, when set, says why a second Apply is not run: the run time
+	// cannot run that set twice yet.
+	noRerun string
 }
 
 func (v variant) reset(t *testing.T, db *bun.DB) {
@@ -102,9 +106,13 @@ func (v variant) run(t *testing.T) {
 	if got := v.state(t, db); got != wantNext {
 		t.Fatalf("the migration does not reproduce the new file\n got %s\nwant %s\n%s", got, wantNext, src)
 	}
-	for _, o := range apply(fixtureapply.Apply) {
-		if o.Index >= 0 && o.Status != fixtureapply.StatusUnchanged {
-			t.Fatalf("a second run changed something: %+v", o)
+	if v.noRerun != "" {
+		t.Logf("not run twice: %s", v.noRerun)
+	} else {
+		for _, o := range apply(fixtureapply.Apply) {
+			if o.Index >= 0 && o.Status != fixtureapply.StatusUnchanged {
+				t.Fatalf("a second run changed something: %+v", o)
+			}
 		}
 	}
 	apply(fixtureapply.Revert)
@@ -293,6 +301,214 @@ func TestVariantASelfReferencingTree(t *testing.T) {
 	}.run(t)
 }
 
+// A tree whose root came after its leaves: the database returns a child
+// before its parent, in id order. It has to be read all the same, checked
+// against its file, and exported in an order dbfixture can load.
+func TestVariantATreeWhoseParentsCameLater(t *testing.T) {
+	variant{
+		ddl: []string{"DROP TABLE IF EXISTS v_categories",
+			"CREATE TABLE v_categories (id bigint PRIMARY KEY, name text UNIQUE NOT NULL, " +
+				"parent_id bigint REFERENCES v_categories)"},
+		models: []any{(*VCategory)(nil)},
+		config: `models:
+  VCategory:
+    table: v_categories
+    key: [name]
+    references: {parent_id: VCategory}
+`,
+		old: `- model: VCategory
+  rows:
+    - {_id: root, id: 2, name: root, parent_id: ~}
+    - {_id: leaf, id: 1, name: leaf, parent_id: '{{ $.VCategory.root.ID }}'}
+    - {_id: tools, id: 9, name: tools, parent_id: ~}
+    - {_id: api, id: 10, name: api, parent_id: '{{ $.VCategory.tools.ID }}'}
+`,
+		next: `- model: VCategory
+  rows:
+    - {_id: root, id: 2, name: root, parent_id: ~}
+    - {_id: tools, id: 9, name: tools, parent_id: ~}
+    - {_id: branch, id: 5, name: branch, parent_id: '{{ $.VCategory.tools.ID }}'}
+    - {_id: leaf, id: 1, name: leaf, parent_id: '{{ $.VCategory.branch.ID }}'}
+    - {_id: twig, id: 3, name: twig, parent_id: '{{ $.VCategory.leaf.ID }}'}
+    - {_id: api, id: 10, name: api, parent_id: '{{ $.VCategory.tools.ID }}'}
+`,
+		dump: []string{"v_categories"},
+	}.run(t)
+}
+
+// A currency keyed by its ISO code, which is its primary key as well, and a
+// status table whose first row is keyed by "0". Both are ids like any other:
+// the natural key can be the id, and a zero only means "no id" in a serial
+// model.
+type VCurrency struct {
+	bun.BaseModel `bun:"table:v_currencies"`
+	Code          string `bun:"code,pk"`
+	Label         string `bun:"label,notnull"`
+}
+
+type VStatus struct {
+	bun.BaseModel `bun:"table:v_statuses"`
+	Code          string `bun:"code,pk"`
+	Label         string `bun:"label,notnull,unique"`
+}
+
+type VPrice struct {
+	bun.BaseModel `bun:"table:v_prices"`
+	ID            int64  `bun:"id,pk"`
+	Name          string `bun:"name,notnull,unique"`
+	CurrencyCode  string `bun:"currency_code,notnull"`
+	StatusCode    string `bun:"status_code,notnull"`
+}
+
+func TestVariantAKeyThatIsTheIDAndAnIDThatIsZero(t *testing.T) {
+	head := `- model: VCurrency
+  rows:
+    - {_id: eur, code: EUR, label: Euro}
+    - {_id: usd, code: USD, label: Dollar}
+- model: VStatus
+  rows:
+    - {_id: s0, code: "0", label: pending}
+    - {_id: s1, code: "1", label: done}
+`
+	variant{
+		ddl: []string{"DROP TABLE IF EXISTS v_prices, v_currencies, v_statuses",
+			"CREATE TABLE v_currencies (code text PRIMARY KEY, label text NOT NULL)",
+			"CREATE TABLE v_statuses (code text PRIMARY KEY, label text UNIQUE NOT NULL)",
+			"CREATE TABLE v_prices (id bigint PRIMARY KEY, name text UNIQUE NOT NULL, " +
+				"currency_code text NOT NULL REFERENCES v_currencies, status_code text NOT NULL REFERENCES v_statuses)"},
+		models: []any{(*VCurrency)(nil), (*VStatus)(nil), (*VPrice)(nil)},
+		config: `models:
+  VCurrency: {table: v_currencies, id: code, key: [code], ref: code}
+  VStatus: {table: v_statuses, id: code, key: [label], ref: label}
+  VPrice:
+    table: v_prices
+    key: [name]
+    references: {currency_code: VCurrency, status_code: VStatus}
+`,
+		old: head + `- model: VPrice
+  rows:
+    - {id: 1, name: a, currency_code: '{{ $.VCurrency.eur.Code }}', status_code: '{{ $.VStatus.s0.Code }}'}
+`,
+		next: strings.Replace(head, "label: Dollar", "label: US Dollar", 1) + `- model: VPrice
+  rows:
+    - {id: 1, name: a, currency_code: '{{ $.VCurrency.usd.Code }}', status_code: '{{ $.VStatus.s0.Code }}'}
+    - {id: 2, name: b, currency_code: '{{ $.VCurrency.eur.Code }}', status_code: '{{ $.VStatus.s1.Code }}'}
+`,
+		dump: []string{"v_currencies", "v_statuses", "v_prices"},
+	}.run(t)
+}
+
+// Effective-dated prices: closing the old price and opening the next one in
+// one release. A partial unique index allows one open price per plan, so the
+// old one has to be closed first.
+type VPricePlan struct {
+	bun.BaseModel `bun:"table:v_price_plans"`
+	ID            int64  `bun:"id,pk"`
+	Code          string `bun:"code,notnull,unique"`
+}
+
+type VDatedPrice struct {
+	bun.BaseModel `bun:"table:v_dated_prices"`
+	ID            int64      `bun:"id,pk"`
+	PlanID        int64      `bun:"plan_id,notnull"`
+	ValidFrom     time.Time  `bun:"valid_from,notnull"`
+	ValidTo       *time.Time `bun:"valid_to"`
+	Cents         int64      `bun:"cents,notnull"`
+}
+
+func TestVariantClosingAPriceAndOpeningTheNext(t *testing.T) {
+	head := `- model: VPricePlan
+  rows:
+    - {_id: basic, id: 1, code: basic}
+- model: VDatedPrice
+  rows:
+`
+	variant{
+		ddl: []string{"DROP TABLE IF EXISTS v_dated_prices, v_price_plans",
+			"CREATE TABLE v_price_plans (id bigint PRIMARY KEY, code text UNIQUE NOT NULL)",
+			"CREATE TABLE v_dated_prices (id bigint PRIMARY KEY, plan_id bigint NOT NULL REFERENCES v_price_plans, " +
+				"valid_from timestamptz NOT NULL, valid_to timestamptz, cents bigint NOT NULL, UNIQUE (plan_id, valid_from))",
+			"CREATE UNIQUE INDEX v_dated_prices_one_open ON v_dated_prices (plan_id) WHERE valid_to IS NULL"},
+		models: []any{(*VPricePlan)(nil), (*VDatedPrice)(nil)},
+		config: `models:
+  VPricePlan: {table: v_price_plans, ref: code, key: [code]}
+  VDatedPrice: {table: v_dated_prices, key: [plan_id, valid_from], references: {plan_id: VPricePlan}}
+`,
+		old: head + `    - {id: 1, plan_id: '{{ $.VPricePlan.basic.ID }}', valid_from: 2026-01-01T00:00:00Z, valid_to: ~, cents: 900}
+`,
+		next: head + `    - {id: 1, plan_id: '{{ $.VPricePlan.basic.ID }}', valid_from: 2026-01-01T00:00:00Z, valid_to: 2026-11-01T00:00:00Z, cents: 900}
+    - {id: 2, plan_id: '{{ $.VPricePlan.basic.ID }}', valid_from: 2026-11-01T00:00:00Z, valid_to: ~, cents: 1200}
+`,
+		dump: []string{"v_dated_prices"},
+	}.run(t)
+}
+
+// A model that leaves the file entirely: its rows go after the rows that
+// point at them, although the new file does not mention the model at all.
+type VGoneCurrency struct {
+	bun.BaseModel `bun:"table:v_gone_currencies"`
+	ID            int64  `bun:"id,pk"`
+	Code          string `bun:"code,notnull,unique"`
+}
+
+type VGonePlan struct {
+	bun.BaseModel `bun:"table:v_gone_plans"`
+	ID            int64  `bun:"id,pk"`
+	Name          string `bun:"name,notnull,unique"`
+	CurrencyID    *int64 `bun:"currency_id"`
+}
+
+func TestVariantAModelThatLeavesTheFile(t *testing.T) {
+	variant{
+		ddl: []string{"DROP TABLE IF EXISTS v_gone_plans, v_gone_currencies",
+			"CREATE TABLE v_gone_currencies (id bigint PRIMARY KEY, code text UNIQUE NOT NULL)",
+			"CREATE TABLE v_gone_plans (id bigint PRIMARY KEY, name text UNIQUE NOT NULL, " +
+				"currency_id bigint REFERENCES v_gone_currencies)"},
+		models: []any{(*VGoneCurrency)(nil), (*VGonePlan)(nil)},
+		config: `models:
+  VGoneCurrency: {table: v_gone_currencies, ref: code, key: [code]}
+  VGonePlan: {table: v_gone_plans, key: [name], references: {currency_id: VGoneCurrency}}
+`,
+		old: `- model: VGoneCurrency
+  rows:
+    - {_id: usd, id: 1, code: USD}
+- model: VGonePlan
+  rows:
+    - {id: 1, name: a, currency_id: '{{ $.VGoneCurrency.usd.ID }}'}
+    - {id: 2, name: keep, currency_id: ~}
+`,
+		next: `- model: VGonePlan
+  rows:
+    - {id: 2, name: keep, currency_id: ~}
+`,
+		dump: []string{"v_gone_currencies", "v_gone_plans"},
+		noRerun: "a second run resolves the currency the deleted plan's guard names, which the first run " +
+			"deleted, and fails instead of finding the plan already gone",
+	}.run(t)
+}
+
+// A unique value moving from one row to another in one set.
+type VSeat struct {
+	bun.BaseModel `bun:"table:v_seats"`
+	ID            int64  `bun:"id,pk"`
+	Code          string `bun:"code,notnull,unique"`
+	Slot          int64  `bun:"slot,notnull,unique"`
+}
+
+func TestVariantAUniqueValueMovesToAnotherRow(t *testing.T) {
+	variant{
+		ddl: []string{"DROP TABLE IF EXISTS v_seats",
+			"CREATE TABLE v_seats (id bigint PRIMARY KEY, code text UNIQUE NOT NULL, slot bigint UNIQUE NOT NULL)"},
+		models: []any{(*VSeat)(nil)},
+		config: `models:
+  VSeat: {table: v_seats, ref: code, key: [code]}
+`,
+		old:  "- model: VSeat\n  rows:\n    - {id: 1, code: b, slot: 3}\n    - {id: 2, code: a, slot: 1}\n    - {id: 3, code: c, slot: 4}\n",
+		next: "- model: VSeat\n  rows:\n    - {id: 1, code: b, slot: 1}\n    - {id: 2, code: a, slot: 2}\n    - {id: 4, code: d, slot: 4}\n",
+		dump: []string{"v_seats"},
+	}.run(t)
+}
+
 // Names that are reserved words, and a mixed-case table and column.
 type VOrder struct {
 	bun.BaseModel `bun:"table:VOrder"`
@@ -336,6 +552,31 @@ models:
 		old:  "- model: VProduct\n  rows:\n    - {id: 1, sku: A-1, price: 100}\n",
 		next: "- model: VProduct\n  rows:\n    - {id: 1, sku: A-1, price: 150}\n    - {id: 2, sku: B-2, price: 5}\n",
 		dump: []string{"v_catalog.products"},
+	}.run(t)
+}
+
+// A table named without a schema in a configuration whose schema is not
+// public. The migration runs on a connection whose search_path does not
+// look there, so the change set has to name the schema.
+type VRole struct {
+	bun.BaseModel `bun:"table:v_app.roles"`
+	ID            int64  `bun:"id,pk"`
+	Code          string `bun:"code,notnull,unique"`
+	Name          string `bun:"name,notnull"`
+}
+
+func TestVariantATableInTheConfiguredSchema(t *testing.T) {
+	variant{
+		ddl: []string{"DROP SCHEMA IF EXISTS v_app CASCADE", "CREATE SCHEMA v_app",
+			"CREATE TABLE v_app.roles (id bigint PRIMARY KEY, code text UNIQUE NOT NULL, name text NOT NULL)"},
+		models: []any{(*VRole)(nil)},
+		config: `schema: v_app
+models:
+  VRole: {table: roles, ref: code, key: [code]}
+`,
+		old:  "- model: VRole\n  rows:\n    - {id: 1, code: admin, name: Admin}\n    - {id: 2, code: viewer, name: Viewer}\n",
+		next: "- model: VRole\n  rows:\n    - {id: 1, code: admin, name: Admin}\n    - {id: 2, code: viewer, name: Read-only}\n",
+		dump: []string{"v_app.roles"},
 	}.run(t)
 }
 

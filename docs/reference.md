@@ -57,9 +57,11 @@ the triggers are named. Every guess is marked.
 
 ### export
 
-Writes the fixture files from the database: models in dependency order, references as templates
-naming the target row, anchors from the natural key, values in the notation that loads back as the
-same value. With several fixture files, each model goes back into the file that holds it and a new
+Writes the fixture files from the database: models in dependency order, rows in id order except
+that a row pointing at a row of its own model comes after it (a tree's parents before their
+children), references as templates naming the target row, anchors from the natural key, values in
+the notation that loads back as the same value. Rows pointing at each other in a circle are refused:
+`dbfixture` cannot load them in any order. With several fixture files, each model goes back into the file that holds it and a new
 one into the last. Refuses (exit 2) to write a file `dbfixture` would not load back as the database,
 such as a zero bun would replace with a column default. Two exports of one database are the same
 bytes: the header holds no time. Output that cannot all be written, to a full disk or a closed pipe,
@@ -120,6 +122,16 @@ error, such as two rows sharing a natural key, as `sync` refuses one; and a fixt
 directory that the state file's history does not include, which is one generated on another branch
 against an older state, or one written by hand and not recorded with `baseline -force`. See
 [the runbook](production.md#the-state-file-conflicts-in-a-merge).
+
+The changes run in this order: renames, deletes, updates, inserts, and last the updates that point
+at a row inserted in the same migration. A delete or an update can free what an insert takes: a
+value of a unique column, or the open end of a price that a partial unique index or an exclusion
+constraint allows once. On top of that order every change waits for the ones it depends on: a row
+pointing at a new row waits for its insert, parents before children in one table too; a row is
+deleted once nothing in the migration still names it, children before parents; and a row taking a
+value another row of the table gives up waits for it, unless two rows trade values, which no unique
+column allows anyway. Models follow their references, in file order otherwise, whether or not the
+new file still mentions them.
 
 ### baseline
 
@@ -245,7 +257,7 @@ what changing it does. Unknown keys are an error.
 | `state` | `<out>/fixture_state.yml` | the state file |
 | `seed_guard_table` | | a table never empty in a seeded database; while it is empty a fixture migration does nothing. Written into the migration in `schema` when it names none and `schema` is not `public` |
 | `database` | | a DSN, or `env:NAME` to read one from the environment |
-| `schema` | `public` | the schema of tables named without one |
+| `schema` | `public` | the schema of tables named without one. A generated migration names such a table with this schema unless it is `public`, because the application's `search_path` may not include it |
 | `policy` | | see below |
 | `models` | | see below; required |
 
@@ -273,7 +285,7 @@ listed stops every command.
 
 | Key | Values | Default | Decides |
 | --- | --- | --- | --- |
-| `id_drift` | error, warn, ignore | error | a row under another id than the file's, or the file's id held by another row. Under warn and ignore a rename finds its row by the old natural key alone, and warn says when its id is not the file's |
+| `id_drift` | error, warn, ignore | error | a row under another id than the file's, or the file's id held by another row. `warn` reports it as a warning, not a refusal, and migrates the rest of the row; under warn and ignore a rename finds its row by the old natural key alone, and warn says when its id is not the file's |
 | `missing_row` | error, warn | error | an update or delete whose row is not there. `warn` loses the change for good under bun's migrator |
 | `changed_row` | error, warn | warn | a row somebody changed in this database; `warn` keeps their change |
 | `zero_default` | error, warn, ignore | error | a zero in a column whose default is not that zero, which bun replaces with the default |
@@ -281,6 +293,7 @@ listed stops every command.
 | `duplicate_key` | error, warn | error | two rows sharing a natural key |
 | `renames` | refuse, update | refuse | a row that kept its id and changed its natural key |
 | `deletes` | allow, refuse, cascade | allow | a row that left the file. `allow` fails while other rows point at it; `cascade` lets the foreign keys' ON DELETE act |
+| `array_nulls` | refuse, keep | refuse | a null inside a sequence in an array column: `refuse` reports it and refuses a change carrying it, because a `[]string` field drops it and a `[]*string` one keeps it; `keep` says the models' array fields keep it. A model can override it |
 
 `id_drift`, `missing_row` and `changed_row` are copied into every generated migration, so changing
 them later does not change what an existing migration does.
@@ -297,9 +310,9 @@ meaning.
 ```json
 {
   "agree": false,
-  "findings": [{"kind": "zero against a default", "level": "warn", "model": "Feature", "row": "code=api",
+  "findings": [{"kind": "zero against a default", "level": "warn", "model": "Plan", "row": "Plan/name=free",
                 "detail": "..."}],
-  "refusals": [{"model": "Plan", "key": "name=old", "reason": "..."}],
+  "refusals": [{"model": "Plan", "key": "Plan/name=old", "reason": "..."}],
   "changes": [
     {"model": "Plan", "kind": "update", "key": {"name": "team"},
      "database": {"price_cents": "2200"}, "file": {"price_cents": "2500"}}
@@ -312,8 +325,14 @@ kind, `error` or `warn`; a `warn` finding is listed and leaves `agree` true. A c
 migration from the database to the file would do: an `insert` is a row only the file has, a `delete`
 one only the database has.
 
-Finding kinds: `duplicate key`, `zero against a default`, `null against a default`,
-`invalid value` (a value the column's type cannot hold), `unknown column`.
+The `row` of a finding and the `key` of a refusal name the row for a person, as
+`Model/column=value/…`, with a NULL as `NULL` and a reference as `Model(key)`. Two rows can read
+alike there, a NULL and the text `NULL` for instance; the tool never compares rows by it, so they are
+still two rows.
+
+Finding kinds: `duplicate key`, `duplicate id` (two rows of the file sharing one id), `zero against a default`, `null against a default`,
+`invalid value` (a value the column's type cannot hold), `ambiguous value` (a value only the Go
+field's type could settle, such as a null inside a sequence), `unknown column`.
 
 ### status output
 
@@ -436,6 +455,11 @@ fixtureapply.ErrRecordRemoved)` holds: the migration is pending again.
 in a savepoint inside it, which is how a migration that also does other work keeps it all in one
 transaction. Only on the migrator's `*bun.DB` does a failure take back bun's record of the
 migration.
+
+`fixturemigrate.Compute(cfg, old, next)` diffs two snapshots into a `*Result`: `Changes` in the order
+they apply, `Refusals` that need a hand-written migration, and `Warnings` the policy lets a migration
+carry on past (a renumbered row under `id_drift: warn`). Only refusals stop a migration from being
+written.
 
 ### Generated files over time
 

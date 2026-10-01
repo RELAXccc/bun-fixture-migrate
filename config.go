@@ -157,7 +157,24 @@ type Policy struct {
 	Renames RenamePolicy `yaml:"renames"`
 	// Deletes is the default for Model.Deletes.
 	Deletes DeletePolicy `yaml:"deletes"`
+	// ArrayNulls is the default for Model.ArrayNulls.
+	ArrayNulls ArrayNullsPolicy `yaml:"array_nulls"`
 }
+
+// ArrayNullsPolicy says what a null inside a YAML sequence means for the
+// models' array fields. yaml.v3 leaves it out of a []string or []int64 field
+// and keeps it in a []*string one, and the tool cannot see which a model has.
+type ArrayNullsPolicy string
+
+const (
+	// ArrayNullsRefuse makes such a value an "ambiguous value" finding, and
+	// refuses a change that carries it. Leaving the null out reads the same
+	// for every field.
+	ArrayNullsRefuse ArrayNullsPolicy = "refuse"
+	// ArrayNullsKeep says the array fields keep a null element ([]*string,
+	// []sql.NullString and the like), so the array holds a NULL there.
+	ArrayNullsKeep ArrayNullsPolicy = "keep"
+)
 
 // RenamePolicy is what to do with a row whose natural key changed.
 type RenamePolicy string
@@ -227,6 +244,8 @@ type Model struct {
 	// other tables can point at the row and the tool cannot know what should
 	// happen to them.
 	Deletes DeletePolicy `yaml:"deletes"`
+	// ArrayNulls overrides Policy.ArrayNulls for this model.
+	ArrayNulls ArrayNullsPolicy `yaml:"array_nulls"`
 	// Where is an SQL predicate that limits which rows of the table are master
 	// data, for a table that holds other rows too. It is written into every
 	// query the export and check commands run, and it is your text: keep it
@@ -383,6 +402,10 @@ func (c *Config) Prepare() error {
 			return fmt.Errorf("model %q: deletes is %q, it has to be %q, %q or %q", name, m.Deletes,
 				DeleteAllow, DeleteRefuse, DeleteCascade)
 		}
+		if m.ArrayNulls != "" && !m.ArrayNulls.valid() {
+			return fmt.Errorf("model %q: array_nulls is %q, it has to be %q or %q", name, m.ArrayNulls,
+				ArrayNullsRefuse, ArrayNullsKeep)
+		}
 		m.derived = set(m.Derived)
 		m.ignored = set(m.Ignore)
 	}
@@ -424,7 +447,24 @@ func (p *Policy) prepare() error {
 		return fmt.Errorf("policy deletes is %q, it has to be %q, %q or %q", p.Deletes,
 			DeleteAllow, DeleteRefuse, DeleteCascade)
 	}
+	if p.ArrayNulls == "" {
+		p.ArrayNulls = ArrayNullsRefuse
+	}
+	if !p.ArrayNulls.valid() {
+		return fmt.Errorf("policy array_nulls is %q, it has to be %q or %q", p.ArrayNulls,
+			ArrayNullsRefuse, ArrayNullsKeep)
+	}
 	return nil
+}
+
+func (a ArrayNullsPolicy) valid() bool { return a == ArrayNullsRefuse || a == ArrayNullsKeep }
+
+// arrayNulls is what a null inside a sequence means for a model.
+func (c *Config) arrayNulls(m *Model) ArrayNullsPolicy {
+	if m.ArrayNulls != "" {
+		return m.ArrayNulls
+	}
+	return c.Policy.ArrayNulls
 }
 
 func modeList(modes []Mode) string {
@@ -471,6 +511,20 @@ func (c *Config) QualifiedTable(m *Model) string {
 		return m.Table
 	}
 	return c.Schema + "." + m.Table
+}
+
+// RunTimeTable is how a change set names a table: as the configuration
+// writes it when the default schema is public, and qualified with the
+// default schema otherwise. A migration runs on the application's own
+// connection, whose search_path nothing here can vouch for: a table of schema
+// app named "roles" there is not found, or a public.roles is found instead.
+// Keeping public tables unqualified keeps the migrations generated before
+// this the same.
+func (c *Config) RunTimeTable(table string) string {
+	if table == "" || strings.Contains(table, ".") || c.Schema == "" || c.Schema == "public" {
+		return table
+	}
+	return c.Schema + "." + table
 }
 
 // Schemas is every schema a model's table is in: Schema, for the tables

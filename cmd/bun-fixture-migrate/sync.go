@@ -11,10 +11,12 @@ import (
 )
 
 type syncReport struct {
-	Applied  bool                   `json:"applied"`
-	DryRun   bool                   `json:"dry_run"`
-	Findings []checkFinding         `json:"findings"`
-	Refusals []checkRefusal         `json:"refusals"`
+	Applied  bool           `json:"applied"`
+	DryRun   bool           `json:"dry_run"`
+	Findings []checkFinding `json:"findings"`
+	Refusals []checkRefusal `json:"refusals"`
+	// Warnings are what the policy lets a sync carry on past.
+	Warnings []checkRefusal         `json:"warnings"`
 	Changes  []fixtureapply.Outcome `json:"changes"`
 }
 
@@ -48,10 +50,13 @@ func syncCmd(o streams, args []string) error {
 		return err
 	}
 	report := syncReport{Applied: res.Applied, DryRun: !*yes, Findings: findingsJSON(s.cfg, res.Findings),
-		Refusals: []checkRefusal{}, Changes: []fixtureapply.Outcome{}}
+		Refusals: []checkRefusal{}, Warnings: []checkRefusal{}, Changes: []fixtureapply.Outcome{}}
 	if res.Diff != nil {
 		for _, r := range res.Diff.Refusals {
 			report.Refusals = append(report.Refusals, checkRefusal{r.Model, r.Key, r.Reason})
+		}
+		for _, w := range res.Diff.Warnings {
+			report.Warnings = append(report.Warnings, checkRefusal{w.Model, w.Key, w.Reason})
 		}
 	}
 	report.Changes = append(report.Changes, res.Outcomes...)
@@ -90,6 +95,9 @@ func printSync(o streams, r syncReport) {
 	}
 	for _, ref := range r.Refusals {
 		fmt.Fprintln(o.stdout, "refused: "+ref.Model+" "+ref.Key+": "+ref.Reason)
+	}
+	for _, w := range r.Warnings {
+		fmt.Fprintln(o.stdout, "warning: "+w.Model+" "+w.Key+": "+w.Reason)
 	}
 	changes := 0
 	w := tabwriter.NewWriter(o.stdout, 0, 4, 2, ' ', 0)

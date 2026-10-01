@@ -83,8 +83,8 @@ func TestAGeneratedFileReadsBackAsTheSetItRuns(t *testing.T) {
 		!strings.Contains(string(src), `\"why\":\"a `+"`backquote`"+`\"}")`) {
 		t.Fatalf("literals:\n%s", src)
 	}
-	if strings.Join(kinds, ",") != "update,insert,insert,insert,update,update" {
-		t.Fatalf("expected a rename, inserts and updates, got %v", kinds)
+	if strings.Join(kinds, ",") != "update,update,update,insert,insert,insert" {
+		t.Fatalf("expected a rename, updates and inserts, got %v", kinds)
 	}
 }
 

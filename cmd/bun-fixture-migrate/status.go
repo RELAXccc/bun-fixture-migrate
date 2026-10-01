@@ -29,6 +29,8 @@ type statusReport struct {
 	// one line per model; Refused is what generate would refuse of it.
 	Uncovered []string `json:"uncovered"`
 	Refused   []string `json:"refused"`
+	// Warnings are what generate would report and carry on past.
+	Warnings []string `json:"warnings"`
 	// LeftOut are the changes generate -allow-partial refused and recorded in
 	// the state file. No migration makes them until baseline -force says one
 	// written by hand does.
@@ -190,6 +192,9 @@ func status(o streams, args []string) error {
 	if res != nil {
 		r.Uncovered = res.Summary()
 		r.Refused = groupUndecided(res.Refusals)
+		for _, w := range res.Warnings {
+			r.Warnings = append(r.Warnings, w.String())
+		}
 	}
 	_, findings := s.cfg.Worst(head.Findings)
 	errorFindings := 0
@@ -204,7 +209,7 @@ func status(o streams, args []string) error {
 
 	if *asJSON {
 		// A program reads an empty list as [], not as null.
-		for _, list := range []*[]string{&r.Uncovered, &r.Refused, &r.LeftOut, &r.NotInState, &r.Problems, &r.Notes} {
+		for _, list := range []*[]string{&r.Uncovered, &r.Refused, &r.Warnings, &r.LeftOut, &r.NotInState, &r.Problems, &r.Notes} {
 			if *list == nil {
 				*list = []string{}
 			}
@@ -567,6 +572,13 @@ func printStatus(o streams, r *statusReport) {
 			fmt.Fprintf(w, "\tgenerate refuses to write their migration until what is below is put right\n")
 		} else {
 			fmt.Fprintf(w, "\trun: bun-fixture-migrate generate -name <what changed>\n")
+		}
+	}
+	if len(r.Warnings) > 0 {
+		label := "warning"
+		for _, line := range r.Warnings {
+			fmt.Fprintf(w, "%s\t%s\n", label, line)
+			label = ""
 		}
 	}
 	if len(r.LeftOut) > 0 {

@@ -199,3 +199,129 @@ func TestAGuardOnATypeWithoutEqualityWorks(t *testing.T) {
 		t.Fatalf("got %s", got)
 	}
 }
+
+type Alias struct {
+	bun.BaseModel `bun:"table:aliases"`
+
+	ID    int64    `bun:"id,pk"`
+	Name  string   `bun:"name,notnull,unique"`
+	Label string   `bun:"label,notnull"`
+	Note  *string  `bun:"note"`
+	Qty   int64    `bun:"qty,notnull"`
+	Tags  []string `bun:"tags,array"`
+}
+
+// A YAML alias is the value it names: dbfixture stores "shared label" for
+// *lbl and NULL for an alias of ~, and so does a migration. Before, the tool
+// took an alias for a structured value and wrote its JSON, quotes and all, or
+// the text null.
+func TestAnAliasIsTheValueItNames(t *testing.T) {
+	db := connect(t)
+	db.RegisterModel((*Alias)(nil))
+	ctx := context.Background()
+	reset := func() {
+		t.Helper()
+		run(t, db, "DROP TABLE IF EXISTS aliases",
+			"CREATE TABLE aliases (id bigint PRIMARY KEY, name text UNIQUE NOT NULL, label text NOT NULL, "+
+				"note text, qty bigint NOT NULL, tags text[])")
+	}
+	state := func() string {
+		t.Helper()
+		return scan[string](t, db, `SELECT string_agg(concat_ws('|', name, label, coalesce(note, '<null>'), qty, tags::text),
+			E'\n' ORDER BY name) FROM aliases`)
+	}
+	cfg := &fixturemigrate.Config{Schema: "public",
+		Models: map[string]*fixturemigrate.Model{"Alias": {Table: "aliases", Key: []string{"name"}}}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	first := "    - {id: 1, name: first, label: &lbl \"shared label\", note: &nul ~, qty: &q 0x5, tags: &t [x, *lbl]}\n"
+	v1 := "- model: Alias\n  rows:\n" + first
+	v2 := v1 + "    - {id: 2, name: second, label: *lbl, note: *nul, qty: *q, tags: *t}\n"
+
+	reset()
+	loadFixture(t, db, v2)
+	seeded := state()
+	if !strings.Contains(seeded, "second|shared label|<null>|5|{x,\"shared label\"}") {
+		t.Fatalf("this documents what dbfixture stores; if it changed, so did the premise:\n%s", seeded)
+	}
+	head := fixtureSnapshot(t, cfg, v2, "fixture.yml")
+	readOnlyDo(t, db, func(tx bun.Tx, tables map[string]*dbschema.Table) {
+		if err := fixturemigrate.Canonicalize(ctx, tx, cfg, head, tables); err != nil {
+			t.Fatal(err)
+		}
+		database, err := fixturemigrate.DatabaseSnapshot(ctx, tx, cfg, tables,
+			fixturemigrate.SnapshotOptions{Columns: head.Columns, Order: head.Order})
+		if err != nil {
+			t.Fatal(err)
+		}
+		check, err := fixturemigrate.Check(cfg, database, head)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if check.Drifted() {
+			t.Fatalf("the database seeded from the file disagrees with it:\n%s", strings.Join(check.Lines(), "\n"))
+		}
+	})
+
+	old, next := fixtureSnapshot(t, cfg, v1, "v1"), fixtureSnapshot(t, cfg, v2, "v2")
+	readOnlyDo(t, db, func(tx bun.Tx, tables map[string]*dbschema.Table) {
+		for _, s := range []*fixturemigrate.Snapshot{old, next} {
+			if err := fixturemigrate.Canonicalize(ctx, tx, cfg, s, tables); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	res, err := fixturemigrate.Compute(cfg, old, next)
+	if err != nil || len(res.Refusals) != 0 || len(res.Changes) != 1 {
+		t.Fatalf("%v %+v %+v", err, res.Changes, res.Refusals)
+	}
+	reset()
+	loadFixture(t, db, v1)
+	if err := fixtureapply.Apply(ctx, db, fixturechange.Set{Name: "alias", Tables: res.Tables, Changes: res.Changes},
+		quiet()); err != nil {
+		t.Fatal(err)
+	}
+	if migrated := state(); migrated != seeded {
+		t.Fatalf("the migration wrote something else than dbfixture\nmigrated %s\n  seeded %s", migrated, seeded)
+	}
+}
+
+// A null in a sequence is left out of a []string field and kept in a
+// []*string one, and nothing in the database says which the model has. It is
+// a finding, and a change carrying it is refused.
+func TestANullInASequenceIsAmbiguous(t *testing.T) {
+	db := flagDB(t)
+	cfg := flagConfig(t)
+	text := strings.Replace(flagFixture, `tags: [x, "y z", "01", "a,b"]`, `tags: [x, ~, "01"]`, 1)
+	loadFixture(t, db, text)
+	if got := scan[string](t, db, "SELECT tags::text FROM flags WHERE name = 'beta'"); got != "{x,01}" {
+		t.Fatalf("this documents what dbfixture stores for a []string; if it changed, so did the premise: %s", got)
+	}
+	head := fixtureSnapshot(t, cfg, text, "fixture.yml")
+	if len(head.Findings) != 1 || head.Findings[0].Kind != fixturemigrate.FindingAmbiguousValue ||
+		!strings.Contains(head.Findings[0].Detail, "tags: it is a sequence holding a null") {
+		t.Fatalf("expected the null to be reported, got %+v", head.Findings)
+	}
+	res, err := fixturemigrate.Compute(cfg, fixtureSnapshot(t, cfg, flagFixture, "old"), head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Changes) != 0 || len(res.Refusals) != 1 || !strings.Contains(res.Refusals[0].Reason, "holding a null") {
+		t.Fatalf("expected the change to be refused, got %+v / %+v", res.Changes, res.Refusals)
+	}
+
+	// A project whose array fields keep a null says so, and the null is an
+	// element of the array.
+	cfg.Models["Flag"].ArrayNulls = fixturemigrate.ArrayNullsKeep
+	head = fixtureSnapshot(t, cfg, text, "fixture.yml")
+	if len(head.Findings) != 0 {
+		t.Fatalf("array_nulls: keep settles it, got %+v", head.Findings)
+	}
+	if res, err = fixturemigrate.Compute(cfg, fixtureSnapshot(t, cfg, flagFixture, "old"), head); err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Refusals) != 0 || len(res.Changes) != 1 || res.Changes[0].New["tags"].Lit != `["x",null,"01"]` {
+		t.Fatalf("expected the change to write the null, got %+v / %+v", res.Changes, res.Refusals)
+	}
+}

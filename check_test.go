@@ -164,3 +164,18 @@ func TestWorstFollowsThePolicyPerKind(t *testing.T) {
 		t.Fatalf("FindingMode(unknown column) = %q", got)
 	}
 }
+
+// A row whose id drifted, with policy.id_drift set to warn, is reported as a
+// warning and does not stop anything.
+func TestCheckReportsAWarningAsOne(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Policy.IDDrift = ModeWarn
+	res := checkOf(t, cfg, base, strings.Replace(base, "      id: 2\n      name: team\n", "      id: 7\n      name: team\n", 1))
+	if len(res.Refusals) != 0 || len(res.Warnings) != 1 || !res.Drifted() {
+		t.Fatalf("expected one warning, got %+v / %+v", res.Warnings, res.Refusals)
+	}
+	report := strings.Join(res.Lines(), "\n")
+	if !strings.Contains(report, "Warnings, which the policy lets a migration carry on past:\n  Plan Plan/name=team: its id changed from 2 to 7") {
+		t.Fatalf("unexpected report:\n%s", report)
+	}
+}

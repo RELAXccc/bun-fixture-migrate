@@ -145,6 +145,24 @@ func TestGenerateWritesTheFileItNames(t *testing.T) {
 	}
 }
 
+// id_drift: warn reports a renumbered row and carries on: before, generate
+// put the warning among the refusals and refused the whole migration, with a
+// message telling the user to set the policy it already had.
+func TestIDDriftWarnIsAWarning(t *testing.T) {
+	renumbered := strings.Replace(newFixture, "      id: 2\n", "      id: 7\n", 1)
+	for policy, want := range map[string]int{"error": 2, "warn": 0} {
+		cfg, base := projectWith(t, config+"policy:\n  id_drift: "+policy+"\n", renumbered, oldFixture)
+		code, stdout, stderr := call(t, "generate", "-config", cfg, "-old", base, "-name", "prices", "-dry-run")
+		if code != want {
+			t.Fatalf("id_drift: %s: exit %d, want %d\n%s%s", policy, code, want, stdout, stderr)
+		}
+		if policy == "warn" && (!strings.Contains(stderr, "warning:") || strings.Contains(stderr, "refused:") ||
+			!strings.Contains(stdout, "price_cents")) {
+			t.Fatalf("id_drift: warn has to warn and write the price change:\n%s%s", stdout, stderr)
+		}
+	}
+}
+
 // -at makes the output the same on every run: a release script, a test that
 // replays a project's history, a reviewer regenerating to compare.
 func TestGenerateAtATimeIsReproducible(t *testing.T) {

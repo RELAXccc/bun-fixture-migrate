@@ -28,9 +28,19 @@ it means to `dbfixture` and PostgreSQL. Each rule below is checked against the r
 - Several files loaded with one `fixture.Load` share one scope of anchors, in load order.
 - Any other template, `{{ now }}` or a function call, is evaluated by `dbfixture` when it loads the
   file, so the database never holds its text. It is refused rather than compared or written into a
-  migration; `ignore` the column.
+  migration; `ignore` the column. A template of text and string constants is the exception: it
+  evaluates to the same text anywhere, and `'{{ "Hello {{ name }}" }}'` is how a file stores a value
+  holding the delimiters. It reads as `Hello {{ name }}`.
 - A reference column (`references:`) holding a plain id resolves through the row of the file that
-  declares that id. `~` is NULL. `0`, `""` or null point at nothing and stay literals.
+  declares that id. `~` is NULL. `0` or `""` point at nothing and stay literals, unless a row has
+  that id: a zero is "no id" only in a `serial` model, where bun leaves it to the sequence.
+- A reference names its row by that row's ref value as the database holds it, which is the ref
+  column's to decide: `code: 0012` is the integer 10 in a `bigint` column and the text `0012` in a
+  `text` one, and every reference to that row carries the same. So does a template copying a field,
+  `{{ $.Currency.eur.Code }}`: it hands on what the field holds, which the field's type decides.
+  Without the database, a change that depends on which one it is is refused, as a
+  [value](#values) is. A ref column that is itself a template, and a copy of a field that is, are
+  refused: write the value.
 - `export` writes anchors from the natural key (prefixed with `r` when the key starts with a digit)
   and every reference as a template.
 
@@ -53,6 +63,13 @@ as written, and any other field the value it resolves to:
 | `!!binary SGk=` | the text it encodes, `Hi` | the text it encodes |
 | `1.5` in an integer column | | a finding: an integer field holds `1`, a string field is refused |
 | a mapping `{sso: true}` or a sequence | | in `json` or `jsonb` the JSON document; in an array column the array, nested for a multidimensional one; in `bytea` the bytes of a sequence of byte values, the only YAML a `[]byte` field loads |
+| an alias `*name` | the value it names | the value it names |
+
+A null inside a sequence, `[a, ~, b]`, is left out by a `[]string` or `[]int64` field and kept by a
+`[]*string` one, and no column type says which the model has: it is an `ambiguous value` finding,
+and a change carrying it is refused, unless `array_nulls: keep` in the policy or on the model says
+its array fields keep a null. An alias of a template is refused too: `dbfixture` evaluates a
+template only where it is written, and would store the text of one reached through an alias.
 
 The tool keeps both readings of such a value and lets the column decide: a column of a string type,
 a domain over one, an enum, or an array of any of them takes the value as written, everything else
@@ -183,6 +200,11 @@ defaults:
 `scaffold` fills `defaults` from the column defaults. `~` is right for a column added to a table
 later, which holds NULL in the rows written before it.
 
+A row that leaves out a column other rows of its model write, with no `defaults` entry for it, is
+not inserted by a migration: `dbfixture` stores the field's zero there, or NULL, or the column's
+default, depending on the model, and every comparison with the database would refuse the row
+afterwards. Write the column, or say in `defaults` what leaving it out means.
+
 The comparison stays literal: the tool never substitutes a column default for a value the file
 writes. A value bun would not write as it stands (a zero into a column with a default, a null into
 a column with a default) is a fault in the file, and the lint says so.
@@ -203,6 +225,12 @@ Each ends up in the output with the model, the row and a reason; `generate` writ
 - **A renumbered primary key**: the same natural key under a different id, under `policy.id_drift`.
 - **A delete of a model marked `deletes: refuse`.** Whether the rows pointing at it should go with
   it, be repointed or block the delete is a decision about your data.
+- **A reference to a ref value more than one row holds**, such as two categories called
+  `Accessories` under different parents: a migration finds the row a reference names by that value
+  alone. Make the ref column unique.
+- **Two rows sharing one id**, which two branches each adding the next id leave behind: `dbfixture`
+  cannot load the file, so it is a `duplicate id` finding, and an insert writing that id is
+  refused. Neither row is taken for a rename of the other.
 - **Rows whose natural key is not unique**, once the group changes. Two rows with one key cannot be
   told apart by a `WHERE` clause. An unchanged duplicate group is left alone; `check` and `export`
   list every one.
@@ -211,6 +239,8 @@ Each ends up in the output with the model, the row and a reason; `generate` writ
   not happen.
 - **A generated column** in the file, and **an explicit id** in a `GENERATED ALWAYS AS IDENTITY`
   column: PostgreSQL refuses to write either.
+- **A null in a NOT NULL column without a default**, an `invalid value`: bun writes a plain field's
+  zero there instead, and a pointer field, like a migration, fails the insert.
 - **A value only the column's type can settle**, such as `1.10` or `017`, in a change computed
   without a database; see [values](#values).
 - **A value the column cannot take as `dbfixture` writes it**, an `invalid value`: one PostgreSQL

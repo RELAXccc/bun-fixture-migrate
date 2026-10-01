@@ -57,6 +57,9 @@ func TestPrepareRejectsBadConfigurations(t *testing.T) {
 		"unknown target":  {&Config{Models: map[string]*Model{"Plan": {Table: "plans", References: map[string]string{"currency_id": "Currency"}}}}, "unknown model"},
 		"empty key group": {&Config{Models: map[string]*Model{"Plan": {Table: "plans", KeyAnyOf: [][]string{{}}}}}, "is empty"},
 		"lock timeout":    {&Config{LockTimeout: "5", Models: map[string]*Model{"Plan": {Table: "plans"}}}, "lock timeout"},
+		"array nulls":     {&Config{Policy: Policy{ArrayNulls: "drop"}, Models: map[string]*Model{"Plan": {Table: "plans"}}}, "array_nulls"},
+		"model array nulls": {&Config{Models: map[string]*Model{"Plan": {Table: "plans", ArrayNulls: "maybe"}}},
+			"array_nulls"},
 	} {
 		err := tc.cfg.Prepare()
 		if err == nil || !strings.Contains(err.Error(), tc.want) {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"text/template/parse"
 
 	"gopkg.in/yaml.v3"
 )
@@ -38,6 +39,11 @@ type Cell struct {
 	// which is what a []string field gets. Which one the database holds
 	// depends on the column's type.
 	StringText string
+	// Unsure says why the value is one thing to one Go field type and
+	// another to another, which no column type settles and this tool cannot
+	// see: a sequence holding a null, which yaml.v3 drops for a []string or
+	// []int64 field and keeps for a []*string. "" for any other value.
+	Unsure string
 }
 
 // Row is one fixture row.
@@ -84,12 +90,31 @@ func ParseDoc(data []byte) (Doc, error) {
 }
 
 func cellOf(node yaml.Node) (Cell, error) {
+	// An alias (*name) is the node it names, to yaml.v3 and so to dbfixture,
+	// with one difference: dbfixture evaluates a template only in a scalar
+	// tagged !!str, and an alias has no tag. The text of a template reached
+	// through an alias is stored as it is, which no other value of the file
+	// does, so it is refused rather than read either way.
+	if node.Kind == yaml.AliasNode {
+		target := resolveAlias(&node)
+		if target == nil {
+			return Cell{}, fmt.Errorf("line %d: an alias of nothing", node.Line)
+		}
+		if target.Kind == yaml.ScalarNode && anyTemplate.MatchString(target.Value) {
+			return Cell{}, fmt.Errorf("line %d: *%s stands for %s, which dbfixture stores as that text instead of "+
+				"evaluating it, because it does not evaluate a template reached through an alias: write the "+
+				"template itself here", node.Line, node.Value, target.Value)
+		}
+		return cellOf(*target)
+	}
 	switch {
 	case node.Tag == "!!null":
 		return Cell{IsNull: true}, nil
 	case node.Kind == yaml.ScalarNode:
 		c := Cell{Text: node.Value, Tag: node.ShortTag()}
-		if scalarText(c) != c.Text {
+		// A !!binary value is the bytes it decodes to, in a string field as
+		// in any other: it reads one way only.
+		if c.Tag != "!!binary" && scalarText(c) != c.Text {
 			c.StringText = c.Text
 		}
 		return c, nil
@@ -100,8 +125,24 @@ func cellOf(node yaml.Node) (Cell, error) {
 		if err != nil {
 			return Cell{}, err
 		}
-		return Cell{Text: text, Structured: true, StringText: sequenceAsWritten(&node)}, nil
+		c := Cell{Text: text, Structured: true, StringText: sequenceAsWritten(&node)}
+		if holdsNullElement(&node) {
+			c.Unsure = nullElementReason
+		}
+		return c, nil
 	}
+}
+
+// resolveAlias is the node an alias names, through any number of aliases,
+// and any other node itself; nil for an alias of nothing.
+func resolveAlias(n *yaml.Node) *yaml.Node {
+	for i := 0; n != nil && n.Kind == yaml.AliasNode; i++ {
+		if i > 100 {
+			return nil
+		}
+		n = n.Alias
+	}
+	return n
 }
 
 // sequenceAsWritten is a sequence of scalars as a []string field gets it, as a
@@ -115,13 +156,16 @@ func sequenceAsWritten(n *yaml.Node) string {
 	texts := make([]string, 0, len(n.Content))
 	differs := false
 	for _, e := range n.Content {
-		if e.Kind != yaml.ScalarNode || e.ShortTag() == "!!null" {
+		if e = resolveAlias(e); e == nil || e.Kind != yaml.ScalarNode || e.ShortTag() == "!!null" {
 			return ""
 		}
-		if scalarText(Cell{Text: e.Value, Tag: e.ShortTag()}) != e.Value {
+		text := e.Value
+		if e.ShortTag() == "!!binary" {
+			text = scalarText(Cell{Text: e.Value, Tag: "!!binary"})
+		} else if scalarText(Cell{Text: e.Value, Tag: e.ShortTag()}) != e.Value {
 			differs = true
 		}
-		texts = append(texts, e.Value)
+		texts = append(texts, text)
 	}
 	if !differs {
 		return ""
@@ -157,6 +201,63 @@ var looseTemplate = regexp.MustCompile(`^\{\{ \s*\$\.([A-Za-z_][A-Za-z0-9_]*)\.(
 // (tplRE). A value it matches never reaches the database as written: dbfixture
 // replaces it with whatever the template produces.
 var anyTemplate = regexp.MustCompile(`\{\{ .+ \}\}`)
+
+// literalTemplate is what a template made of nothing but text and string
+// constants evaluates to, '{{ "Hello {{ name }}" }}' among them: that text,
+// whatever dbfixture's data and functions. It is how a file has dbfixture
+// store a value holding "{{ " and " }}". ok is false for any other template,
+// whose value depends on what dbfixture evaluates it against.
+func literalTemplate(text string) (string, bool) {
+	trees, err := parse.Parse("", text, "{{", "}}")
+	if err != nil || len(trees) != 1 || trees[""] == nil {
+		return "", false
+	}
+	var b strings.Builder
+	for _, n := range trees[""].Root.Nodes {
+		switch n := n.(type) {
+		case *parse.TextNode:
+			b.Write(n.Text)
+		case *parse.ActionNode:
+			if len(n.Pipe.Decl) > 0 || len(n.Pipe.Cmds) != 1 || len(n.Pipe.Cmds[0].Args) != 1 {
+				return "", false
+			}
+			s, ok := n.Pipe.Cmds[0].Args[0].(*parse.StringNode)
+			if !ok {
+				return "", false
+			}
+			b.WriteString(s.Text)
+		default:
+			return "", false
+		}
+	}
+	return b.String(), true
+}
+
+// nullElementReason is why a sequence holding a null is undecided. The
+// configuration's array_nulls settles it for a model whose array fields keep a
+// null element.
+const nullElementReason = "it is a sequence holding a null, which yaml.v3 leaves out of a []string or []int64 " +
+	"field and keeps in a []*string one, and only the model says which it has: leave the null out, which every " +
+	"field reads the same way, or set array_nulls: keep if the model's array fields keep a null"
+
+// holdsNullElement reports a sequence with a null among its elements, or
+// among the elements of a sequence nested in it: yaml.v3 leaves a null out of
+// an inner []string as it does out of an outer one.
+func holdsNullElement(n *yaml.Node) bool {
+	if n.Kind != yaml.SequenceNode {
+		return false
+	}
+	for _, e := range n.Content {
+		e := resolveAlias(e)
+		if e == nil {
+			continue
+		}
+		if e.ShortTag() == "!!null" || holdsNullElement(e) {
+			return true
+		}
+	}
+	return false
+}
 
 // underscore is bun's default column name for a Go field name, so a template
 // that names a field ("ID", "GroupName") can be matched against a column.

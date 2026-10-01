@@ -1,6 +1,8 @@
 package fixturemigrate
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
@@ -70,5 +72,16 @@ func TestFixtureLabel(t *testing.T) {
 	c.Fixtures = []string{"a.yml", "b.yml"}
 	if c.FixtureLabel() != "a.yml, b.yml" {
 		t.Fatal(c.FixtureLabel())
+	}
+}
+
+// A snapshot built by hand can name a model the configuration does not have.
+// That is the mistake FixtureSnapshot refuses, and it has to be an error here
+// too rather than a nil pointer.
+func TestCanonicalizeRefusesAModelMissingFromTheConfiguration(t *testing.T) {
+	snap := &Snapshot{Order: []string{"Coupon"}, Entries: map[string][]*Entry{}}
+	err := Canonicalize(context.Background(), nil, testConfig(t), snap, nil)
+	if err == nil || !strings.Contains(err.Error(), `"Coupon"`) {
+		t.Fatalf("expected an error naming the model, got %v", err)
 	}
 }
