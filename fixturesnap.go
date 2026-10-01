@@ -144,6 +144,10 @@ type reading struct {
 	// json is what a json or jsonb column, or a timestamptz one, holds in
 	// place of the value, when that is something else; see Cell.JSONText.
 	json string
+	// copied is, for a template copying a field other than the id, that
+	// field: dbfixture stores what the field holds as fmt prints it, which
+	// its Go type decides.
+	copied *source
 }
 
 // source names a column of a model.
@@ -244,8 +248,17 @@ func (ix *index) resolveTemplate(model, col, text string, match []string, target
 	if !ok {
 		return reading{}, fmt.Errorf("%s.%s: %s names no column %q of %s", model, col, text, column, tmodel)
 	}
+	// dbfixture copies a field by printing what it holds with fmt, which
+	// prints a nil pointer as <nil>, a plain field's zero as "" or 0, a map
+	// or a slice as map[...] or [...]: nothing that is the value written.
 	if tcell.IsNull {
-		return reading{Value: fixturechange.Null()}, nil
+		return reading{}, fmt.Errorf("%s.%s: %s copies %s, which is null in that row, and dbfixture copies what the "+
+			"field holds as fmt prints it: <nil> for a nil pointer, \"\" or 0 for a plain field, which only the "+
+			"model knows: write the value here", model, col, text, column)
+	}
+	if tcell.Structured {
+		return reading{}, fmt.Errorf("%s.%s: %s copies %s, which is a mapping or a sequence in that row, and "+
+			"dbfixture copies it as fmt prints a map or a slice: write the value here", model, col, text, column)
 	}
 	if !tcell.Structured && anyTemplate.MatchString(tcell.Text) {
 		lit, ok := literalTemplate(tcell.Text)
@@ -257,7 +270,7 @@ func (ix *index) resolveTemplate(model, col, text string, match []string, target
 		tcell = Cell{Text: lit, Tag: "!!str"}
 	}
 	return reading{Value: fixturechange.Lit(scalarText(tcell)), written: tcell.StringText,
-		from: &source{tmodel, column}}, nil
+		from: &source{tmodel, column}, copied: &source{tmodel, column}}, nil
 }
 
 // refByID turns the id a reference column holds into a reference by key, using
@@ -387,6 +400,10 @@ func (ix *index) entry(model string, m *Model, row Row) (*Entry, error) {
 	if err != nil {
 		return nil, err
 	}
+	if c, ok := row[m.ID]; ok && !c.IsNull && !c.Structured && c.Tag == "!!str" && anyTemplate.MatchString(c.Text) {
+		return nil, fmt.Errorf("%s.%s is %s, a template, and this tool reads %s as the row's own id, not as "+
+			"something dbfixture works out: write the id", model, m.ID, strings.TrimSpace(c.Text), m.ID)
+	}
 	e := &Entry{
 		Anchor: row.Str(anchorColumn),
 		ID:     idText(m, row),
@@ -442,6 +459,16 @@ func (e *Entry) record(col string, r reading) {
 			e.asJSON = map[string]string{}
 		}
 		e.asJSON[col] = r.json
+	}
+	if r.copied != nil {
+		if e.copied == nil {
+			e.copied = map[string]source{}
+		}
+		e.copied[col] = *r.copied
+		if e.from == nil {
+			e.from = map[string]source{}
+		}
+		e.from[col] = *r.from
 	}
 	if r.written == "" {
 		return

@@ -6,6 +6,7 @@ package dbtest_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,4 +106,67 @@ func TestReviewAMergeKeyInsideAJSONMapping(t *testing.T) {
 	if got := l.current(); got != `a|{"j": 2, "k": 1, "deep": {"x": 1}}`+"\n"+`b|{"j": 3, "k": 1, "z": 9, "deep": {"x": 1, "y": 2}}` {
 		t.Fatalf("dbfixture stored %s", got)
 	}
+}
+
+type RvSrc struct {
+	bun.BaseModel `bun:"table:rv_src"`
+	ID            int64     `bun:"id,pk"`
+	Name          string    `bun:"name,notnull"`
+	Note          *string   `bun:"note"`
+	N             int64     `bun:"n"`
+	F             float64   `bun:"f"`
+	At            time.Time `bun:"at,nullzero"`
+}
+
+type RvDst struct {
+	bun.BaseModel `bun:"table:rv_dst"`
+	ID            int64  `bun:"id,pk"`
+	Name          string `bun:"name,notnull"`
+	Copy          string `bun:"copy"`
+}
+
+// dbfixture copies a field by printing it with fmt: a string or an integer
+// as it is, which the tool reads and a migration writes; a nil pointer as
+// <nil>, a float64 of 100000000 as 1e+08 and a time.Time with its zone's
+// name, which no file can write, and which are refused.
+func TestReviewATemplateCopyIsWhatFmtPrints(t *testing.T) {
+	l := newLab(t, map[string]*fixturemigrate.Model{
+		"RvSrc": {Table: "rv_src", Key: []string{"name"}},
+		"RvDst": {Table: "rv_dst", Key: []string{"name"}},
+	}, "rv_dst",
+		[]string{"DROP TABLE IF EXISTS rv_src", "DROP TABLE IF EXISTS rv_dst",
+			"CREATE TABLE rv_src (id bigint PRIMARY KEY, name text NOT NULL UNIQUE, note text, n bigint, f float8, at timestamptz)",
+			"CREATE TABLE rv_dst (id bigint PRIMARY KEY, name text NOT NULL UNIQUE, copy text)"},
+		`SELECT string_agg(concat_ws('|', name, coalesce(copy, '<NULL>')), E'\n' ORDER BY name) FROM rv_dst`,
+		(*RvSrc)(nil), (*RvDst)(nil))
+	src := "- model: RvSrc\n  rows:\n    - {_id: s, id: 1, name: 1.10, note: ~, n: 0x1F, f: 100000000, at: 2026-01-01T10:00:00Z}\n"
+	dst := func(field string) string {
+		return src + "- model: RvDst\n  rows:\n    - {id: 1, name: d, copy: '{{ $.RvSrc.s." + field + " }}'}\n"
+	}
+	v1 := src + "- model: RvDst\n  rows:\n    - {id: 1, name: d, copy: x}\n"
+	l.fidelity(v1, dst("Name"))
+	if got := l.current(); got != "d|1.10" {
+		t.Fatalf("dbfixture stored %s", got)
+	}
+	l.fidelity(v1, dst("N"))
+	if got := l.current(); got != "d|31" {
+		t.Fatalf("dbfixture stored %s", got)
+	}
+	if _, err := fixturemigrate.FixtureSnapshot(l.cfg, mustParse(t, dst("Note")), "fixture.yml"); err == nil ||
+		!strings.Contains(err.Error(), "which is null in that row") {
+		t.Fatalf("expected a copy of a null to be refused, got %v", err)
+	}
+	for field, column := range map[string]string{"F": "f of a RvSrc row, a double precision", "At": "at of a RvSrc row, a timestamp with time zone"} {
+		l.seed(dst(field))
+		l.refused(dst(field), "copy copies "+column+" column")
+	}
+}
+
+func mustParse(t *testing.T, text string) fixturemigrate.Doc {
+	t.Helper()
+	doc, err := fixturemigrate.ParseDoc([]byte(text))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return doc
 }

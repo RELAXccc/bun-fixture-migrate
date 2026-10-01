@@ -47,6 +47,14 @@ type Entry struct {
 	// readings: the ref column of the row a reference names, or the field a
 	// template copies. Any other column decides for itself.
 	from map[string]source
+	// copied holds, for a fixture row, the columns a template copies from a
+	// field of another row other than its id, with that field. dbfixture
+	// stores what the field holds as fmt prints it, which only the field's
+	// Go type decides: a string or an integer as it is, a float64 of
+	// 100000000 as 1e+08, a time.Time with its zone's name. Canonicalize
+	// settles a copy of a string or an integer column and reports any
+	// other; a change carrying one it has not settled is refused.
+	copied map[string]source
 	// asJSON holds, for a fixture row, the columns whose value a json or
 	// jsonb column holds as something else than Cells says, with that JSON;
 	// see Cell.JSONText. Canonicalize takes it for such a column, and for a
@@ -138,6 +146,12 @@ func (s *Snapshot) clone() *Snapshot {
 				c.from = make(map[string]source, len(e.from))
 				for col, src := range e.from {
 					c.from[col] = src
+				}
+			}
+			if e.copied != nil {
+				c.copied = make(map[string]source, len(e.copied))
+				for col, src := range e.copied {
+					c.copied[col] = src
 				}
 			}
 			if e.asJSON != nil {

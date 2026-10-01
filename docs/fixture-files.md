@@ -41,6 +41,13 @@ it means to `dbfixture` and PostgreSQL. Each rule below is checked against the r
   Without the database, a change that depends on which one it is is refused, as a
   [value](#values) is. A ref column that is itself a template, and a copy of a field that is, are
   refused: write the value.
+- A template copying a field other than the id stores what the field holds as Go's `fmt` prints it.
+  That is the value for a field of a string or an integer column, and nothing a file can write for
+  any other: a `float64` of 100000000 prints as `1e+08`, a `time.Time` as
+  `2026-01-01 10:00:00 +0000 UTC`, a nil pointer as `<nil>`. So a copy of a null, of a mapping or
+  sequence, or of a column of another type is refused; without the database, which says the column's
+  type, a change carrying a copy is. An id written as a template is refused too: the tool reads the
+  id as the row's own value.
 - `export` writes anchors from the natural key (prefixed with `r` when the key starts with a digit)
   and every reference as a template.
 

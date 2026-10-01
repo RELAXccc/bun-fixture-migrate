@@ -230,6 +230,21 @@ func undecided(label string, m *Model, c fixturechange.Change, prev, cur *Entry)
 			}
 		}
 	}
+	for _, e := range []*Entry{prev, cur} {
+		if e == nil {
+			continue
+		}
+		for _, col := range sortedSources(e.copied) {
+			if carried(col) {
+				src := e.copied[col]
+				return Refusal{c.Model, label, fmt.Sprintf("%s copies %s of a %s row, and dbfixture stores what that "+
+					"field holds as fmt prints it, which only its type says: a string or an integer as it is, a "+
+					"float64 of 100000000 as 1e+08, a time.Time with its zone. With the database configured (and "+
+					"without -no-lint) the tool reads the column's type and decides; or write the value here",
+					col, src.column, src.model)}, true
+			}
+		}
+	}
 	cols := undecidedColumns(m, prev, cur, func(col, _, _ string) bool { return carried(col) })
 	if len(cols) == 0 {
 		return Refusal{}, false

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -60,6 +61,7 @@ const castBatch = 500
 // The casts run in savepoints, so a value that fails leaves db's transaction
 // usable, and nothing is written.
 func Canonicalize(ctx context.Context, db bun.IDB, cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table) error {
+	settleCopies(cfg, snap, tables)
 	refCanon := map[string]map[string]string{} // model -> ref value as written -> canonical
 	for _, model := range snap.Order {
 		// A model nobody configured has no table to cast against, and
@@ -217,6 +219,57 @@ func sourceOf(e *Entry, m *Model, col string, decide dbschema.Column) (string, b
 // midnight UTC to it, not midnight wherever the seeding session is.
 func instants(c dbschema.Column) bool {
 	return c.Type == "timestamptz" || (c.Category == "A" && c.ElemType == "timestamptz")
+}
+
+// settleCopies decides, for every template copying a field of another row,
+// what dbfixture stores: what the field holds as fmt prints it. A field of a
+// string type prints as it is, the value a string field holds, and an
+// integer as the integer; a field of any other type prints otherwise than
+// any value the file can write, a float64 of 100000000 as 1e+08, a time.Time
+// as 2026-01-01 10:00:00 +0000 UTC, and is an invalid value. A copy whose
+// field's column is not in tables is left undecided.
+func settleCopies(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table) {
+	for _, model := range snap.Order {
+		for _, e := range snap.Entries[model] {
+			for _, col := range sortedSources(e.copied) {
+				decide, known := decidingColumn(cfg, tables, e, col, dbschema.Column{})
+				if !known {
+					continue
+				}
+				delete(e.copied, col)
+				if decide.StringField() || integerType(decide) {
+					continue
+				}
+				src := e.from[col]
+				snap.Findings = append(snap.Findings, Finding{
+					Kind: FindingInvalidValue, Model: model, Row: e.label(model),
+					Detail: fmt.Sprintf("%s copies %s of a %s row, a %s column, and dbfixture stores what that field "+
+						"holds as fmt prints it, which for a field of such a type is not a value a file can write: "+
+						"a float64 of 100000000 is 1e+08, a time.Time 2026-01-01 10:00:00 +0000 UTC. Write the "+
+						"value here", col, src.column, src.model, decide.FullType),
+				})
+			}
+		}
+	}
+}
+
+// integerType reports a column of whole numbers, which a Go integer field
+// writes, and fmt prints as the number.
+func integerType(c dbschema.Column) bool {
+	switch c.Type {
+	case "int2", "int4", "int8":
+		return c.Category != "A"
+	}
+	return false
+}
+
+func sortedSources(m map[string]source) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // decidingColumn is the column whose type says which reading of an entry's
