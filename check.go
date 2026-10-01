@@ -24,6 +24,18 @@ func (c *CheckResult) Drifted() bool {
 	return len(c.Changes) > 0 || len(c.Refusals) > 0 || len(c.Findings) > 0
 }
 
+// Agree reports whether the database and the fixture files agree as far as
+// the policy goes: no difference, nothing generate would refuse, and no
+// finding the policy makes an error. A finding the policy makes a warning is
+// reported, and is not disagreement: that is what a warning is for.
+func (c *CheckResult) Agree(cfg *Config) bool {
+	if len(c.Changes) > 0 || len(c.Refusals) > 0 {
+		return false
+	}
+	mode, _ := cfg.Worst(c.Findings)
+	return mode != ModeError
+}
+
 // Check compares a database snapshot with a fixture-file snapshot. It writes
 // nothing and decides nothing; the report is for a person.
 //

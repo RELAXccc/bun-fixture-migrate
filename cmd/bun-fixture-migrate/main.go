@@ -440,21 +440,22 @@ func check(o streams, args []string) error {
 	if err != nil {
 		return err
 	}
-	mode, findings := s.cfg.Worst(res.Findings)
-	res.Findings = findings
+	_, res.Findings = s.cfg.Worst(res.Findings)
+	agree := res.Agree(s.cfg)
 	if *asJSON {
-		if err := writeJSON(o.stdout, checkJSON(res)); err != nil {
+		if err := writeJSON(o.stdout, checkJSON(s.cfg, res)); err != nil {
 			return err
 		}
 	} else {
 		for _, line := range res.Lines() {
 			fmt.Fprintln(o.stdout, line)
 		}
+		if agree && res.Drifted() {
+			fmt.Fprintf(o.stdout, "\nthe database and %s agree; the policy makes the findings above warnings\n",
+				s.cfg.FixtureLabel())
+		}
 	}
-	if !res.Drifted() {
-		return nil
-	}
-	if mode == fixturemigrate.ModeError || len(res.Changes) > 0 || len(res.Refusals) > 0 {
+	if !agree {
 		return exitError{3, "the database and " + s.cfg.FixtureLabel() + " do not agree"}
 	}
 	return nil

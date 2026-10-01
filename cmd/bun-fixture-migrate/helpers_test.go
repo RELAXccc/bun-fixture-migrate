@@ -28,7 +28,7 @@ func TestCheckJSONTellsValuesApart(t *testing.T) {
 		New: fixturechange.Values{"note": fixturechange.Null(), "currency_id": fixturechange.RefTo("Currency", "USD")},
 	}}}}
 	var buf bytes.Buffer
-	if err := writeJSON(&buf, checkJSON(res)); err != nil {
+	if err := writeJSON(&buf, checkJSON(policyConfig(t, ""), res)); err != nil {
 		t.Fatal(err)
 	}
 	var back struct {
@@ -51,6 +51,37 @@ func TestCheckJSONTellsValuesApart(t *testing.T) {
 	}
 	if jsonValues(nil) != nil {
 		t.Fatal("no values is no object")
+	}
+}
+
+// policyConfig is a prepared configuration with one policy line.
+func policyConfig(t *testing.T, policy string) *fixturemigrate.Config {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "c.yml")
+	if err := os.WriteFile(path, []byte("fixture: f.yml\n"+policy+"models:\n  Plan: {table: plans}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := fixturemigrate.LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+// A finding the policy makes a warning is reported and is not disagreement,
+// in the JSON as in the exit code; one it makes an error is.
+func TestCheckJSONAgreesDespiteAWarning(t *testing.T) {
+	res := &fixturemigrate.CheckResult{Result: &fixturemigrate.Result{}, Findings: []fixturemigrate.Finding{
+		{Kind: fixturemigrate.FindingZeroDefault, Model: "Plan", Row: "name=x", Detail: "a zero"}}}
+	for policy, want := range map[string]checkFinding{
+		"policy: {zero_default: warn}\n":  {Kind: "zero against a default", Level: "warn"},
+		"policy: {zero_default: error}\n": {Kind: "zero against a default", Level: "error"},
+	} {
+		report := checkJSON(policyConfig(t, policy), res)
+		if len(report.Findings) != 1 || report.Findings[0].Level != want.Level ||
+			report.Agree != (want.Level == "warn") {
+			t.Errorf("%s: %+v", policy, report)
+		}
 	}
 }
 
@@ -175,7 +206,7 @@ func TestPrintSync(t *testing.T) {
 	}
 	out.Reset()
 	printSync(o, syncReport{Applied: true, Refusals: []checkRefusal{{"Plan", "x", "renamed"}},
-		Findings: []checkFinding{{"invalid value", "Plan", "x", "bad"}},
+		Findings: []checkFinding{{Kind: "invalid value", Model: "Plan", Row: "x", Detail: "bad"}},
 		Changes:  []fixtureapply.Outcome{{Index: 0, Status: fixtureapply.StatusApplied}}})
 	for _, want := range []string{"refused: Plan x: renamed", "invalid value: Plan x: bad", "applied 1 change"} {
 		if !strings.Contains(out.String(), want) {

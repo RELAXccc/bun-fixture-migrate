@@ -59,7 +59,8 @@ such as a zero bun would replace with a column default.
 ### check
 
 Compares the database with the fixture files and reports every difference, every finding and every
-difference `generate` would refuse. Exit 3 when anything was found.
+difference `generate` would refuse. Exit 3 for a difference, a refusal or a finding the policy makes
+an error; a finding the policy makes a warning is reported and leaves the exit code 0.
 
 | Flag | |
 | --- | --- |
@@ -226,7 +227,8 @@ meaning.
 ```json
 {
   "agree": false,
-  "findings": [{"kind": "zero against a default", "model": "Feature", "row": "code=api", "detail": "..."}],
+  "findings": [{"kind": "zero against a default", "level": "warn", "model": "Feature", "row": "code=api",
+                "detail": "..."}],
   "refusals": [{"model": "Plan", "key": "name=old", "reason": "..."}],
   "changes": [
     {"model": "Plan", "kind": "update", "key": {"name": "team"},
@@ -235,8 +237,10 @@ meaning.
 }
 ```
 
-A change is what a migration from the database to the file would do: an `insert` is a row only the
-file has, a `delete` one only the database has.
+`agree` is what the exit code says: `true` for 0. A finding's `level` is what the policy makes of its
+kind, `error` or `warn`; a `warn` finding is listed and leaves `agree` true. A change is what a
+migration from the database to the file would do: an `insert` is a row only the file has, a `delete`
+one only the database has.
 
 Finding kinds: `duplicate key`, `zero against a default`, `null against a default`,
 `invalid value` (a value the column's type cannot hold), `unknown column`.
@@ -293,6 +297,8 @@ the migrations directory, each of which fails the plan.
 ```json
 {"applied": true, "dry_run": false, "findings": [], "refusals": [], "changes": [ ... ]}
 ```
+
+`findings` are as in [check](#check-output), with a `level` each.
 
 ### Outcomes
 

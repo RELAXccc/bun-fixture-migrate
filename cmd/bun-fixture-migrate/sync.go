@@ -44,11 +44,8 @@ func syncCmd(o streams, args []string) error {
 	if res == nil {
 		return err
 	}
-	report := syncReport{Applied: res.Applied, DryRun: !*yes, Findings: []checkFinding{},
+	report := syncReport{Applied: res.Applied, DryRun: !*yes, Findings: findingsJSON(s.cfg, res.Findings),
 		Refusals: []checkRefusal{}, Changes: []fixtureapply.Outcome{}}
-	for _, f := range res.Findings {
-		report.Findings = append(report.Findings, checkFinding{string(f.Kind), f.Model, f.Row, f.Detail})
-	}
 	if res.Diff != nil {
 		for _, r := range res.Diff.Refusals {
 			report.Refusals = append(report.Refusals, checkRefusal{r.Model, r.Key, r.Reason})
