@@ -733,3 +733,54 @@ func TestAStateThatDoesNotReadIsNeverReplacedUnread(t *testing.T) {
 		t.Fatalf("exit %d: %s", code, errs)
 	}
 }
+
+// The runbook for a lost state file exports from a database into a file of
+// its own and records that: the state names the fixture file, not the copy,
+// and the pending edits in the fixture file stay where they are.
+func TestABaselineOfAnotherFileRecordsTheFixtureFile(t *testing.T) {
+	cfg, _ := project(t, newFixture, oldFixture)
+	applied := filepath.Join(t.TempDir(), "applied.yml")
+	if err := os.WriteFile(applied, []byte(oldFixture), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, errs := call(t, "baseline", "-config", cfg, "-old", applied); code != 0 {
+		t.Fatalf("exit %d\n%s%s", code, out, errs)
+	}
+	state := readFile(t, filepath.Join(filepath.Dir(cfg), "migrations", "fixture_state.yml"))
+	if !strings.Contains(state, " lines of fixtures/fixture.yml -----\n") || strings.Contains(state, applied) {
+		t.Fatalf("the state names the copy:\n%s", state)
+	}
+	// The edit in the fixture file is still to be migrated.
+	if code, out, _ := call(t, "status", "-config", cfg, "-offline"); code != 3 || !strings.Contains(out, "Plan: 1 update") {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+
+	// With several fixture files, one file cannot stand in for them.
+	several := filesProject(t, filesConfig)
+	code, _, errs := call(t, "baseline", "-config", several, "-old", applied)
+	if code != 1 || !strings.Contains(errs, "export them in place, run baseline, then take them back with git checkout") {
+		t.Fatalf("exit %d: %s", code, errs)
+	}
+}
+
+// A revision from before the fixture file existed holds nothing to record:
+// recorded, the next generate would insert every row.
+func TestABaselineOfARevisionWithoutTheFixtureFileIsRefused(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	cfg, _ := project(t, oldFixture, oldFixture)
+	dir := filepath.Dir(cfg)
+	gitIn(t, dir, false, "init", "-q", "-b", "main")
+	gitIn(t, dir, false, "add", "fixture-migrate.yml")
+	gitIn(t, dir, false, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m", "config")
+	for _, args := range [][]string{{"-from", "HEAD"}, {"-from", "HEAD", "-force"}} {
+		code, out, errs := call(t, append([]string{"baseline", "-config", cfg}, args...)...)
+		if code != 2 || !strings.Contains(errs, "fixtures/fixture.yml is missing or empty as of HEAD") {
+			t.Fatalf("%v: exit %d\n%s%s", args, code, out, errs)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "migrations", "fixture_state.yml")); !os.IsNotExist(err) {
+		t.Fatalf("a state file was written: %v", err)
+	}
+}

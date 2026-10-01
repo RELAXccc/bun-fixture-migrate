@@ -202,10 +202,24 @@ every migration it has no record of. `status` against such a database marks it `
 an edit and is accepted. A state nobody can vouch for would let `generate` write a migration against
 the wrong base, so it is refused.
 
-**Steps.** Find the fixture file as the last migration left it. When the last commit that touched
-the state file also added that migration, it is the fixture file at that commit:
-`bun-fixture-migrate baseline -from <commit> -force`. If you cannot tell, `export` from a database
-that applied every migration (`status -require-applied`) and baseline that.
+**Steps.** When git has the state file as it was, take it back: `git checkout <rev> --
+internal/migrations/fixture_state.yml`. Otherwise find the fixture file as the last migration left
+it. When the last commit that touched the state file also added that migration, it is the fixture
+file at that commit: `bun-fixture-migrate baseline -from <commit> -force`.
+
+If you cannot tell, export from a database that applied every migration (`status -require-applied`
+against it says so) into a file of its own, and record that. The fixture file keeps the edits no
+migration makes yet, which `status` then lists and the next `generate` writes:
+
+```
+bun-fixture-migrate export -dsn env:APPLIED_DSN -o /tmp/applied.yml
+bun-fixture-migrate baseline -old /tmp/applied.yml -force
+```
+
+The state records the export under the fixture file's own path. `-o` and `-old` take one file, so
+with several fixture files, commit the pending edits first, then export in place, run
+`bun-fixture-migrate baseline -force`, and take the files back with
+`git checkout -- <the fixture files>`.
 
 ## Every migrate fails: the migrations table is already locked
 

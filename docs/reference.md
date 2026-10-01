@@ -149,8 +149,8 @@ and a finding in the fixture files that the policy makes an error.
 
 | Flag | |
 | --- | --- |
-| `-from <rev>` | record the fixture files as of a git revision |
-| `-old <file>` | record this file |
+| `-from <rev>` | record the fixture files as of a git revision; refused (exit 2) when they are missing or empty there |
+| `-old <file>` | record this file as the fixture file, under the fixture file's path; with one fixture file only |
 | `-force` | replace a differing state, and clear what was left out: a migration you wrote covers the difference |
 | `-offline` | do not ask the database whether a difference is only in how values are written |
 
