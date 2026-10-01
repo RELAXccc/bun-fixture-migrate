@@ -73,7 +73,8 @@ func Canonicalize(ctx context.Context, db bun.IDB, cfg *Config, snap *Snapshot, 
 			var values []string
 			seen := map[string]bool{}
 			for _, e := range entries {
-				text, ok := sourceOf(e, m, col, column)
+				decide, _ := decidingColumn(cfg, tables, e, col, column)
+				text, ok := sourceOf(e, m, col, decide)
 				if ok && !seen[text] {
 					seen[text] = true
 					values = append(values, text)
@@ -87,11 +88,15 @@ func Canonicalize(ctx context.Context, db bun.IDB, cfg *Config, snap *Snapshot, 
 				return fmt.Errorf("%s.%s: %w", model, col, err)
 			}
 			for _, e := range entries {
-				text, ok := sourceOf(e, m, col, column)
-				// The column's type has decided which text the database holds.
-				delete(e.AsWritten, col)
+				decide, known := decidingColumn(cfg, tables, e, col, column)
+				text, ok := sourceOf(e, m, col, decide)
 				if !ok {
 					continue
+				}
+				if known {
+					// The column's type has decided which text the database
+					// holds.
+					delete(e.AsWritten, col)
 				}
 				if msg, bad := invalid[text]; bad {
 					snap.Findings = append(snap.Findings, Finding{
@@ -113,24 +118,39 @@ func Canonicalize(ctx context.Context, db bun.IDB, cfg *Config, snap *Snapshot, 
 		}
 	}
 
-	// A reference names its target by the target's ref value, which may just
-	// have been respelled; and a natural key is made of values that may have.
+	// A reference names its target by the target's ref value, which has to
+	// be exactly what the target's ref column holds: the reading of it that
+	// column's type picks (0012 is 10 in a bigint and 0012 in a text), as
+	// that column spells it. And a natural key is made of values that may
+	// just have been respelled.
 	for _, model := range snap.Order {
 		m := cfg.Models[model]
-		if m == nil {
-			continue
-		}
 		for _, e := range snap.Entries[model] {
-			for col, v := range e.Cells {
+			for _, col := range sortedColumns(e.Cells) {
+				v := e.Cells[col]
 				if v.Ref == nil {
 					continue
 				}
-				if c, ok := refCanon[v.Ref.Model][v.Ref.Key]; ok {
-					e.Cells[col] = fixturechange.RefTo(v.Ref.Model, c)
+				key := v.Ref.Key
+				if written, ok := e.AsWritten[col]; ok {
+					decide, known := decidingColumn(cfg, tables, e, col, dbschema.Column{})
+					if !known {
+						// Left with both readings, for the diff to refuse a
+						// change that depends on which one it is.
+						continue
+					}
+					if decide.StringField() {
+						key = written
+					}
+					delete(e.AsWritten, col)
 				}
+				if c, ok := refCanon[v.Ref.Model][key]; ok {
+					key = c
+				}
+				e.Cells[col] = fixturechange.RefTo(v.Ref.Model, key)
 			}
 			if key, err := keyOf(cfg, m, model, e.Full(m)); err == nil {
-				e.Key, e.KeyStr = key, keyString(model, key)
+				e.setKey(model, key)
 			}
 		}
 	}
@@ -149,18 +169,41 @@ func Canonicalize(ctx context.Context, db bun.IDB, cfg *Config, snap *Snapshot, 
 }
 
 // sourceOf is the text a cast of a column of an entry starts from: the value
-// as written when the column is one a Go string field writes and the file
-// wrote the value differently from what it resolves to (1.10, 017, True),
-// because that is what dbfixture stores there; the resolved value otherwise.
-func sourceOf(e *Entry, m *Model, col string, column dbschema.Column) (string, bool) {
+// as written when the deciding column (decidingColumn) is one a Go string
+// field writes and the file wrote the value differently from what it resolves
+// to (1.10, 017, True), because that is what dbfixture stores there; the
+// resolved value otherwise.
+func sourceOf(e *Entry, m *Model, col string, decide dbschema.Column) (string, bool) {
 	text, ok := literalOf(e, m, col)
 	if !ok {
 		return "", false
 	}
-	if written, ok := e.AsWritten[col]; ok && column.StringField() {
+	if written, ok := e.AsWritten[col]; ok && decide.StringField() {
 		return written, true
 	}
 	return text, true
+}
+
+// decidingColumn is the column whose type says which reading of an entry's
+// column the database holds: own, the column itself, unless another row
+// supplies the value (Entry.from), whose column it is then. known is false
+// when that column is not in tables, and nothing can be decided.
+func decidingColumn(cfg *Config, tables map[string]*dbschema.Table, e *Entry, col string,
+	own dbschema.Column) (dbschema.Column, bool) {
+
+	src, ok := e.from[col]
+	if !ok {
+		return own, own.Name != ""
+	}
+	m := cfg.Models[src.model]
+	if m == nil {
+		return dbschema.Column{}, false
+	}
+	table := tables[cfg.QualifiedTable(m)]
+	if table == nil {
+		return dbschema.Column{}, false
+	}
+	return table.Column(src.column)
 }
 
 // literalOf is the text of a column of an entry that a cast applies to: a

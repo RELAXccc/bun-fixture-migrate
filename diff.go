@@ -117,8 +117,9 @@ const undecidedReason = "which a column written from a Go string holds as writte
 	"-no-lint) the tool reads the types and decides. Or write it so both agree: quoted for a string column; " +
 	"for any other the way it resolves, as 1.1, 15, true or 2026-01-01T10:00:00Z"
 
-// writtenAs is a literal column of an entry as resolved and as written; ok is
-// false for a column that is absent, NULL or a reference.
+// writtenAs is a column of an entry as resolved and as written: a literal, or
+// for a reference the ref value it names its row by. ok is false for a column
+// that is absent or NULL.
 func writtenAs(m *Model, e *Entry, col string) (resolved, written string, ok bool) {
 	if e == nil {
 		return "", "", false
@@ -127,10 +128,14 @@ func writtenAs(m *Model, e *Entry, col string) (resolved, written string, ok boo
 		resolved = e.ID
 	} else {
 		v, present := e.Cells[col]
-		if !present || v.IsNull || v.Ref != nil {
+		switch {
+		case !present || v.IsNull:
 			return "", "", false
+		case v.Ref != nil:
+			resolved = v.Ref.Key
+		default:
+			resolved = v.Lit
 		}
-		resolved = v.Lit
 	}
 	written = resolved
 	if w, ok := e.AsWritten[col]; ok {
@@ -159,13 +164,17 @@ func undecidedColumns(m *Model, prev, cur *Entry, keep func(col, prevResolved, c
 			if !keep(col, pr, cr) {
 				continue
 			}
+			subject := col + " is"
+			if v := e.Cells[col]; v.Ref != nil {
+				subject = fmt.Sprintf("%s points at the %s whose %s is", col, v.Ref.Model, e.from[col].column)
+			}
 			switch {
 			case okP && okC && pw != cw:
-				out = append(out, fmt.Sprintf("%s is written %s before and %s after", col, pw, cw))
+				out = append(out, fmt.Sprintf("%s written %s before and %s after", subject, pw, cw))
 			case okP:
-				out = append(out, fmt.Sprintf("%s is written %s", col, pw))
+				out = append(out, fmt.Sprintf("%s written %s", subject, pw))
 			case okC:
-				out = append(out, fmt.Sprintf("%s is written %s", col, cw))
+				out = append(out, fmt.Sprintf("%s written %s", subject, cw))
 			}
 		}
 	}
@@ -399,6 +408,15 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 		if !ok || cur.KeyStr == prev.KeyStr {
 			continue
 		}
+		if keyString(model, cur.Key) == keyString(model, prev.Key) {
+			// Only the spelling of a key value changed, 0012 to 012: the
+			// same key in a numeric column and a rename in a text one.
+			skip[prev.KeyStr], skip[cur.KeyStr] = true, true
+			if r, ok := respelled(model, m, prev, cur); ok {
+				res.Refusals = append(res.Refusals, r)
+			}
+			continue
+		}
 		// A rename into a name another row still holds cannot be written in
 		// any order this tool can work out: two rows swapping names need one
 		// of them parked somewhere first.
@@ -505,7 +523,7 @@ func rewriteRefs(cfg *Config, snap *Snapshot, model, from, to string) {
 				continue
 			}
 			if key, err := keyOf(cfg, m, other, e.Full(m)); err == nil {
-				e.Key, e.KeyStr = key, keyString(other, key)
+				e.setKey(other, key)
 			}
 		}
 	}

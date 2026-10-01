@@ -34,7 +34,17 @@ type Entry struct {
 	// type says which of the two the database holds, so Canonicalize picks
 	// one and empties it, and a change carrying a value still in it is
 	// refused rather than guessed at.
+	//
+	// A reference is in it too when the ref value of the row it names is
+	// such a value: 0012 is the integer 10 in a bigint ref column and the
+	// text 0012 in a text one, and the reference has to carry whichever the
+	// database holds there.
 	AsWritten map[string]string
+	// from names, for a column in AsWritten whose value another row
+	// supplies, the column of that row whose type decides between the two
+	// readings: the ref column of the row a reference names, or the field a
+	// template copies. Any other column decides for itself.
+	from map[string]source
 }
 
 // Full is every column an insert writes or a delete guards on: the compared
@@ -88,6 +98,12 @@ func (s *Snapshot) clone() *Snapshot {
 				c.AsWritten = make(map[string]string, len(e.AsWritten))
 				for col, text := range e.AsWritten {
 					c.AsWritten[col] = text
+				}
+			}
+			if e.from != nil {
+				c.from = make(map[string]source, len(e.from))
+				for col, src := range e.from {
+					c.from[col] = src
 				}
 			}
 			copied = append(copied, &c)
@@ -171,6 +187,20 @@ func keyString(model string, key fixturechange.Values) string {
 		b.WriteString(" " + strconv.Quote(c) + "=" + valueKey(key[c]))
 	}
 	return b.String()
+}
+
+// setKey gives an entry its natural key. A key column that still holds two
+// readings (AsWritten) is compared under both: until the column's type says
+// which one the database holds, 0012 and "10" may or may not be one key, and
+// two keys are only the same when they are whichever reading it takes.
+func (e *Entry) setKey(model string, key fixturechange.Values) {
+	e.Key = key
+	e.KeyStr = keyString(model, key)
+	for _, col := range sortedColumns(key) {
+		if written, ok := e.AsWritten[col]; ok {
+			e.KeyStr += " " + strconv.Quote(col) + " written " + strconv.Quote(written)
+		}
+	}
 }
 
 // valueKey writes a value so that no two different values write the same

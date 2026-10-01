@@ -167,3 +167,82 @@ func TestAZeroIDIsAnIDUnlessTheModelIsSerial(t *testing.T) {
 		t.Fatalf("expected Plan free, got %+v", got)
 	}
 }
+
+// A reference carries its row's ref value, and 0012 there is the integer 10
+// or the text 0012 depending on the ref column's type. Both readings travel
+// with the reference, and the ref column is the one whose type decides,
+// whether the reference is a template or a plain id.
+func TestAReferenceKeepsBothReadingsOfItsRow(t *testing.T) {
+	cfg := testConfig(t)
+	text := `- model: Currency
+  rows:
+    - {_id: odd, id: 1, code: 0012}
+    - {_id: ten, id: 2, code: "10"}
+- model: Plan
+  rows:
+    - {id: 1, name: a, currency_id: '{{ $.Currency.odd.ID }}', note: '{{ $.Currency.odd.Code }}'}
+    - {id: 2, name: b, currency_id: 1}
+`
+	s := snap(t, cfg, text, "fixture.yml")
+	for _, e := range s.Entries["Plan"] {
+		if ref := e.Cells["currency_id"].Ref; ref == nil || ref.Key != "10" {
+			t.Fatalf("expected the resolved reading, got %+v", e.Cells["currency_id"])
+		}
+		if e.AsWritten["currency_id"] != "0012" || e.from["currency_id"] != (source{"Currency", "code"}) {
+			t.Fatalf("expected the reading as written and its column, got %q %+v", e.AsWritten, e.from)
+		}
+	}
+	// A template copying a field hands on what that field holds, so the
+	// field's type decides there too.
+	a := s.Entries["Plan"][0]
+	if a.Cells["note"].Lit != "10" || a.AsWritten["note"] != "0012" || a.from["note"] != (source{"Currency", "code"}) {
+		t.Fatalf("got %+v %q %+v", a.Cells["note"], a.AsWritten, a.from)
+	}
+	// Until a type decides, 0012 and "10" are not known to be one key, so
+	// neither is reported as a duplicate of the other.
+	if len(s.Findings) != 0 {
+		t.Fatalf("expected no finding, got %+v", s.Findings)
+	}
+
+	// And a change that needs to know is refused without the database.
+	res := computeWith(t, cfg, text, text+"    - {id: 3, name: c, currency_id: '{{ $.Currency.odd.ID }}'}\n")
+	if len(res.Changes) != 0 || len(res.Refusals) != 1 ||
+		!strings.Contains(res.Refusals[0].Reason, "currency_id points at the Currency whose code is written 0012") {
+		t.Fatalf("expected the insert to be refused, got %+v / %+v", res.Changes, res.Refusals)
+	}
+	// So is a reference whose row only changed its spelling.
+	res = computeWith(t, cfg, text, strings.Replace(text, "code: 0012", "code: 012", 1))
+	for _, r := range res.Refusals {
+		if r.Model == "Plan" && strings.Contains(r.Reason, "written 0012 before and 012 after") {
+			return
+		}
+	}
+	t.Fatalf("expected the respelled reference to be refused, got %+v / %+v", res.Changes, res.Refusals)
+}
+
+// A template copying a field that is itself a template copies whatever
+// dbfixture made of that one, which this tool does not follow.
+func TestACopyOfATemplateIsRefused(t *testing.T) {
+	err := snapErr(t, `- model: Currency
+  rows:
+    - {_id: eur, id: 1, code: EUR}
+- model: Plan
+  rows:
+    - {_id: a, id: 1, name: a, currency_id: '{{ $.Currency.eur.ID }}'}
+    - {id: 2, name: b, currency_id: '{{ $.Currency.eur.ID }}', note: '{{ $.Plan.a.CurrencyID }}'}
+`)
+	if err == nil || !strings.Contains(err.Error(), "which is itself a template") {
+		t.Fatalf("expected the copy to be refused, got %v", err)
+	}
+}
+
+// A key value whose spelling alone changed is the same key in a numeric
+// column and a rename in a text one, and says so.
+func TestARespelledKeyIsNeitherARenameNorNothing(t *testing.T) {
+	text := "- model: Currency\n  rows:\n    - {_id: odd, id: 1, code: 0012}\n"
+	res := computeWith(t, testConfig(t), text, strings.Replace(text, "code: 0012", "code: 012", 1))
+	if len(res.Changes) != 0 || len(res.Refusals) != 1 ||
+		!strings.Contains(res.Refusals[0].Reason, "code is written 0012 before and 012 after") {
+		t.Fatalf("expected one refusal about the spelling, got %+v / %+v", res.Changes, res.Refusals)
+	}
+}

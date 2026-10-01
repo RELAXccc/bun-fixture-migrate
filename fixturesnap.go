@@ -2,6 +2,7 @@ package fixturemigrate
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
@@ -127,34 +128,50 @@ func (ix *index) cell(m *Model, col string, row Row) (Cell, bool) {
 	return Cell{}, false
 }
 
+// reading is one column of a fixture row as this tool reads it.
+type reading struct {
+	fixturechange.Value
+	// written is what a Go string field gets in place of the value, when
+	// that is something else; see Cell.StringText.
+	written string
+	// from is, for a value another row supplies, that row's column: the ref
+	// column of the row a reference names, or the field a template copies.
+	// dbfixture hands on what that field holds, so its type, not this
+	// column's, decides which of the two readings the database holds.
+	from *source
+}
+
+// source names a column of a model.
+type source struct{ model, column string }
+
 // value turns one column of a row into the value a migration carries.
-func (ix *index) value(model, col string, row Row) (fixturechange.Value, bool, error) {
+func (ix *index) value(model, col string, row Row) (reading, bool, error) {
 	m := ix.cfg.Models[model]
 	cell, ok := ix.cell(m, col, row)
 	if !ok {
-		return fixturechange.Value{}, false, nil
+		return reading{}, false, nil
 	}
 	if cell.Structured {
 		// A mapping or a sequence is a jsonb, json or array value, carried as
 		// its JSON. It cannot be a reference.
 		if _, isRef := m.References[col]; isRef {
-			return fixturechange.Value{}, false, fmt.Errorf(
+			return reading{}, false, fmt.Errorf(
 				"%s.%s is a reference and holds a mapping or a sequence", model, col)
 		}
-		return fixturechange.Lit(cell.Text), true, nil
+		return reading{Value: fixturechange.Lit(cell.Text), written: cell.StringText}, true, nil
 	}
 	if cell.IsNull {
-		return fixturechange.Null(), true, nil
+		return reading{Value: fixturechange.Null()}, true, nil
 	}
 	text := strings.TrimSpace(cell.Text)
 	target, isRef := m.References[col]
 
 	if match := template.FindStringSubmatch(text); match != nil {
-		v, err := ix.resolveTemplate(model, col, text, match, target, isRef)
-		return v, err == nil, err
+		r, err := ix.resolveTemplate(model, col, text, match, target, isRef)
+		return r, err == nil, err
 	}
 	if match := looseTemplate.FindStringSubmatch(text); match != nil {
-		return fixturechange.Value{}, false, fmt.Errorf(
+		return reading{}, false, fmt.Errorf(
 			"%s.%s is %s, but %q is not a name text/template can follow, so dbfixture cannot load this "+
 				"file: give that row an _id made of letters, digits and underscores, not starting with a digit",
 			model, col, text, match[2])
@@ -163,7 +180,7 @@ func (ix *index) value(model, col string, row Row) (fixturechange.Value, bool, e
 	// database never holds this text. Comparing it, or writing it into a
 	// migration, would be comparing and writing something that is not there.
 	if anyTemplate.MatchString(text) {
-		return fixturechange.Value{}, false, fmt.Errorf(
+		return reading{}, false, fmt.Errorf(
 			"%s.%s is %s, a template dbfixture evaluates when it loads the file and this tool cannot; "+
 				"the database does not hold this text, so put %s in ignore", model, col, text, col)
 	}
@@ -171,75 +188,90 @@ func (ix *index) value(model, col string, row Row) (fixturechange.Value, bool, e
 	// resolves it.
 	lit := scalarText(cell)
 	if !isRef {
-		return fixturechange.Lit(lit), true, nil
+		return reading{Value: fixturechange.Lit(lit), written: cell.StringText}, true, nil
 	}
 	// A reference column holding nothing or 0 points at no row, unless a row
 	// has that id.
 	if _, ok := ix.byID[target][lit]; !ok && (lit == "" || sameScalar(lit, "0")) {
-		return fixturechange.Lit(lit), true, nil
+		return reading{Value: fixturechange.Lit(lit)}, true, nil
 	}
-	v, err := ix.refByID(model, col, target, lit)
-	return v, err == nil, err
+	r, err := ix.refByID(model, col, target, lit)
+	return r, err == nil, err
 }
 
 // resolveTemplate turns a "{{ $.Model.row.Field }}" value into either a
 // reference, when the column is configured as one and the template names the
 // target's id, or into the literal the target row holds in that field.
-func (ix *index) resolveTemplate(model, col, text string, match []string, target string, isRef bool) (fixturechange.Value, error) {
+func (ix *index) resolveTemplate(model, col, text string, match []string, target string, isRef bool) (reading, error) {
 	tmodel, anchor, field := match[1], match[2], match[3]
 	tm, err := ix.cfg.model(tmodel)
 	if err != nil {
-		return fixturechange.Value{}, fmt.Errorf("%s.%s: %s: %w", model, col, text, err)
+		return reading{}, fmt.Errorf("%s.%s: %s: %w", model, col, text, err)
 	}
 	trow, ok := ix.byAnchor[tmodel][anchor]
 	if !ok {
 		if ix.defined[tmodel][anchor] {
-			return fixturechange.Value{}, fmt.Errorf(
+			return reading{}, fmt.Errorf(
 				"%s.%s: %s names a row of %s that the file only defines further down; dbfixture loads the "+
 					"file top to bottom and cannot load this: move that row above this one", model, col, text, tmodel)
 		}
-		return fixturechange.Value{}, fmt.Errorf("%s.%s: %s names no row of %s", model, col, text, tmodel)
+		return reading{}, fmt.Errorf("%s.%s: %s names no row of %s", model, col, text, tmodel)
 	}
 	column := underscore(field)
 	if isRef {
 		if tmodel != target {
-			return fixturechange.Value{}, fmt.Errorf(
+			return reading{}, fmt.Errorf(
 				"%s.%s: the configuration says it references %s but %s points at %s", model, col, target, text, tmodel)
 		}
 		if column == tm.ID {
-			key := trow.Str(tm.Ref)
-			if key == "" {
-				return fixturechange.Value{}, fmt.Errorf(
-					"%s.%s: %s points at a row of %s without a %s", model, col, text, tmodel, tm.Ref)
-			}
-			return fixturechange.RefTo(target, key), nil
+			return ix.refTo(model, col, text, target, tm, trow)
 		}
 	}
 	tcell, ok := trow[column]
 	if !ok {
-		return fixturechange.Value{}, fmt.Errorf("%s.%s: %s names no column %q of %s", model, col, text, column, tmodel)
+		return reading{}, fmt.Errorf("%s.%s: %s names no column %q of %s", model, col, text, column, tmodel)
 	}
 	if tcell.IsNull {
-		return fixturechange.Null(), nil
+		return reading{Value: fixturechange.Null()}, nil
 	}
-	return fixturechange.Lit(scalarText(tcell)), nil
+	if !tcell.Structured && anyTemplate.MatchString(tcell.Text) {
+		return reading{}, fmt.Errorf(
+			"%s.%s: %s copies %s, which is itself a template in that row; dbfixture copies what that template "+
+				"made of it, which this tool does not follow: write the value here", model, col, text, column)
+	}
+	return reading{Value: fixturechange.Lit(scalarText(tcell)), written: tcell.StringText,
+		from: &source{tmodel, column}}, nil
 }
 
 // refByID turns the id a reference column holds into a reference by key, using
 // the row the same document declares under that id.
-func (ix *index) refByID(model, col, target, id string) (fixturechange.Value, error) {
+func (ix *index) refByID(model, col, target, id string) (reading, error) {
 	tm := ix.cfg.Models[target]
 	trow, ok := ix.byID[target][id]
 	if !ok {
-		return fixturechange.Value{}, fmt.Errorf(
+		return reading{}, fmt.Errorf(
 			"%s.%s = %s: no row of %s in this file has that %s, so the generator cannot name the row it points at",
 			model, col, id, target, tm.ID)
 	}
-	key := trow.Str(tm.Ref)
-	if key == "" {
-		return fixturechange.Value{}, fmt.Errorf("%s.%s = %s: that row of %s has no %s", model, col, id, target, tm.Ref)
+	return ix.refTo(model, col, id, target, tm, trow)
+}
+
+// refTo is a reference to a row: the row's ref value, which is what the
+// database holds in that row's ref column and what a migration finds it by.
+// It is read the way the row's own column is, with both readings of a value
+// such as 0012 kept, and the ref column as the one whose type decides.
+func (ix *index) refTo(model, col, text, target string, tm *Model, trow Row) (reading, error) {
+	c, ok := trow[tm.Ref]
+	if !ok || c.IsNull || scalarText(c) == "" {
+		return reading{}, fmt.Errorf("%s.%s: %s points at a row of %s without a %s", model, col, text, target, tm.Ref)
 	}
-	return fixturechange.RefTo(target, key), nil
+	if c.Structured || anyTemplate.MatchString(c.Text) {
+		return reading{}, fmt.Errorf(
+			"%s.%s: %s points at a row of %s whose %s is not a plain value but %s, and a reference can only "+
+				"name a row by a plain value: write the value there", model, col, text, target, tm.Ref, c.Text)
+	}
+	return reading{Value: fixturechange.RefTo(target, scalarText(c)), written: c.StringText,
+		from: &source{target, tm.Ref}}, nil
 }
 
 // keyValues is the natural key of a row.
@@ -247,28 +279,28 @@ func (ix *index) keyValues(model string, row Row) (fixturechange.Values, error) 
 	m := ix.cfg.Models[model]
 	out := fixturechange.Values{}
 	for _, col := range m.Key {
-		v, present, err := ix.value(model, col, row)
+		r, present, err := ix.value(model, col, row)
 		if err != nil {
 			return nil, err
 		}
 		if !present {
 			return nil, fmt.Errorf("%s: key column %q is missing from a row and has no default", model, col)
 		}
-		out[col] = v
+		out[col] = r.Value
 	}
 	for _, group := range m.KeyAnyOf {
 		chosen, value := group[0], fixturechange.Lit("")
 		for _, col := range group {
-			v, present, err := ix.value(model, col, row)
+			r, present, err := ix.value(model, col, row)
 			if err != nil {
 				return nil, err
 			}
-			if present && !isZero(v) {
-				chosen, value = col, v
+			if present && !isZero(r.Value) {
+				chosen, value = col, r.Value
 				break
 			}
 			if col == group[0] && present {
-				value = v
+				value = r.Value
 			}
 		}
 		out[chosen] = value
@@ -326,8 +358,6 @@ func (ix *index) entry(model string, m *Model, row Row) (*Entry, error) {
 	e := &Entry{
 		Anchor: row.Str(anchorColumn),
 		ID:     idText(m, row),
-		Key:    key,
-		KeyStr: keyString(model, key),
 		Cells:  fixturechange.Values{},
 	}
 	cols := map[string]bool{}
@@ -337,38 +367,51 @@ func (ix *index) entry(model string, m *Model, row Row) (*Entry, error) {
 	for col := range m.Defaults {
 		cols[col] = true
 	}
+	// In name order, so a row with two faults is refused for the same one on
+	// every run.
+	names := make([]string, 0, len(cols))
 	for col := range cols {
+		names = append(names, col)
+	}
+	sort.Strings(names)
+	for _, col := range names {
 		if m.skip(col) {
 			continue
 		}
-		v, present, err := ix.value(model, col, row)
+		r, present, err := ix.value(model, col, row)
 		if err != nil {
 			return nil, err
 		}
 		if !present {
 			continue
 		}
-		e.Cells[col] = v
-		if _, isRef := m.References[col]; !isRef && v.Ref == nil && !v.IsNull {
-			e.asWritten(col, row[col])
-		}
+		e.Cells[col] = r.Value
+		e.record(col, r)
 	}
 	if e.ID != "" {
-		e.asWritten(m.ID, row[m.ID])
+		e.record(m.ID, reading{written: row[m.ID].StringText})
 	}
+	e.setKey(model, key)
 	return e, nil
 }
 
-// asWritten records the text a string field gets from a cell, when it is not
-// the value the cell resolves to.
-func (e *Entry) asWritten(col string, c Cell) {
-	if c.StringText == "" {
+// record keeps what a reading says beyond its value: the text a string field
+// gets when that is something else, and the column whose type decides which
+// of the two the database holds when that is not the entry's own.
+func (e *Entry) record(col string, r reading) {
+	if r.written == "" {
 		return
 	}
 	if e.AsWritten == nil {
 		e.AsWritten = map[string]string{}
 	}
-	e.AsWritten[col] = c.StringText
+	e.AsWritten[col] = r.written
+	if r.from != nil {
+		if e.from == nil {
+			e.from = map[string]source{}
+		}
+		e.from[col] = *r.from
+	}
 }
 
 // LintZeroDefaults reports every value in the snapshot that is the column

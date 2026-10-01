@@ -374,3 +374,130 @@ func TestAValueTheColumnCannotHoldIsAFinding(t *testing.T) {
 		}
 	})
 }
+
+type R8Cur struct {
+	bun.BaseModel `bun:"table:r8_curs"`
+	ID            int64 `bun:"id,pk"`
+	Code          int64 `bun:"code,notnull"`
+}
+
+type R8Tag struct {
+	bun.BaseModel `bun:"table:r8_tags"`
+	ID            int64  `bun:"id,pk"`
+	Code          string `bun:"code,notnull"`
+}
+
+type R8Plan struct {
+	bun.BaseModel `bun:"table:r8_plans"`
+	ID            int64  `bun:"id,pk"`
+	Name          string `bun:"name,notnull"`
+	CurID         int64  `bun:"cur_id,notnull"`
+	TagID         int64  `bun:"tag_id,notnull"`
+	Num           int64  `bun:"num,notnull"`
+	Label         string `bun:"label,notnull"`
+}
+
+const r8Fixture = `- model: R8Cur
+  rows:
+    - {_id: ten, id: 1, code: 0012}
+    - {_id: twelve, id: 2, code: 12}
+- model: R8Tag
+  rows:
+    - {_id: t, id: 1, code: 0012}
+    - {_id: u, id: 2, code: "10"}
+- model: R8Plan
+  rows:
+    - {id: 1, name: p, cur_id: '{{ $.R8Cur.ten.ID }}', tag_id: '{{ $.R8Tag.t.ID }}', num: '{{ $.R8Tag.t.Code }}', label: '{{ $.R8Cur.ten.Code }}'}
+`
+
+// A reference names its row by the row's ref value, and has to name it by
+// exactly what the database holds there. 0012 is the integer 10 in a bigint
+// and the text 0012 in a text column, and so it has to be in every reference
+// to that row: before, a reference carried the text as written, 0012, a
+// database seeded from the file disagreed with it, and sync "repaired" the
+// plan to point at the currency whose code is 12. A template copying a field
+// hands on what that field holds the same way, which the field's type decides.
+func TestAReferenceCarriesWhatTheRefColumnHolds(t *testing.T) {
+	db := connect(t)
+	db.RegisterModel((*R8Cur)(nil), (*R8Tag)(nil), (*R8Plan)(nil))
+	ctx := context.Background()
+	run(t, db, "DROP TABLE IF EXISTS r8_plans, r8_curs, r8_tags",
+		"CREATE TABLE r8_curs (id bigint PRIMARY KEY, code bigint UNIQUE NOT NULL)",
+		"CREATE TABLE r8_tags (id bigint PRIMARY KEY, code text UNIQUE NOT NULL)",
+		"CREATE TABLE r8_plans (id bigint PRIMARY KEY, name text UNIQUE NOT NULL, "+
+			"cur_id bigint NOT NULL REFERENCES r8_curs, tag_id bigint NOT NULL REFERENCES r8_tags, "+
+			"num bigint NOT NULL, label text NOT NULL)")
+	cfg := &fixturemigrate.Config{Schema: "public", Models: map[string]*fixturemigrate.Model{
+		"R8Cur":  {Table: "r8_curs", Ref: "code", Key: []string{"code"}},
+		"R8Tag":  {Table: "r8_tags", Ref: "code", Key: []string{"code"}},
+		"R8Plan": {Table: "r8_plans", Key: []string{"name"}, References: map[string]string{"cur_id": "R8Cur", "tag_id": "R8Tag"}},
+	}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	state := func() string {
+		t.Helper()
+		return scan[string](t, db, `SELECT string_agg(concat_ws('|', p.name, c.code, g.code, p.num, p.label), ';' ORDER BY p.name)
+			FROM r8_plans p JOIN r8_curs c ON c.id = p.cur_id JOIN r8_tags g ON g.id = p.tag_id`)
+	}
+	loadFixture(t, db, r8Fixture)
+	if got := state(); got != "p|10|0012|12|10" {
+		t.Fatalf("this documents what dbfixture stores; if it changed, so did the premise: %s", got)
+	}
+
+	// The database seeded from the file is the file: sync finds nothing to
+	// do, and the plan still points at the currency it was seeded with.
+	res, err := fixturemigrate.Sync(ctx, db, cfg, []fixturemigrate.FixtureFile{{Path: "f.yml", Data: []byte(r8Fixture)}},
+		fixturemigrate.SyncOptions{})
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if len(res.Diff.Changes) != 0 || len(res.Diff.Refusals) != 0 {
+		t.Fatalf("sync would change a database seeded from the file: %+v / %+v", res.Diff.Changes, res.Diff.Refusals)
+	}
+	if got := state(); got != "p|10|0012|12|10" {
+		t.Fatalf("sync changed the plan: %s", got)
+	}
+
+	// Without the database, nothing says which reading a reference to that
+	// row carries, so a change that needs one is refused.
+	next := r8Fixture + "    - {id: 2, name: q, cur_id: '{{ $.R8Cur.ten.ID }}', tag_id: '{{ $.R8Tag.t.ID }}', num: 1, label: x}\n"
+	offline, err := fixturemigrate.Compute(cfg, fixtureSnapshot(t, cfg, r8Fixture, "old"), fixtureSnapshot(t, cfg, next, "new"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offline.Changes) != 0 || len(offline.Refusals) != 1 ||
+		!strings.Contains(offline.Refusals[0].Reason, "cur_id points at the R8Cur whose code is written 0012") {
+		t.Fatalf("expected the reference to be refused without the database: %+v / %+v", offline.Changes, offline.Refusals)
+	}
+
+	// With it, the migration writes what dbfixture would have loaded.
+	old, head := fixtureSnapshot(t, cfg, r8Fixture, "old"), fixtureSnapshot(t, cfg, next, "new")
+	readOnlyDo(t, db, func(tx bun.Tx, tables map[string]*dbschema.Table) {
+		for _, s := range []*fixturemigrate.Snapshot{old, head} {
+			if err := fixturemigrate.Canonicalize(ctx, tx, cfg, s, tables); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	diff, err := fixturemigrate.Compute(cfg, old, head)
+	if err != nil || len(diff.Refusals) != 0 || len(diff.Changes) != 1 {
+		t.Fatalf("%v %+v %+v", err, diff.Changes, diff.Refusals)
+	}
+	if ref := diff.Changes[0].New["cur_id"].Ref; ref == nil || ref.Key != "10" {
+		t.Fatalf("the reference has to carry the code the database holds, 10: %+v", diff.Changes[0].New["cur_id"])
+	}
+	if ref := diff.Changes[0].New["tag_id"].Ref; ref == nil || ref.Key != "0012" {
+		t.Fatalf("the reference has to carry the code the database holds, 0012: %+v", diff.Changes[0].New["tag_id"])
+	}
+	if err := fixtureapply.Apply(ctx, db, fixturechange.Set{Name: "r8", Tables: diff.Tables, Changes: diff.Changes},
+		quiet()); err != nil {
+		t.Fatal(err)
+	}
+	migrated := state()
+	run(t, db, "TRUNCATE r8_plans, r8_curs, r8_tags")
+	loadFixture(t, db, next)
+	if seeded := state(); migrated != seeded {
+		t.Fatalf("the migration wrote something else than dbfixture\nmigrated %s\n  seeded %s", migrated, seeded)
+	}
+}

@@ -109,6 +109,7 @@ Each was reproduced before it went into this table.
 | `GENERATED ALWAYS` identity exported with ids | the export cannot be loaded | broken export | leave the id out | done |
 | `plan` against a hot standby | "would FAIL" for the wrong reason | misleading | detect `pg_is_in_recovery()` | done |
 | `1.10`, `01234`, `True` unquoted in a text column | dbfixture stores the text as written; the tool resolved it to 1.1, 668, true and saw drift, and a migration would have written those | **silent corruption** | keep both readings, let the column's type decide, refuse without one | done |
+| a reference to a row whose ref value is written `0012` in a `bigint` column | the reference carried `0012` and the row held 10; `sync` on a freshly seeded database repointed the reference at the row whose code is 12 | **silent corruption** | the ref column's type decides what a reference carries; refused without one | done |
 | explicit ids from a dbfixture seed | the sequence stays behind; the application's first insert fails | failed insert | `fixtureapply.SyncSequences` after the seed | done |
 
 ## 4. Features

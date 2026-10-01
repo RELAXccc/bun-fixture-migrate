@@ -26,7 +26,15 @@ it means to `dbfixture` and PostgreSQL. Each rule below is checked against the r
   file, so the database never holds its text. It is refused rather than compared or written into a
   migration; `ignore` the column.
 - A reference column (`references:`) holding a plain id resolves through the row of the file that
-  declares that id. `~` is NULL. `0`, `""` or null point at nothing and stay literals.
+  declares that id. `~` is NULL. `0` or `""` point at nothing and stay literals, unless a row has
+  that id: a zero is "no id" only in a `serial` model, where bun leaves it to the sequence.
+- A reference names its row by that row's ref value as the database holds it, which is the ref
+  column's to decide: `code: 0012` is the integer 10 in a `bigint` column and the text `0012` in a
+  `text` one, and every reference to that row carries the same. So does a template copying a field,
+  `{{ $.Currency.eur.Code }}`: it hands on what the field holds, which the field's type decides.
+  Without the database, a change that depends on which one it is is refused, as a
+  [value](#values) is. A ref column that is itself a template, and a copy of a field that is, are
+  refused: write the value.
 - `export` writes anchors from the natural key (prefixed with `r` when the key starts with a digit)
   and every reference as a template.
 

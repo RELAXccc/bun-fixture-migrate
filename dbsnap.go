@@ -146,7 +146,7 @@ func DatabaseSnapshot(ctx context.Context, db bun.IDB, cfg *Config, tables map[s
 			if err != nil {
 				return nil, err
 			}
-			e.Key, e.KeyStr = key, keyString(model, key)
+			e.setKey(model, key)
 			e.Anchor = uniqueAnchor(anchorOf(key), r.id, taken)
 			snap.Entries[model] = append(snap.Entries[model], e)
 		}
