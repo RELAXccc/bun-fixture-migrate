@@ -566,3 +566,31 @@ func TestExportHeaderKeepsALineBreakInsideTheComment(t *testing.T) {
 		t.Fatalf("got\n%s", data)
 	}
 }
+
+// A column the table does not have, or generates, is said once, as a
+// finding, and taken out of the snapshot: the comparison with the database
+// does not say it again as a column written on one side only.
+func TestLintColumnsTakesWhatItReportsOutOfTheComparison(t *testing.T) {
+	cfg := testConfig(t)
+	tables := testTables()
+	tables["public.plans"].Columns = append(tables["public.plans"].Columns,
+		dbschema.Column{Name: "total", Position: 9, Type: "int8", Generated: true})
+	head := snap(t, cfg, strings.Replace(base, "      seats: 10\n", "      seats: 10\n      colour: red\n      total: 3\n", 1), "fixture.yml")
+	LintColumns(cfg, head, tables)
+	var found []string
+	for _, f := range head.Findings {
+		found = append(found, f.Row)
+	}
+	if strings.Join(found, ",") != "colour,total" {
+		t.Fatalf("findings %+v", head.Findings)
+	}
+	for _, col := range head.Columns["Plan"] {
+		if col == "colour" || col == "total" {
+			t.Fatalf("still compared: %v", head.Columns["Plan"])
+		}
+	}
+	res, err := Compute(cfg, snap(t, cfg, base, "the database"), head)
+	if err != nil || len(res.Refusals) != 0 || len(res.Changes) != 0 {
+		t.Fatalf("%v %+v / %+v", err, res.Changes, res.Refusals)
+	}
+}

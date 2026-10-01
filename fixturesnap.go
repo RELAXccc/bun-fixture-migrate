@@ -614,48 +614,83 @@ func LintNullDefaults(cfg *Config, snap *Snapshot, tables map[string]*dbschema.T
 // LintColumns reports every column of the fixture file the table does not have.
 // Without it the mistake surfaces when the generated migration runs, which is
 // the worst moment for it to surface.
+//
+// It reports a column the table generates too, which nothing can write, and
+// takes both kinds out of the snapshot: they are said once, here, and a
+// comparison with the database does not say each again as a column written
+// on one side only.
 func LintColumns(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table) {
 	for _, model := range snap.Order {
-		m := cfg.Models[model]
-		if m == nil {
+		gone := lintColumns(cfg, snap, tables, model)
+		if len(gone) == 0 {
 			continue
 		}
-		table := tables[cfg.QualifiedTable(m)]
-		if table == nil {
-			snap.Findings = append(snap.Findings, Finding{
-				Kind: FindingUnknownColumn, Model: model,
-				Detail: "the configuration says this model lives in " + cfg.QualifiedTable(m) + ", which does not exist",
-			})
-			continue
-		}
-		if idCol, ok := table.Column(m.ID); ok && idCol.IdentityAlways {
-			for _, e := range snap.Entries[model] {
-				if e.ID != "" {
-					snap.Findings = append(snap.Findings, Finding{
-						Kind: FindingUnknownColumn, Model: model, Row: e.label(model),
-						Detail: fmt.Sprintf("%s is %s, but %s.%s is an identity GENERATED ALWAYS, which refuses "+
-							"an explicit value from dbfixture as from a migration: leave %s out and name the row "+
-							"by its _id", m.ID, e.ID, table.Qualified(), m.ID, m.ID),
-					})
-				}
-			}
-		}
+		var kept []string
 		for _, col := range snap.Columns[model] {
-			column, ok := table.Column(col)
-			if !ok {
-				snap.Findings = append(snap.Findings, Finding{
-					Kind: FindingUnknownColumn, Model: model, Row: col,
-					Detail: "the fixture file writes this column, " + table.Qualified() + " does not have it",
-				})
-				continue
+			if !gone[col] {
+				kept = append(kept, col)
 			}
-			if column.Generated {
+		}
+		snap.Columns[model] = kept
+		for _, e := range snap.Entries[model] {
+			for col := range gone {
+				delete(e.Cells, col)
+				delete(e.AsWritten, col)
+				delete(e.asJSON, col)
+				delete(e.copied, col)
+				delete(e.unsure, col)
+				delete(e.from, col)
+			}
+		}
+	}
+}
+
+// lintColumns reports the columns of one model the table does not have or
+// generates, and returns them.
+func lintColumns(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table, model string) map[string]bool {
+	gone := map[string]bool{}
+	m := cfg.Models[model]
+	if m == nil {
+		return gone
+	}
+	table := tables[cfg.QualifiedTable(m)]
+	if table == nil {
+		snap.Findings = append(snap.Findings, Finding{
+			Kind: FindingUnknownColumn, Model: model,
+			Detail: "the configuration says this model lives in " + cfg.QualifiedTable(m) + ", which does not exist",
+		})
+		return gone
+	}
+	if idCol, ok := table.Column(m.ID); ok && idCol.IdentityAlways {
+		for _, e := range snap.Entries[model] {
+			if e.ID != "" {
 				snap.Findings = append(snap.Findings, Finding{
-					Kind: FindingUnknownColumn, Model: model, Row: col,
-					Detail: "the fixture file writes this column, but " + table.Qualified() +
-						" generates it and nothing can write into it: put it in derived",
+					Kind: FindingUnknownColumn, Model: model, Row: e.label(model),
+					Detail: fmt.Sprintf("%s is %s, but %s.%s is an identity GENERATED ALWAYS, which refuses "+
+						"an explicit value from dbfixture as from a migration: leave %s out and name the row "+
+						"by its _id", m.ID, e.ID, table.Qualified(), m.ID, m.ID),
 				})
 			}
 		}
 	}
+	for _, col := range snap.Columns[model] {
+		column, ok := table.Column(col)
+		if !ok {
+			snap.Findings = append(snap.Findings, Finding{
+				Kind: FindingUnknownColumn, Model: model, Row: col,
+				Detail: "the fixture file writes this column, " + table.Qualified() + " does not have it",
+			})
+			gone[col] = true
+			continue
+		}
+		if column.Generated {
+			snap.Findings = append(snap.Findings, Finding{
+				Kind: FindingUnknownColumn, Model: model, Row: col,
+				Detail: "the fixture file writes this column, but " + table.Qualified() +
+					" generates it and nothing can write into it: put it in derived",
+			})
+			gone[col] = true
+		}
+	}
+	return gone
 }
