@@ -325,6 +325,8 @@ bun-fixture-migrate apply -file internal/migrations/20260930165255_fixture_plan_
 The first says which changes the revert undoes (with an `audit_table`, those the migration made
 here) and what it finds; the second makes them and deletes the record, so the migrator runs the
 migration again on the next deploy, unless you remove it first, as [above](#rolling-back) says.
+Reverted without `-record`, the migration stays recorded; `-revert -yes -record` afterwards deletes
+the record, and with an `audit_table` it does not revert the change set a second time.
 
 Run it as the role the deploy migrates as, and not while a deploy is migrating: the change set's
 advisory lock keeps two change sets apart, but not bun's migrator from recording the same migration.

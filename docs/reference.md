@@ -292,7 +292,8 @@ the changes and the record are committed together or not at all: the digits of t
 `name`, the newest `group_id` plus one as `group_id`, and the time, which is what bun v1.2.18's
 `Migrate` writes. bun's migrator then reports the migration applied and does not run it. With
 `-revert`, `-record` deletes the record instead, and the migrator runs the migration again on the
-next migrate. Refused (exit 2), with nothing changed: `-record` of a migration recorded already, and
+next migrate; when the audit table says the change set is reverted here already, by an earlier
+`apply -revert -yes`, it deletes the record and does not run the revert again. Refused (exit 2), with nothing changed: `-record` of a migration recorded already, and
 `-revert -record` of one that is not; both are looked at again once the change set holds its lock.
 `-record` needs the migrations table, which the migrator's `Init` creates (exit 1 without it).
 
@@ -624,7 +625,9 @@ transaction was open.
 
 `direction` is `up`, or `down` with `-revert`; `committed` is whether the changes are in the
 database; `record` is `recorded` or `unrecorded` for what `-record` did, left out without it, and so
-is `group_id` unless a record was written; `error` says why it failed, left out when it did not.
+is `group_id` unless a record was written; `already_reverted` is `true` when `-revert -record`
+found the change set reverted here already and only deleted the record, left out otherwise; `error`
+says why it failed, left out when it did not.
 `changes` are [outcomes](#outcomes); `notes` what the run means for bun's record of the migration and,
 for a revert, which changes it undoes.
 
@@ -668,6 +671,7 @@ does, and is tested under `pgdriver` and `pgx`.
 | `WithDryRun()` | for a caller that rolls back: sequences are reported, not moved |
 | `SetSHA256(set)` | the SHA-256 of a canonical encoding of the set, as the audit table records it |
 | `ReadAudit(ctx, db, table)` | the newest row of the audit table for every set it holds, by name; false when the table does not exist |
+| `WaitForChangeSets(ctx, tx)` | take, in a transaction, the advisory lock every change set runs under, and hold it until the transaction ends: for a program that reads the audit table and acts on it |
 | `ApplyRecords(ctx, db, set)` | the rows a `Revert` of the set follows: its `up` rows after its last `down` row, newest first; and that `down` row when no `up` row follows it, which is a set reverted here already |
 
 A change that fails the set comes back as a `*fixtureapply.ChangeError`, which `errors.As` finds in

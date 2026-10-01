@@ -135,6 +135,18 @@ func Revert(ctx context.Context, db bun.IDB, set fixturechange.Set, opts ...Opti
 	})
 }
 
+// WaitForChangeSets takes, in tx, the advisory lock every change set runs
+// under, waiting for one that runs now, in this process or another, to
+// finish. It holds the lock until tx ends, so no change set runs in between.
+// A program that reads the audit table and acts on what it says, as apply
+// -revert -record does, takes it first, so no run comes between the two.
+func WaitForChangeSets(ctx context.Context, tx bun.Tx) error {
+	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(?)", advisoryLock); err != nil {
+		return fmt.Errorf("wait for another change set to finish: %w", err)
+	}
+	return nil
+}
+
 // inCallersTx says whether db is a transaction somebody else began, which a
 // change set runs in a savepoint of.
 func inCallersTx(db bun.IDB) bool {

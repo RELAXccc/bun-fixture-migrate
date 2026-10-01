@@ -258,3 +258,61 @@ func TestApplyByHandIsWhatBunsMigratorWouldHaveDone(t *testing.T) {
 		t.Fatalf("status after the migrator ran it again:\n%s", out)
 	}
 }
+
+// An admin made the migration's change before it ran, so the run finds it
+// made, and the revert leaves the admin's value. Its note says to take the
+// record out with -record; doing so has to delete the record and nothing
+// else, not revert the change set a second time, which would have reverted
+// everything, the admin's value included.
+func TestApplyRevertRecordAfterARevertOnlyDeletesTheRecord(t *testing.T) {
+	db := itemDB(t)
+	run(t, db, "DROP TABLE IF EXISTS bun_migrations, bun_migration_locks, bfm_cli_audit")
+	t.Cleanup(func() { run(t, db, "DROP TABLE IF EXISTS bfm_cli_audit") })
+	loadFixture(t, db, itemFixture)
+	c := buildCLI(t)
+	c.write("fixture-migrate.yml", strings.Replace(cliConfig, "seed_guard_table: items\n",
+		"seed_guard_table: items\naudit_table: bfm_cli_audit\n", 1))
+	c.must(0, "baseline")
+	c.write("fixtures/fixture.yml", replaceOnce(t, itemFixture, "      cost: 120\n", "      cost: 130\n"))
+	c.must(0, "generate", "-name", "anvil", "-at", "20300101000000")
+	file := filepath.Join(c.dir, "migrations", "20300101000000_fixture_anvil.go")
+	bin := buildStatusMigrator(t, filepath.Join(c.dir, "migrations"))
+	runStatusMigrator(t, bin) // its Init creates bun_migrations
+
+	run(t, db, "UPDATE items SET cost = 130 WHERE name = 'anvil'")
+	if out := c.must(0, "apply", "-file", file, "-yes", "-record"); !strings.Contains(out,
+		"unchanged Item name=anvil update") {
+		t.Fatalf("apply -yes -record:\n%s", out)
+	}
+	out := c.must(0, "apply", "-file", file, "-revert", "-yes")
+	if !strings.Contains(out, "not reverted: the migration did not make it in this database") ||
+		!strings.Contains(out, "run apply -revert -yes -record") {
+		t.Fatalf("apply -revert -yes:\n%s", out)
+	}
+	cost := func() int64 { return scan[int64](t, db, "SELECT cost FROM items WHERE name = 'anvil'") }
+	if got := cost(); got != 130 {
+		t.Fatalf("the revert reverted the admin's value: %d", got)
+	}
+
+	// Without -yes, it says what -yes will do.
+	if out := c.must(0, "apply", "-file", file, "-revert", "-record"); !strings.Contains(out,
+		"reverted here already") || !strings.Contains(out, "only deletes the record") {
+		t.Fatalf("apply -revert -record:\n%s", out)
+	}
+	out = c.must(0, "apply", "-file", file, "-revert", "-yes", "-record")
+	if !strings.Contains(out, "reverted here already, so not reverted again; its record deleted, committed") {
+		t.Fatalf("apply -revert -yes -record:\n%s", out)
+	}
+	if got := cost(); got != 130 {
+		t.Fatalf("apply -revert -record reverted the change set again, over the admin's value: %d", got)
+	}
+	if got := scan[string](t, db, "SELECT string_agg(direction, ',' ORDER BY id) FROM bfm_cli_audit"); got != "up,down" {
+		t.Fatalf("apply -revert -record ran the change set again: %s", got)
+	}
+	if got := scan[int64](t, db, "SELECT count(*) FROM bun_migrations"); got != 0 {
+		t.Fatalf("the record is still there: %d", got)
+	}
+	if out := runStatusMigrator(t, bin); !strings.Contains(out, "status 20300101000000 applied=false") {
+		t.Fatalf("bun's migrator after apply -revert -record:\n%s", out)
+	}
+}

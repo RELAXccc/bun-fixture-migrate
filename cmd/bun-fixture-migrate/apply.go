@@ -36,11 +36,15 @@ type applyReport struct {
 	Committed bool `json:"committed"`
 	// Record is what -record did to bun's migrations table: "recorded",
 	// "unrecorded", or "" without -record.
-	Record  string                 `json:"record,omitempty"`
-	GroupID int64                  `json:"group_id,omitempty"`
-	Error   string                 `json:"error,omitempty"`
-	Changes []fixtureapply.Outcome `json:"changes"`
-	Notes   []string               `json:"notes"`
+	Record string `json:"record,omitempty"`
+	// AlreadyReverted is -revert -record finding the change set reverted
+	// here already, by the audit table: the record was deleted, and Revert
+	// not run again.
+	AlreadyReverted bool                   `json:"already_reverted,omitempty"`
+	GroupID         int64                  `json:"group_id,omitempty"`
+	Error           string                 `json:"error,omitempty"`
+	Changes         []fixtureapply.Outcome `json:"changes"`
+	Notes           []string               `json:"notes"`
 }
 
 // applyCmd runs one generated fixture migration against the database outside
@@ -137,10 +141,11 @@ func applyCmd(o streams, args []string) error {
 			"it on the next migrate, which finds every change made", name))
 	case *revert && recorded:
 		notes = append(notes, fmt.Sprintf("without -record, %s keeps recording migration %s as applied, so bun's "+
-			"migrator will not run it again; take the record out with -record", s.cfg.MigrationsTable, name))
+			"migrator will not run it again; to take the record out afterwards, run apply -revert -yes -record, "+
+			"which finds the change set reverted and changes nothing more", s.cfg.MigrationsTable, name))
 	}
 	if *revert {
-		note, err := revertNote(o.ctx, db, set)
+		note, err := revertNote(o.ctx, db, set, *record)
 		if err != nil {
 			return err
 		}
@@ -208,8 +213,9 @@ func readAppliedRW(ctx context.Context, db *bun.DB, table string) (map[string]fi
 
 // revertNote says what a Revert of the set will undo here: what the audit
 // table says Apply made, nothing when it says the set is reverted already,
-// or, without it, every change.
-func revertNote(ctx context.Context, db *bun.DB, set fixturechange.Set) (string, error) {
+// or, without it, every change. record is -record, which for a set reverted
+// already deletes the record and runs nothing.
+func revertNote(ctx context.Context, db *bun.DB, set fixturechange.Set, record bool) (string, error) {
 	if set.AuditTable == "" {
 		return "the change set has no audit table, so Revert inverts every change, as if the migration had made " +
 			"them all in this database", nil
@@ -233,6 +239,10 @@ func revertNote(ctx context.Context, db *bun.DB, set fixturechange.Set) (string,
 		unseeded = unseeded && r.Unseeded()
 	}
 	switch {
+	case reverted != nil && record:
+		return fmt.Sprintf("%s says the change set is reverted here already (row %d, %s), and no Apply ran since, "+
+			"so with -yes apply does not run its Revert again, and only deletes the record", set.AuditTable,
+			reverted.ID, reverted.AppliedAt.UTC().Format("2006-01-02 15:04:05")), nil
 	case reverted != nil:
 		return fmt.Sprintf("%s says the change set is reverted here already (row %d, %s), and no Apply ran since, "+
 			"so Revert changes nothing", set.AuditTable, reverted.ID,
@@ -291,6 +301,11 @@ func applyDryRun(o streams, db *bun.DB, target planTarget, lockTimeout time.Dura
 // in the database or neither is. The record is looked at again once the change
 // set holds its advisory lock: a migrator that recorded the migration in the
 // meantime has done so before running it, and its run waits for this one.
+//
+// A revert with record of a set the audit table says is reverted here already
+// deletes the record and does not run Revert again: the first revert, which
+// left out what the migration had not made, is what this one would repeat at
+// best. That is read under the advisory lock too.
 func applyAndRecord(ctx context.Context, db *bun.DB, set fixturechange.Set, revert, record bool, name, table string,
 	report *applyReport) error {
 
@@ -299,9 +314,26 @@ func applyAndRecord(ctx context.Context, db *bun.DB, set fixturechange.Set, reve
 		return err
 	}
 	defer tx.Rollback()
+	if revert && record && set.AuditTable != "" {
+		if err := fixtureapply.WaitForChangeSets(ctx, tx); err != nil {
+			return err
+		}
+		_, reverted, err := fixtureapply.ApplyRecords(ctx, tx, set)
+		if pgerr.State(err) == pgerr.InsufficientPrivilege {
+			return fmt.Errorf("the audit table %s, which says what the revert undoes, cannot be read as this role; "+
+				"grant it SELECT on the table, and USAGE on its schema: %w", set.AuditTable, err)
+		}
+		if err != nil {
+			return err
+		}
+		report.AlreadyReverted = reverted != nil
+	}
 	run := fixtureapply.Apply
 	if revert {
 		run = fixtureapply.Revert
+	}
+	if report.AlreadyReverted {
+		run = func(context.Context, bun.IDB, fixturechange.Set, ...fixtureapply.Option) error { return nil }
 	}
 	if err := run(ctx, tx, set,
 		fixtureapply.WithLogger(func(string, ...any) {}),
@@ -386,6 +418,8 @@ func printApply(o streams, r *applyReport) {
 		fmt.Fprintf(o.stdout, "%s: rolled back, nothing was changed\n", r.ID)
 	case r.Record == "recorded":
 		fmt.Fprintf(o.stdout, "%s: %s and recorded as applied (group %d), committed\n", r.ID, verb, r.GroupID)
+	case r.Record == "unrecorded" && r.AlreadyReverted:
+		fmt.Fprintf(o.stdout, "%s: reverted here already, so not reverted again; its record deleted, committed\n", r.ID)
 	case r.Record == "unrecorded":
 		fmt.Fprintf(o.stdout, "%s: %s and its record deleted, committed\n", r.ID, verb)
 	default:
