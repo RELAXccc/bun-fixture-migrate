@@ -45,20 +45,20 @@ jobs:
       - name: go.mod is tidy
         run: |
           go mod tidy -diff
-          for m in examples/basic examples/saas; do
+          for m in examples/basic examples/saas examples/commerce; do
             (cd "$m" && go mod tidy -diff)
           done
 
       - name: go vet
         run: |
-          for m in . dbtest examples/basic examples/saas; do
+          for m in . dbtest examples/basic examples/saas examples/commerce; do
             (cd "$m" && go vet ./...)
           done
 
       - name: staticcheck
         run: |
           go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
-          for m in . dbtest examples/basic examples/saas; do
+          for m in . dbtest examples/basic examples/saas examples/commerce; do
             (cd "$m" && staticcheck ./...)
           done
 
@@ -78,7 +78,7 @@ jobs:
       - name: govulncheck
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
-          for m in . examples/basic examples/saas; do
+          for m in . examples/basic examples/saas examples/commerce; do
             (cd "$m" && govulncheck ./...)
           done
 
@@ -266,7 +266,7 @@ jobs:
           bun="github.com/uptrace/bun@master github.com/uptrace/bun/dialect/pgdialect@master github.com/uptrace/bun/driver/pgdriver@master"
           go get $bun
           go mod tidy
-          for m in dbtest examples/basic examples/saas; do
+          for m in dbtest examples/basic examples/saas examples/commerce; do
             (cd "$m" && go get $bun github.com/uptrace/bun/dbfixture@master && go mod tidy && grep uptrace go.mod)
           done
 

@@ -37,6 +37,7 @@ model lives in which table and which column is a reference. That is enough for a
 | [Reference](docs/reference.md) | commands and flags, exit codes, configuration, JSON output, the Go API |
 | [Troubleshooting](docs/troubleshooting.md) | messages and what to do about them |
 | [`examples/basic`](examples/basic) | a complete bun project: schema and fixture migrations, the deploy step, seeding |
+| [`examples/saas`](examples/saas), [`examples/commerce`](examples/commerce) | a year of releases each, replayed against several databases by `dbtest`, and what they found |
 | [Concept](docs/concept.md) | where this is going, and why |
 
 ## Install
