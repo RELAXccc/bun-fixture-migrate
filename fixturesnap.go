@@ -141,6 +141,9 @@ type reading struct {
 	from *source
 	// unsure is Cell.Unsure.
 	unsure string
+	// json is what a json or jsonb column, or a timestamptz one, holds in
+	// place of the value, when that is something else; see Cell.JSONText.
+	json string
 }
 
 // source names a column of a model.
@@ -160,7 +163,8 @@ func (ix *index) value(model, col string, row Row) (reading, bool, error) {
 			return reading{}, false, fmt.Errorf(
 				"%s.%s is a reference and holds a mapping or a sequence", model, col)
 		}
-		return reading{Value: fixturechange.Lit(cell.Text), written: cell.StringText, unsure: cell.Unsure}, true, nil
+		return reading{Value: fixturechange.Lit(cell.Text), written: cell.StringText, unsure: cell.Unsure,
+			json: cell.JSONText}, true, nil
 	}
 	if cell.IsNull {
 		return reading{Value: fixturechange.Null()}, true, nil
@@ -197,7 +201,7 @@ func (ix *index) value(model, col string, row Row) (reading, bool, error) {
 	// resolves it.
 	lit := scalarText(cell)
 	if !isRef {
-		return reading{Value: fixturechange.Lit(lit), written: cell.StringText}, true, nil
+		return reading{Value: fixturechange.Lit(lit), written: cell.StringText, json: cell.JSONText}, true, nil
 	}
 	// A reference column holding nothing or 0 points at no row, unless a row
 	// has that id.
@@ -432,6 +436,12 @@ func (e *Entry) record(col string, r reading) {
 			e.unsure = map[string]string{}
 		}
 		e.unsure[col] = r.unsure
+	}
+	if r.json != "" {
+		if e.asJSON == nil {
+			e.asJSON = map[string]string{}
+		}
+		e.asJSON[col] = r.json
 	}
 	if r.written == "" {
 		return

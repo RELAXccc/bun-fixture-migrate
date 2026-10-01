@@ -1,6 +1,9 @@
 package fixturemigrate
 
 import (
+	"bytes"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
@@ -80,5 +83,70 @@ func TestColumnTextOfStructuredColumns(t *testing.T) {
 		if got := columnText(tc.col, tc.in); got != tc.want {
 			t.Errorf("%+v %q: %q, want %q", tc.col, tc.in, got, tc.want)
 		}
+	}
+}
+
+// At the top of a json or jsonb column a value is what encoding/json makes of
+// what yaml.v3 puts into an any field, as it is inside a mapping: the reading
+// a cell keeps for such a column, where it differs from the array column's.
+func TestTheJSONReadingIsWhatAnAnyFieldMarshalsTo(t *testing.T) {
+	marshal := func(t *testing.T, in string) string {
+		var v any
+		if err := yaml.Unmarshal([]byte(in), &v); err != nil {
+			t.Fatal(err)
+		}
+		var b bytes.Buffer
+		enc := json.NewEncoder(&b)
+		enc.SetEscapeHTML(false)
+		if err := enc.Encode(v); err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSuffix(b.String(), "\n")
+	}
+	for _, in := range []string{
+		`[2026-01-01T10:00:00+02:00, 2026-01-01, 2026-01-01 10:00:00.5, 0.1234567890123456789, 017, x, "y", true]`,
+		`[[2026-01-01], {a: [1.5, 2026-01-02]}]`,
+		`{a: [2026-01-01T10:00:00-05:00], b: <b>}`,
+	} {
+		var n yaml.Node
+		if err := yaml.Unmarshal([]byte(in), &n); err != nil {
+			t.Fatal(err)
+		}
+		got, err := yamlAnyJSON(&n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := marshal(t, in); got != want {
+			t.Errorf("%s:\n got %s\nwant %s", in, got, want)
+		}
+	}
+	for in, want := range map[string]string{
+		"2026-01-01T10:00:00+02:00": "2026-01-01T10:00:00+02:00",
+		"2026-01-01":                "2026-01-01T00:00:00Z",
+		"2026-01-01 10:00:00":       "",
+		"2026-01-01T10:00:00Z":      "",
+		"0.1234567890123456789":     "0.12345678901234568",
+		"1.50":                      "",
+		"017":                       "",
+		`"2026-01-01"`:              "",
+	} {
+		doc, err := ParseDoc([]byte("- model: M\n  rows:\n    - {v: " + in + "}\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := doc[0].Rows[0]["v"].JSONText; got != want {
+			t.Errorf("%s: JSONText %q, want %q", in, got, want)
+		}
+		if want != "" && strings.Trim(marshal(t, in), `"`) != want {
+			t.Errorf("%s: an any field marshals to %s", in, marshal(t, in))
+		}
+	}
+	// A sequence whose any reading is the array column's has none.
+	doc, err := ParseDoc([]byte("- model: M\n  rows:\n    - {v: [1, a, {k: 2026-01-01}]}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := doc[0].Rows[0]["v"].JSONText; got != "" {
+		t.Errorf("JSONText %q", got)
 	}
 }

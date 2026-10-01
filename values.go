@@ -243,15 +243,16 @@ func sameScalar(a, b string) bool {
 // yamlJSON writes a YAML mapping or sequence as JSON, one way: keys sorted
 // the way encoding/json sorts a map's, no spaces, every scalar by its YAML
 // type -- an integer exactly, a timestamp as RFC 3339 -- so two spellings of
-// the same structure compare equal. It is what a jsonb column and an array
-// column are compared and written as; PostgreSQL turns the JSON into either.
+// the same structure compare equal. It is what an array column is compared
+// and written as, and a mapping in a jsonb column; PostgreSQL turns the JSON
+// into either.
 //
 // Inside a mapping a value is what dbfixture's map[string]any hands
 // encoding/json: a key as it is written, a timestamp as the time.Time yaml.v3
-// makes of it (RFC 3339 in its own offset, a date at midnight UTC), !!binary
-// as the text it encodes. A sequence that is not inside a mapping is an array
-// column's, whose elements a slice field gets the way a column gets a
-// scalar.
+// makes of it (RFC 3339 in its own offset, a date at midnight UTC), a float
+// as a float64, !!binary as the text it encodes. A sequence that is not
+// inside a mapping is an array column's, whose elements a slice field gets
+// the way a column gets a scalar; yamlAnyJSON reads it as an any field does.
 func yamlJSON(n *yaml.Node) (string, error) {
 	var b strings.Builder
 	if err := writeYAMLJSON(&b, n, false); err != nil {
@@ -260,6 +261,49 @@ func yamlJSON(n *yaml.Node) (string, error) {
 	return b.String(), nil
 }
 
+// yamlAnyJSON writes a YAML mapping or sequence as JSON the way an any, slice
+// or map field of a json or jsonb column holds it, every value as it would be
+// inside a mapping; see yamlJSON.
+func yamlAnyJSON(n *yaml.Node) (string, error) {
+	var b strings.Builder
+	if err := writeYAMLJSON(&b, n, true); err != nil {
+		return "", err
+	}
+	return b.String(), nil
+}
+
+// jsonScalar is the text of a scalar as a json or jsonb column holds it from
+// an any field: a timestamp is the time.Time yaml.v3 makes of it, written by
+// encoding/json in its own offset, a date alone at midnight UTC, and a float
+// is a float64. A timestamp's text is unquoted, as a string's is everywhere,
+// and is also the instant a time.Time field writes. ok is false for any other
+// scalar, whose JSON is its text.
+func jsonScalar(n *yaml.Node) (string, bool) {
+	switch n.ShortTag() {
+	case "!!timestamp":
+		if t, ok := yamlTime(n.Value); ok {
+			if j, err := t.MarshalJSON(); err == nil {
+				return strings.Trim(string(j), `"`), true
+			}
+		}
+	case "!!float":
+		f, err := strconv.ParseFloat(strings.ReplaceAll(n.Value, "_", ""), 64)
+		if err != nil {
+			return "", false
+		}
+		j, err := json.Marshal(f)
+		if err != nil {
+			return "", false
+		}
+		if canon, ok := canonicalDecimal(string(j)); ok {
+			return canon, true
+		}
+	}
+	return "", false
+}
+
+// writeYAMLJSON writes n as JSON; inMapping is true for a value as an any or
+// map field holds it, false for an element of an array column.
 func writeYAMLJSON(b *strings.Builder, n *yaml.Node, inMapping bool) error {
 	switch n.Kind {
 	case yaml.DocumentNode:

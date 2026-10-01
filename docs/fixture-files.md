@@ -58,7 +58,7 @@ as written, and any other field the value it resolves to:
 | `.inf`, `.nan` | `.inf`, `.nan` | `Infinity`, `NaN` |
 | `True`, `false` | `True`, `false` | a boolean. `yes` and `on` are strings in YAML 1.2 |
 | `2026-03-04 10:00:00` | `2026-03-04 10:00:00` | that instant, in UTC; unquoted, because a quoted one decodes into a `time.Time` only in RFC 3339 |
-| `2026-03-04` | `2026-03-04` | a date |
+| `2026-03-04` | `2026-03-04` | a date; in a `timestamptz` column midnight UTC, which is what a `time.Time` field holds |
 | `~`, `null` | NULL (and see `null_default`) | NULL; in `json` and `jsonb` [a finding](#json-and-jsonb) |
 | `!!binary SGk=` | the text it encodes, `Hi` | the text it encodes |
 | `1.5` in an integer column | | a finding: an integer field holds `1`, a string field is refused |
@@ -105,13 +105,14 @@ is not, it is an `invalid value` finding that names both and says how to write t
 | `2026-01-01 10:00:00`, `2026-01-01T10:00:00Z`, `"2026-01-01T10:00:00Z"` | `timestamp` | 10:00 |
 | `2026-01-01T10:00:00+02:00`, quoted or not | `timestamptz` | that instant |
 | `2026-01-01 10:00:00`, unquoted | `timestamptz` | 10:00 UTC: the column is taken to be written from a `time.Time`, to which yaml.v3 hands a timestamp without a zone in UTC |
+| `2026-01-01`, unquoted | `timestamptz` | midnight UTC, for the same reason, in an array too |
 | `2026-01-01`, `2026-01-01T10:00:00+02:00` | `date` | the 1st |
 | `"10:00:00"`, `"10:00:00+02"` | `time`, `timetz` | that time; `time` drops the offset whoever writes it |
 | `"infinity"` | any of them | infinity, which only a string field or a type that reads it holds |
 | `2026-01-01T10:00:00+02:00`, quoted or not | `timestamp` | refused: 08:00 through a `time.Time`, 10:00 through a string |
 | `2026-01-01T23:30:00-05:00` | `date` | refused: the 2nd through a `time.Time`, the 1st through a string |
 | `2026-01-01T10:00:00.1234567Z` | any | refused: bun cuts to `.123456`, PostgreSQL rounds to `.123457` |
-| `"2026-01-01 10:00:00"`, `2026-01-01`, `"10:00"` | `timestamptz`, `timetz` | refused: a string is read in the seeding session's time zone |
+| `"2026-01-01 10:00:00"`, `"2026-01-01"`, `"10:00"` | `timestamptz`, `timetz` | refused: a string is read in the seeding session's time zone |
 | `"01/02/2026"` | any | refused: January or February by `DateStyle` |
 | `"now"`, `"today"`, `"tomorrow"` | any | refused: a different value every day |
 
@@ -120,16 +121,20 @@ and at most six fractional digits. `export` writes every value that way.
 
 ### JSON and jsonb
 
-A mapping or sequence in a `json` or `jsonb` column is what a `map[string]any` or `any` field makes of
-it, as `encoding/json` marshals that: a key as it is written (`017: x` is the key `"017"`), a number
-as a `float64` (`0.1234567890123456789` is stored as `0.12345678901234568`, an integer beyond 64 bits
-the same way), a timestamp as the `time.Time` yaml.v3 makes of it (`2026-01-01` is
-`"2026-01-01T00:00:00Z"`, an offset is kept), `!!binary` as the text it encodes. Two documents are
-compared as `jsonb` compares them, with every number written canonically, so `{"a": 1.0}` written by
-SQL and `{a: 1}` in the file agree.
+A mapping or sequence in a `json` or `jsonb` column is what a `map[string]any`, `[]any` or `any` field
+makes of it, as `encoding/json` marshals that, at the top of the column as inside it: a key as it is
+written (`017: x` is the key `"017"`), a number as a `float64` (`0.1234567890123456789` is stored as
+`0.12345678901234568`, an integer beyond 64 bits the same way), a timestamp as the `time.Time` yaml.v3
+makes of it (`2026-01-01` is `"2026-01-01T00:00:00Z"`, an offset is kept), `!!binary` as the text it
+encodes. So `[2026-01-01T10:00:00+02:00]` is `["2026-01-01T10:00:00+02:00"]` there, where a
+`timestamptz[]` column holds that instant. Two documents are compared as `jsonb` compares them, with
+every number written canonically, so `{"a": 1.0}` written by SQL and `{a: 1}` in the file agree.
 
-A scalar is the document a string field hands bun when it is JSON (`'{"a": 1}'`, `1.5`, `true`), and
-the JSON string an `any` field makes of it when it is not (`hello` is `"hello"`).
+A scalar is read the same way: a timestamp, a date and a float are what an `any` field makes of them
+(`2026-01-01T10:00:00+02:00` is the JSON string `"2026-01-01T10:00:00+02:00"`, `2026-01-01` is
+`"2026-01-01T00:00:00Z"`, `0.1234567890123456789` is `0.12345678901234568`). A string is the document
+a string field hands bun when it is JSON (`'{"a": 1}'`, `"1.5"`), and the JSON string an `any` field
+makes of it when it is not (`hello` is `"hello"`).
 
 `~` is the JSON null to a map, slice or `any` field and SQL NULL, or the column default, to a nil
 pointer or a `nullzero` field, so in a column without a default it is a `null against a default`
@@ -268,6 +273,12 @@ hand and `baseline -force`. See the [runbook](production.md#generate-refused-a-c
   writes.
 - A top-level string that is itself JSON, in a `json` or `jsonb` column, is taken as that document,
   which is what a string field stores; an `any` field stores it as a JSON string.
+- A sequence in a `json` or `jsonb` column is read as an `[]any` field reads it. A `[]string` field
+  stores every element as the text it is written as, so `[1, 2026-01-01]` is `["1", "2026-01-01"]`
+  through one: quote the elements of such a field.
+- Without a database the JSON reading of a value is not known to apply: a date, a timestamp's offset
+  and a float of more digits than a `float64` holds are compared as a `date`, `timestamptz` or
+  `numeric` column reads them, which is what they are wherever they are not JSON.
 - The two readings of a date or time are compared in scalar columns. Inside an array a date or time is
   what a `[]time.Time` field makes of it, and only the seeding session is checked.
 - Keys equal under their type are found for the type's own equality; a column's nondeterministic

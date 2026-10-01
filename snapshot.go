@@ -47,6 +47,13 @@ type Entry struct {
 	// readings: the ref column of the row a reference names, or the field a
 	// template copies. Any other column decides for itself.
 	from map[string]source
+	// asJSON holds, for a fixture row, the columns whose value a json or
+	// jsonb column holds as something else than Cells says, with that JSON;
+	// see Cell.JSONText. Canonicalize takes it for such a column, and for a
+	// timestamptz one, which holds the same instant or, for a date alone,
+	// the midnight UTC a time.Time field makes of it. Without the database
+	// it is not used.
+	asJSON map[string]string
 	// unsure holds, for a fixture row, the columns whose value means one
 	// thing to one Go field type and another to another (Cell.Unsure), with
 	// the reason. No column type settles them, so a change carrying one is
@@ -131,6 +138,12 @@ func (s *Snapshot) clone() *Snapshot {
 				c.from = make(map[string]source, len(e.from))
 				for col, src := range e.from {
 					c.from[col] = src
+				}
+			}
+			if e.asJSON != nil {
+				c.asJSON = make(map[string]string, len(e.asJSON))
+				for col, text := range e.asJSON {
+					c.asJSON[col] = text
 				}
 			}
 			if e.unsure != nil {

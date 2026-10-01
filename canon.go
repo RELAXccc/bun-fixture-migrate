@@ -112,6 +112,7 @@ func Canonicalize(ctx context.Context, db bun.IDB, cfg *Config, snap *Snapshot, 
 					// The column's type has decided which text the database
 					// holds.
 					delete(e.AsWritten, col)
+					delete(e.asJSON, col)
 				}
 				if msg, bad := invalid[text]; bad {
 					snap.Findings = append(snap.Findings, Finding{
@@ -193,17 +194,29 @@ func Canonicalize(ctx context.Context, db bun.IDB, cfg *Config, snap *Snapshot, 
 // sourceOf is the text a cast of a column of an entry starts from: the value
 // as written when the deciding column (decidingColumn) is one a Go string
 // field writes and the file wrote the value differently from what it resolves
-// to (1.10, 017, True), because that is what dbfixture stores there; the
-// resolved value otherwise.
+// to (1.10, 017, True), because that is what dbfixture stores there; the JSON
+// an any or map field makes of it in a json or jsonb column, and the
+// time.Time yaml.v3 makes of a timestamp in a timestamptz one (Cell.JSONText);
+// the resolved value otherwise.
 func sourceOf(e *Entry, m *Model, col string, decide dbschema.Column) (string, bool) {
 	text, ok := literalOf(e, m, col)
 	if !ok {
 		return "", false
 	}
+	if j, ok := e.asJSON[col]; ok && (isJSON(decide) || instants(decide)) {
+		return j, true
+	}
 	if written, ok := e.AsWritten[col]; ok && decide.StringField() {
 		return written, true
 	}
 	return text, true
+}
+
+// instants reports a timestamptz column, or an array of them: a time.Time
+// field writes the instant yaml.v3 makes of a timestamp, and a date alone is
+// midnight UTC to it, not midnight wherever the seeding session is.
+func instants(c dbschema.Column) bool {
+	return c.Type == "timestamptz" || (c.Category == "A" && c.ElemType == "timestamptz")
 }
 
 // decidingColumn is the column whose type says which reading of an entry's
