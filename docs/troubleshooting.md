@@ -126,6 +126,12 @@ format was numbered still reads, and is rewritten in the current format the next
 **`no state file at ... yet, so this diffs against git HEAD`.** Not an error: until `baseline` or the
 first `generate` writes one, the base is the committed fixture file.
 
+**`there is no state file at ..., and git cannot say what ... was at HEAD`** (`status`, exit 1).
+Without a state file the base is git's `HEAD`, and git is not installed, or the project is not a
+repository, or the fixture file was never committed. Nothing then says what the fixture file
+changes, so status does not pass it. Run `baseline` once the databases hold the fixture file, or
+run `status` in a checkout with git.
+
 **`baseline would record N changes as migrated with no migration to make them`.** The fixture file
 differs from the state, and no migration covers it. Run `generate`. Pass `-force` only when you
 wrote the migration yourself.

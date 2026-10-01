@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"os/exec"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -184,25 +185,40 @@ func (s *setup) uncovered(r *statusReport) error {
 		return err
 	}
 	var files []fixturemigrate.FixtureFile
+	found := false
 	if s.statePath != "" {
 		r.State = &stateInfo{Path: s.statePath}
 		state, err := fixturemigrate.ReadState(s.statePath)
 		switch {
 		case err == nil:
 			r.State.Exists, r.State.Migration = true, state.Migration
-			files, r.Base = state.Files, "the state file"
+			files, r.Base, found = state.Files, "the state file", true
 		case errors.Is(err, fixturemigrate.ErrNoState):
 		default:
 			r.Problems = append(r.Problems, err.Error())
 			return nil
 		}
 	}
-	if files == nil {
+	// With neither a state file nor git's HEAD there is nothing to say what the
+	// fixture file changes, and a gate that passes on that would pass anything.
+	if !found {
 		gitFiles, err := s.gitFiles("HEAD")
 		if err != nil {
-			r.Notes = append(r.Notes, "no state file and no git history to compare the fixture file with, "+
-				"so what it changes is unknown; run baseline once the databases hold it")
-			return nil
+			where := "there is no state file at " + s.statePath
+			if s.statePath == "" {
+				where = "no state file is configured (set out or state)"
+			}
+			why := err.Error()
+			switch {
+			case errors.Is(err, exec.ErrNotFound):
+				why = "git is not installed"
+			case strings.Contains(why, "is not in a git repository"):
+				why = "it is not in a git repository"
+			}
+			return fmt.Errorf("%s, and git cannot say what %s was at HEAD: %s. So nothing says what the "+
+				"fixture file changes, and status will not pass it. Run bun-fixture-migrate baseline once the "+
+				"databases hold it, or run status where git is installed and the fixture file is committed",
+				where, s.cfg.FixtureLabel(), why)
 		}
 		files, r.Base = gitFiles, "HEAD"
 	}

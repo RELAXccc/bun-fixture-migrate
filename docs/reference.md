@@ -101,7 +101,9 @@ nobody migrated is how a change gets lost.
 Lists the fixture files, the state file and what the fixture files change that no migration makes,
 then the migrations directory with, when a database is asked, what it applied. Exit 3 when something
 is not migrated, when the directory holds two migrations bun would record under one name, and with
-`-require-applied` when a migration is not applied.
+`-require-applied` when a migration is not applied. Exit 1 when there is no state file and git
+cannot read the fixture files as of `HEAD` (it is not installed, or this is not a repository):
+nothing then says what the files change.
 
 | Flag | |
 | --- | --- |
@@ -145,7 +147,7 @@ Exit 2 when a finding the policy makes an error, or a difference `generate` woul
 | Code | Meaning |
 | --- | --- |
 | 0 | done; for `check`, `status` and `plan`: nothing found |
-| 1 | the command could not do its job: a bad flag, no connection, an unreadable file, a plan that could not finish |
+| 1 | the command could not do its job: a bad flag, no connection, an unreadable file, a plan that could not finish, nothing for `status` to compare the fixture files with |
 | 2 | refused: a difference that needs a hand-written migration, a finding the policy makes an error, a state `baseline` will not replace, a file `export` will not write |
 | 3 | found something: drift (`check`), a change no migration makes or a migration not applied (`status`), a migration that would fail or skip (`plan`) |
 

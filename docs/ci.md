@@ -11,7 +11,12 @@ The checks worth running, and ready-made jobs for GitHub Actions and GitLab CI. 
 | `check` | the deployed database | the database and the fixture file disagree (exit 3) |
 
 Exit code 3 always means "found something" and 1 "could not run", so a job can treat drift as a
-warning and a broken connection as a failure. Every command takes `-json` for a report to archive
+warning and a broken connection as a failure.
+
+`status -offline` compares the fixture files with the state file. Until a project has one, it
+compares them with their last commit, which needs git in the job's image and a checkout; with
+neither it exits 1 rather than pass a change it cannot see. Run `baseline` once and commit the
+state file to make the job need nothing but the checkout. Every command takes `-json` for a report to archive
 or alert on; see the [reference](reference.md#json-output).
 
 Pin the tool to one version, the same as the `fixtureapply` your migrations import through

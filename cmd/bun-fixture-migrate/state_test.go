@@ -263,3 +263,15 @@ func TestSplitSQLReadsLikeBun(t *testing.T) {
 		t.Fatalf("expected the directive to be refused: %v", err)
 	}
 }
+
+// With no state file and no git to read the fixture file's last revision
+// from, nothing says what the fixture file changes. A gate that passed on that
+// would pass anything.
+func TestStatusWithNothingToCompareWithFails(t *testing.T) {
+	cfg, _ := project(t, newFixture, oldFixture)
+	t.Setenv("PATH", "")
+	code, out, errs := call(t, "status", "-config", cfg, "-offline")
+	if code != 1 || !strings.Contains(errs, "Run bun-fixture-migrate baseline") || !strings.Contains(errs, "git is not installed") {
+		t.Fatalf("exit %d\n%s%s", code, out, errs)
+	}
+}
