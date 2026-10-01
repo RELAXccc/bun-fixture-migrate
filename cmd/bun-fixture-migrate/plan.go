@@ -692,7 +692,7 @@ func printPlan(o streams, r *planReport) {
 			line := fmt.Sprintf("  %s\t%s %s %s", c.Status, c.Model, c.Key, c.Kind)
 			switch {
 			case c.Status == fixtureapply.StatusApplied:
-				line += fmt.Sprintf(" (%s)", plural(int(c.Rows), "row"))
+				line += applied(c)
 			case c.Problem != "":
 				line += fmt.Sprintf(" [%s]: %s", c.Problem, c.Message)
 			case c.Message != "":
@@ -733,7 +733,9 @@ func printPlan(o streams, r *planReport) {
 			ranSQL = true
 		}
 		for _, c := range m.Changes {
-			if c.Status == fixtureapply.StatusApplied && c.Kind == fixturechange.Insert {
+			// A restored row draws no id.
+			if c.Status == fixtureapply.StatusApplied && c.Kind == fixturechange.Insert &&
+				c.Action != fixtureapply.ActionRestored {
 				inserted = true
 			}
 		}

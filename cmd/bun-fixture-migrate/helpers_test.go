@@ -223,3 +223,43 @@ func git(dir string, args ...string) ([]byte, error) {
 	}
 	return stdout.Bytes(), nil
 }
+
+// A change of a model with a soft_delete says what it did, which its kind does
+// not, and what else: the rows still pointing at a soft-deleted row. A
+// restore draws no id from a sequence.
+func TestPrintSaysWhatASoftDeleteDid(t *testing.T) {
+	var out bytes.Buffer
+	o := streams{ctx: context.Background(), stdout: &out, stderr: &out}
+	changes := []fixtureapply.Outcome{
+		{Index: 0, Model: "Plan", Key: "name=team", Kind: fixturechange.Delete, Status: fixtureapply.StatusApplied,
+			Action: fixtureapply.ActionSoftDeleted, Rows: 1, Message: "1 row of subs still points at it"},
+		{Index: 1, Model: "Plan", Key: "name=legacy", Kind: fixturechange.Insert, Status: fixtureapply.StatusApplied,
+			Action: fixtureapply.ActionRestored, Rows: 1, Message: "restored the row soft-deleted at T (id 3)"},
+	}
+	printPlan(o, &planReport{Migrations: []plannedMigration{{ID: "2_fixture_a", Kind: "fixture",
+		Result: "succeeds", Changes: changes}}})
+	text := strings.Join(strings.Fields(out.String()), " ")
+	for _, want := range []string{
+		"applied Plan name=team delete (1 row, soft-deleted): 1 row of subs still points at it",
+		"applied Plan name=legacy insert (1 row, restored): restored the row soft-deleted at T (id 3)",
+		"rolled back: nothing was changed",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("plan is missing %q:\n%s", want, out.String())
+		}
+	}
+	if strings.Contains(text, "an id an insert drew") {
+		t.Errorf("a restore draws no id:\n%s", out.String())
+	}
+	out.Reset()
+	printSync(o, &fixturemigrate.SyncReport{DryRun: true, SyncResult: &fixturemigrate.SyncResult{Outcomes: changes}})
+	text = strings.Join(strings.Fields(out.String()), " ")
+	for _, want := range []string{
+		"would apply Plan name=team delete (soft-deleted): 1 row of subs still points at it",
+		"would apply Plan name=legacy insert (restored): restored the row soft-deleted at T (id 3)",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("sync is missing %q:\n%s", want, out.String())
+		}
+	}
+}
