@@ -95,7 +95,7 @@ func Canonicalize(ctx context.Context, db bun.IDB, cfg *Config, snap *Snapshot, 
 				}
 				if msg, bad := invalid[text]; bad {
 					snap.Findings = append(snap.Findings, Finding{
-						Kind: FindingInvalidValue, Model: model, Row: e.KeyStr,
+						Kind: FindingInvalidValue, Model: model, Row: e.label(model),
 						Detail: fmt.Sprintf("%s is %q, which the column's type, %s, cannot hold: %s",
 							col, text, column.FullType, msg),
 					})

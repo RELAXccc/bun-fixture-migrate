@@ -724,3 +724,71 @@ func TestSwappedNamesAreRefused(t *testing.T) {
 		t.Fatalf("a refused swap writes nothing: %+v", res.Changes)
 	}
 }
+
+// A natural key is compared as one string, which has to be equal exactly when
+// the keys are: values holding the separators, a NULL and the text "NULL", a
+// reference and a text that reads like one are all different keys.
+func TestNaturalKeysThatOnlyReadAlikeAreDifferentKeys(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{
+		"Currency": {Table: "currencies", Ref: "code", Key: []string{"code"}},
+		"Pair":     {Table: "pairs", Key: []string{"a", "b"}},
+		"Code":     {Table: "codes", Key: []string{"code"}, References: map[string]string{"currency": "Currency"}},
+	}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	s := snap(t, cfg, `- model: Currency
+  rows:
+    - {_id: eur, id: 1, code: EUR}
+- model: Pair
+  rows:
+    - {id: 1, a: "x/b=y", b: "z"}
+    - {id: 2, a: "x", b: "y/b=z"}
+- model: Code
+  rows:
+    - {id: 1, code: ~}
+    - {id: 2, code: "NULL"}
+- model: Code
+  rows:
+    - {id: 3, code: x, currency: '{{ $.Currency.eur.ID }}'}
+    - {id: 4, code: y, currency: 0}
+`, "fixture.yml")
+	if len(s.Findings) != 0 {
+		t.Fatalf("no two of these rows share a key: %+v", s.Findings)
+	}
+	codes := s.Entries["Code"]
+	if codes[0].KeyStr == codes[1].KeyStr {
+		t.Fatalf("NULL and the text NULL are one key: %q", codes[0].KeyStr)
+	}
+	ref := keyString("Code", fixturechange.Values{"code": fixturechange.RefTo("Currency", "EUR")})
+	lit := keyString("Code", fixturechange.Values{"code": fixturechange.Lit("Currency(EUR)")})
+	if ref == lit {
+		t.Fatalf("a reference and a text that reads like one are one key: %q", ref)
+	}
+	// The label stays the readable one the reports have always shown.
+	if got := codes[1].label("Code"); got != "Code/code=NULL" {
+		t.Fatalf("label %q", got)
+	}
+
+	// Without an id to tie them together, a row keyed by NULL and one keyed
+	// by the text "NULL" are two rows, not one row that did not change.
+	cfgNoID := &Config{Models: map[string]*Model{"Code": {Table: "codes", Key: []string{"code"}}}}
+	if err := cfgNoID.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	res := computeWith(t, cfgNoID, "- model: Code\n  rows:\n    - {code: \"NULL\", v: 1}\n",
+		"- model: Code\n  rows:\n    - {code: ~, v: 1}\n")
+	if ins, _, del := res.Totals(); ins != 1 || del != 1 {
+		t.Fatalf("expected an insert and a delete, got %+v / %+v", res.Changes, res.Refusals)
+	}
+}
+
+// Two groups of rows sharing a key compare as multisets of whole rows, which
+// tell a NULL from the text "NULL" as well.
+func TestSameRowSetTellsANullFromItsSpelling(t *testing.T) {
+	a := []*Entry{{Cells: fixturechange.Values{"note": fixturechange.Null()}}}
+	b := []*Entry{{Cells: fixturechange.Values{"note": fixturechange.Lit("NULL")}}}
+	if sameRowSet(a, b) {
+		t.Fatal("NULL and the text NULL are the same row")
+	}
+}

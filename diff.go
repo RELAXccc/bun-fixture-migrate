@@ -3,6 +3,7 @@ package fixturemigrate
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
@@ -175,8 +176,9 @@ func undecidedColumns(m *Model, prev, cur *Entry, keep func(col, prevResolved, c
 // undecided refuses a change that carries a value still in an entry's
 // AsWritten: 1.10, 017, 0x1F, True, a timestamp. Canonicalize settles them
 // when the database's columns are at hand; without them the migration would
-// write one of two values, and could write the wrong one.
-func undecided(key string, m *Model, c fixturechange.Change, prev, cur *Entry) (Refusal, bool) {
+// write one of two values, and could write the wrong one. label names the
+// row in the refusal.
+func undecided(label string, m *Model, c fixturechange.Change, prev, cur *Entry) (Refusal, bool) {
 	cols := undecidedColumns(m, prev, cur, func(col, _, _ string) bool {
 		_, inKey := c.Key[col]
 		_, inOld := c.Old[col]
@@ -186,7 +188,7 @@ func undecided(key string, m *Model, c fixturechange.Change, prev, cur *Entry) (
 	if len(cols) == 0 {
 		return Refusal{}, false
 	}
-	return Refusal{c.Model, key, strings.Join(cols, "; ") + ", " + undecidedReason}, true
+	return Refusal{c.Model, label, strings.Join(cols, "; ") + ", " + undecidedReason}, true
 }
 
 // respelled refuses a row whose value resolves the same on both sides but is
@@ -202,7 +204,7 @@ func respelled(model string, m *Model, prev, cur *Entry) (Refusal, bool) {
 	if len(cols) == 0 {
 		return Refusal{}, false
 	}
-	return Refusal{model, cur.KeyStr, strings.Join(cols, "; ") + ", " + undecidedReason}, true
+	return Refusal{model, cur.label(model), strings.Join(cols, "; ") + ", " + undecidedReason}, true
 }
 
 // Compute diffs two snapshots. Both sides are the same shape whether they came
@@ -253,12 +255,13 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 				continue
 			}
 			cur, prev := newGroups[k], oldGroups[k]
+			label := cur[0].label(model)
 			// A key that is not unique cannot be turned into a WHERE clause
 			// that hits the right row. As long as the group did not change
 			// that costs nothing; once it does, it has to be hand-written.
 			if len(cur) > 1 || len(prev) > 1 {
 				if !sameRowSet(prev, cur) {
-					res.Refusals = append(res.Refusals, Refusal{model, k, fmt.Sprintf(
+					res.Refusals = append(res.Refusals, Refusal{model, label, fmt.Sprintf(
 						"the natural key is not unique (%s before, %s after) and the rows differ: "+
 							"hand-write the migration, and give the table a unique index",
 						plural(len(prev), "row"), plural(len(cur), "row"))})
@@ -272,7 +275,7 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 					res.Refusals = append(res.Refusals, r)
 					continue
 				}
-				if r, ok := undecided(k, m, change, nil, cur[0]); ok {
+				if r, ok := undecided(label, m, change, nil, cur[0]); ok {
 					res.Refusals = append(res.Refusals, r)
 					continue
 				}
@@ -295,7 +298,7 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 				res.Refusals = append(res.Refusals, r)
 				continue
 			}
-			if r, ok := undecided(k, m, *change, prev[0], cur[0]); ok {
+			if r, ok := undecided(label, m, *change, prev[0], cur[0]); ok {
 				res.Refusals = append(res.Refusals, r)
 				continue
 			}
@@ -310,14 +313,15 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 				continue
 			}
 			prev := oldGroups[k]
+			label := prev[0].label(model)
 			if m.Deletes == DeleteRefuse {
-				res.Refusals = append(res.Refusals, Refusal{model, k,
+				res.Refusals = append(res.Refusals, Refusal{model, label,
 					"deletes of this model are refused by the configuration because other rows may point at it: " +
 						"hand-write the migration"})
 				continue
 			}
 			if len(prev) > 1 {
-				res.Refusals = append(res.Refusals, Refusal{model, k, fmt.Sprintf(
+				res.Refusals = append(res.Refusals, Refusal{model, label, fmt.Sprintf(
 					"delete of %s sharing one natural key: hand-write the migration", plural(len(prev), "row"))})
 				continue
 			}
@@ -327,7 +331,7 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 				res.Refusals = append(res.Refusals, r)
 				continue
 			}
-			if r, ok := undecided(k, m, change, prev[0], nil); ok {
+			if r, ok := undecided(label, m, change, prev[0], nil); ok {
 				res.Refusals = append(res.Refusals, r)
 				continue
 			}
@@ -438,13 +442,13 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 			res.Refusals = append(res.Refusals, Refusal{model, m.ID + " " + prev.ID, fmt.Sprintf(
 				"renamed from %s to %s, but another row still holds %s in the base state. Two rows cannot swap "+
 					"names in one step: park one of them under a third name first, in a migration of its own",
-				prev.KeyStr, cur.KeyStr, cur.KeyStr)})
+				prev.label(model), cur.label(model), cur.label(model))})
 			continue
 		}
 		res.Refusals = append(res.Refusals, Refusal{model, m.ID + " " + prev.ID, fmt.Sprintf(
 			"renamed from %s to %s. An insert plus a delete is not a rename: rows elsewhere point at this one "+
 				"and so does whatever knows the old name outside the database. Hand-write the migration, or set "+
-				"policy.renames to update and run this again", prev.KeyStr, cur.KeyStr)})
+				"policy.renames to update and run this again", prev.label(model), cur.label(model))})
 	}
 
 	if cfg.Policy.IDDrift == ModeIgnore {
@@ -472,10 +476,10 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 		if cfg.Policy.IDDrift == ModeWarn {
 			// The row still gets its value diff; only the id is left alone,
 			// which an update never writes anyway.
-			res.Refusals = append(res.Refusals, Refusal{model, prev.KeyStr, "warning: " + reason})
+			res.Refusals = append(res.Refusals, Refusal{model, prev.label(model), "warning: " + reason})
 			continue
 		}
-		res.Refusals = append(res.Refusals, Refusal{model, prev.KeyStr, reason})
+		res.Refusals = append(res.Refusals, Refusal{model, prev.label(model), reason})
 		skip[prev.KeyStr] = true
 	}
 	return nil
@@ -521,7 +525,7 @@ func (e *Entry) refValue(m *Model) string {
 // merely happens to carry the old name.
 func renameChange(m *Model, model string, prev, cur *Entry) (fixturechange.Change, error) {
 	if prev.ID == "" {
-		return fixturechange.Change{}, fmt.Errorf("%s %s: a rename needs the row's %s", model, prev.KeyStr, m.ID)
+		return fixturechange.Change{}, fmt.Errorf("%s %s: a rename needs the row's %s", model, prev.label(model), m.ID)
 	}
 	oldVals, newVals := fixturechange.Values{}, fixturechange.Values{}
 	for _, col := range sortedColumns(cur.Key) {
@@ -543,7 +547,7 @@ func renameChange(m *Model, model string, prev, cur *Entry) (fixturechange.Chang
 		}
 		return fixturechange.Change{}, fmt.Errorf(
 			"%s %s: the natural key moved from column %q to another column; hand-write this one",
-			model, prev.KeyStr, col)
+			model, prev.label(model), col)
 	}
 	return fixturechange.Change{
 		Model: model, Kind: fixturechange.Update, Key: prev.Key, ID: prev.ID,
@@ -583,7 +587,7 @@ func refusedByRename(renamed map[string]bool, c fixturechange.Change) (Refusal, 
 			if ref == nil || !renamed[ref.Model+"\x00"+ref.Key] {
 				continue
 			}
-			return Refusal{c.Model, keyString(c.Model, c.Key), fmt.Sprintf(
+			return Refusal{c.Model, keyLabel(c.Model, c.Key), fmt.Sprintf(
 				"it points at %s %q, whose rename was refused above: write that migration first, then run this again",
 				ref.Model, ref.Key)}, true
 		}
@@ -612,7 +616,7 @@ func diffRow(model string, prev, cur *Entry) (*fixturechange.Change, *Refusal) {
 		ov, oldPresent := prev.Cells[col]
 		nv, newPresent := cur.Cells[col]
 		if oldPresent != newPresent {
-			return nil, &Refusal{model, cur.KeyStr, fmt.Sprintf(
+			return nil, &Refusal{model, cur.label(model), fmt.Sprintf(
 				"column %q is written on one side and left out on the other, and has no entry in defaults: "+
 					"say what an omitted %q means and run this again", col, col)}
 		}
@@ -636,9 +640,9 @@ func sameRowSet(old, cur []*Entry) bool {
 		for _, e := range entries {
 			var parts []string
 			for _, col := range sortedColumns(e.Cells) {
-				parts = append(parts, col+"="+e.Cells[col].String())
+				parts = append(parts, strconv.Quote(col)+"="+valueKey(e.Cells[col]))
 			}
-			out = append(out, strings.Join(parts, "\x00"))
+			out = append(out, strings.Join(parts, " "))
 		}
 		sort.Strings(out)
 		return out

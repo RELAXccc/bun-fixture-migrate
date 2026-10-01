@@ -221,8 +221,8 @@ meaning.
 ```json
 {
   "agree": false,
-  "findings": [{"kind": "zero against a default", "model": "Feature", "row": "code=api", "detail": "..."}],
-  "refusals": [{"model": "Plan", "key": "name=old", "reason": "..."}],
+  "findings": [{"kind": "zero against a default", "model": "Plan", "row": "Plan/name=free", "detail": "..."}],
+  "refusals": [{"model": "Plan", "key": "Plan/name=old", "reason": "..."}],
   "changes": [
     {"model": "Plan", "kind": "update", "key": {"name": "team"},
      "database": {"price_cents": "2200"}, "file": {"price_cents": "2500"}}
@@ -232,6 +232,11 @@ meaning.
 
 A change is what a migration from the database to the file would do: an `insert` is a row only the
 file has, a `delete` one only the database has.
+
+The `row` of a finding and the `key` of a refusal name the row for a person, as
+`Model/column=value/…`, with a NULL as `NULL` and a reference as `Model(key)`. Two rows can read
+alike there, a NULL and the text `NULL` for instance; the tool never compares rows by it, so they are
+still two rows.
 
 Finding kinds: `duplicate key`, `zero against a default`, `null against a default`,
 `invalid value` (a value the column's type cannot hold), `unknown column`.

@@ -403,7 +403,7 @@ func LintZeroDefaults(cfg *Config, snap *Snapshot, tables map[string]*dbschema.T
 					continue
 				}
 				snap.Findings = append(snap.Findings, Finding{
-					Kind: FindingZeroDefault, Model: model, Row: e.KeyStr,
+					Kind: FindingZeroDefault, Model: model, Row: e.label(model),
 					Detail: fmt.Sprintf(
 						"%s is %s, but the column defaults to %s and bun writes DEFAULT for a zero, "+
 							"so the database will hold %s and not %s: write %s here, or drop the column default",
@@ -449,7 +449,7 @@ func LintNullDefaults(cfg *Config, snap *Snapshot, tables map[string]*dbschema.T
 					continue
 				}
 				snap.Findings = append(snap.Findings, Finding{
-					Kind: FindingNullDefault, Model: model, Row: e.KeyStr,
+					Kind: FindingNullDefault, Model: model, Row: e.label(model),
 					Detail: fmt.Sprintf(
 						"%s is null, but the column defaults to %s and bun writes DEFAULT for a nil pointer or a "+
 							"nullzero field, so the database will hold %s and not NULL: write the value you mean, "+
@@ -481,7 +481,7 @@ func LintColumns(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table)
 			for _, e := range snap.Entries[model] {
 				if e.ID != "" {
 					snap.Findings = append(snap.Findings, Finding{
-						Kind: FindingUnknownColumn, Model: model, Row: e.KeyStr,
+						Kind: FindingUnknownColumn, Model: model, Row: e.label(model),
 						Detail: fmt.Sprintf("%s is %s, but %s.%s is an identity GENERATED ALWAYS, which refuses "+
 							"an explicit value from dbfixture as from a migration: leave %s out and name the row "+
 							"by its _id", m.ID, e.ID, table.Qualified(), m.ID, m.ID),

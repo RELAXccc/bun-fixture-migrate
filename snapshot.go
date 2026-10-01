@@ -2,6 +2,7 @@ package fixturemigrate
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
@@ -20,7 +21,9 @@ type Entry struct {
 	ID string
 	// Key is the natural key.
 	Key fixturechange.Values
-	// KeyStr is the natural key as one comparable string.
+	// KeyStr is the natural key as one comparable string, equal for two
+	// entries exactly when their keys are; see keyString. Messages name a
+	// row by keyLabel instead.
 	KeyStr string
 	// Cells are the compared columns. A column that is absent here is "not
 	// set", which is not the same as NULL.
@@ -155,19 +158,47 @@ func byKey(entries []*Entry) (map[string][]*Entry, []string) {
 	return groups, order
 }
 
-// keyString renders a natural key so two of them compare as strings.
+// keyString renders a natural key so two of them compare as strings, equal
+// exactly when the keys are. Every name and value is quoted and every value
+// carries its kind: spelled the way a person reads it, a NULL and the text
+// "NULL", a reference and the text "Currency(EUR)", or {a: "x/b=y", b: "z"}
+// and {a: "x", b: "y/b=z"} would be one key, and two different rows a
+// duplicate. It is never shown to anybody; keyLabel is.
 func keyString(model string, key fixturechange.Values) string {
-	cols := make([]string, 0, len(key))
-	for c := range key {
-		cols = append(cols, c)
+	var b strings.Builder
+	b.WriteString(strconv.Quote(model))
+	for _, c := range sortedColumns(key) {
+		b.WriteString(" " + strconv.Quote(c) + "=" + valueKey(key[c]))
 	}
-	sort.Strings(cols)
+	return b.String()
+}
+
+// valueKey writes a value so that no two different values write the same
+// text.
+func valueKey(v fixturechange.Value) string {
+	switch {
+	case v.IsNull:
+		return "null"
+	case v.Ref != nil:
+		return "ref(" + strconv.Quote(v.Ref.Model) + "," + strconv.Quote(v.Ref.Key) + ")"
+	}
+	return strconv.Quote(v.Lit)
+}
+
+// keyLabel is a natural key as refusals and findings name a row,
+// "Plan/name=team", in the text reports and in the JSON ones. Two keys can
+// share a label; nothing compares them by it.
+func keyLabel(model string, key fixturechange.Values) string {
+	cols := sortedColumns(key)
 	parts := make([]string, 0, len(cols))
 	for _, c := range cols {
 		parts = append(parts, c+"="+key[c].String())
 	}
 	return model + "/" + strings.Join(parts, "/")
 }
+
+// label is the entry's natural key as keyLabel writes it.
+func (e *Entry) label(model string) string { return keyLabel(model, e.Key) }
 
 // reportDuplicates adds a finding for every natural key more than one row
 // holds, naming each colliding id. A key that does not identify one row cannot
@@ -189,7 +220,7 @@ func (s *Snapshot) reportDuplicates(model string) {
 			ids = append(ids, id)
 		}
 		s.Findings = append(s.Findings, Finding{
-			Kind: FindingDuplicateKey, Model: model, Row: k,
+			Kind: FindingDuplicateKey, Model: model, Row: group[0].label(model),
 			Detail: "this natural key is held by " + plural(len(group), "row") + " (" + strings.Join(ids, ", ") +
 				"), so no lookup by it can tell them apart: give the table a unique index, or add a column to key",
 		})
