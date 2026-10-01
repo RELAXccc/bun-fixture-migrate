@@ -440,6 +440,10 @@ func TestTwoBranchesGeneratingFromOneState(t *testing.T) {
 		if !strings.Contains(strings.Join(report.Problems, " "), "generate again") {
 			t.Fatalf("%s: status has to say what to do: %v", side, report.Problems)
 		}
+		// Nor does it tell anybody to run generate, which would refuse.
+		if _, out, _ := call(t, "status", "-config", cfg, "-offline"); strings.Contains(out, "run: bun-fixture-migrate generate") {
+			t.Fatalf("%s: status suggests generate:\n%s", side, out)
+		}
 		code, out, errs = call(t, "baseline", "-config", cfg, "-force")
 		if code != 2 || !strings.Contains(errs, missing) || !strings.Contains(errs, "generating again does") {
 			t.Fatalf("%s: baseline -force: exit %d\n%s%s", side, code, out, errs)
@@ -497,5 +501,100 @@ func TestStrictOrderNeedsTheDatabase(t *testing.T) {
 	cfg, _ := project(t, oldFixture, oldFixture)
 	if code, _, errs := call(t, "status", "-config", cfg, "-strict-order"); code != 1 || !strings.Contains(errs, "needs the database") {
 		t.Fatalf("exit %d: %s", code, errs)
+	}
+}
+
+// A finding the policy makes an error stops generate, so it fails the gate and
+// is not recorded as a baseline either.
+func TestStatusAndBaselineStopOnAFinding(t *testing.T) {
+	twice := oldFixture + `    - _id: team2
+      id: 3
+      name: team
+      currency_id: '{{ $.Currency.eur.ID }}'
+      price_cents: 2000
+`
+	cfg, _ := project(t, twice, twice)
+	code, out, errs := call(t, "baseline", "-config", cfg)
+	if code != 2 || !strings.Contains(errs, "duplicate key") {
+		t.Fatalf("exit %d\n%s%s", code, out, errs)
+	}
+	if code, _, errs := call(t, "baseline", "-config", cfg, "-force"); code != 2 {
+		t.Fatalf("-force is about migrations, not findings: exit %d %s", code, errs)
+	}
+	if code, out, errs := call(t, "generate", "-config", cfg, "-old", filepath.Join(filepath.Dir(cfg), "base.yml"),
+		"-name", "x"); code != 2 || !strings.Contains(errs, "duplicate key") {
+		t.Fatalf("generate: exit %d\n%s%s", code, out, errs)
+	}
+	// Recorded under a policy that only warns, status reports it and fails
+	// once the policy says error.
+	warn := strings.Replace(config, "models:", "policy:\n  duplicate_key: warn\nmodels:", 1)
+	if err := os.WriteFile(cfg, []byte(warn), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, errs := call(t, "baseline", "-config", cfg); code != 0 {
+		t.Fatal(errs)
+	}
+	_, out, errs = call(t, "status", "-config", cfg, "-offline")
+	if !strings.Contains(out, "duplicate key: Plan") || strings.Contains(errs, "finding in the fixture file") {
+		t.Fatalf("a warning is shown and does not fail status:\n%s%s", out, errs)
+	}
+	if err := os.WriteFile(cfg, []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errs = call(t, "status", "-config", cfg, "-offline")
+	if code != 3 || !strings.Contains(errs, "1 finding in the fixture file that the policy makes errors") {
+		t.Fatalf("exit %d\n%s%s", code, out, errs)
+	}
+}
+
+// Without a database, every row that writes a value only the column's type can
+// settle is refused; status says so once per model and column rather than
+// once per row, and leaves every other refusal as it is.
+func TestStatusGroupsValuesOnlyTheDatabaseCanSettle(t *testing.T) {
+	cfg, _ := project(t, oldFixture, oldFixture)
+	conf, err := fixturemigrate.LoadConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := func(text string) *fixturemigrate.Snapshot {
+		doc, err := fixturemigrate.ParseDoc([]byte(text))
+		if err != nil {
+			t.Fatal(err)
+		}
+		s, err := fixturemigrate.FixtureSnapshot(conf, doc, "f")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	head := strings.Replace(oldFixture, "name: team", "name: crew", 1)
+	for _, name := range []string{"a", "b", "c"} {
+		head += "    - name: " + name + "\n      currency_id: '{{ $.Currency.eur.ID }}'\n      price_cents: 29.00\n"
+	}
+	res, err := fixturemigrate.Compute(conf, snap(oldFixture), snap(head))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Refusals) != 4 {
+		t.Fatalf("expected a rename and three undecided values, got %v", res.Refusals)
+	}
+	got := groupUndecided(res.Refusals)
+	if len(got) != 2 || !strings.Contains(got[0], "renamed") ||
+		!strings.HasPrefix(got[1], "Plan.price_cents is written like 29.00 in 3 rows, Plan/name=a the first of them, which ") ||
+		!strings.Contains(got[1], "with the database configured") {
+		t.Fatalf("got %q", got)
+	}
+	// One row reads as it did.
+	if one := groupUndecided(res.Refusals[:1]); len(one) != 1 {
+		t.Fatalf("got %q", one)
+	}
+	var single []fixturemigrate.Refusal
+	for _, r := range res.Refusals {
+		if strings.Contains(r.Key, "name=b") {
+			single = append(single, r)
+		}
+	}
+	if one := groupUndecided(single); len(one) != 1 || one[0] != single[0].String() {
+		t.Fatalf("got %q, want %q", one, single[0].String())
 	}
 }

@@ -203,6 +203,15 @@ or one died between `Lock` and `Unlock`, and every migrate fails with
 `migrations table is already locked` until the row is gone. See
 [the runbook](production.md#every-migrate-fails-the-migrations-table-is-already-locked).
 
+**`Plan.price_cents is written like 29.00 in 12 rows, ...`** (`status -offline`). Without a
+database, a value whose meaning depends on the column's type is refused, once per model and column.
+Configure `database` and run `status` without `-offline`, or write the value the way the column
+reads it back (`29`, or `"29.00"` for a text column).
+
+**`N findings in the fixture file that the policy makes errors`** (`status`, exit 3; `generate` and
+`baseline`, exit 2). The fixture files turned up something the policy makes an error, such as two
+rows sharing a natural key. Fix it, or set the policy to `warn`.
+
 **Starting the history over.** When every database applied every migration in the directory and the
 state file's history no longer matters, delete the state file and run `baseline`: a new state file
 includes every fixture migration there is.

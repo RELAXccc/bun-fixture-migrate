@@ -23,8 +23,7 @@ type statusReport struct {
 	Fixture string `json:"fixture"`
 	// State is nil when the configuration has no state file.
 	State *stateInfo `json:"state"`
-	// Base is what Uncovered was worked out against, "" when there was
-	// nothing to work it out against.
+	// Base is what Uncovered was worked out against.
 	Base string `json:"base"`
 	// Uncovered is what the fixture file changes that no migration makes,
 	// one line per model; Refused is what generate would refuse of it.
@@ -34,6 +33,10 @@ type statusReport struct {
 	// the state file. No migration makes them until baseline -force says one
 	// written by hand does.
 	LeftOut []string `json:"left_out"`
+	// Findings are what the fixture file turned up that the policy does not
+	// ignore. One the policy makes an error fails status, as it stops
+	// generate.
+	Findings []checkFinding `json:"findings"`
 	// Directory is the migrations directory, "" when none is configured.
 	Directory  string          `json:"directory"`
 	Migrations []migrationInfo `json:"migrations"`
@@ -45,6 +48,11 @@ type statusReport struct {
 	Database *databaseInfo `json:"database"`
 	Problems []string      `json:"problems"`
 	Notes    []string      `json:"notes"`
+
+	// generateRefuses is true when generate would refuse to write the
+	// migration for Uncovered as things stand, so the report does not tell
+	// anybody to run it.
+	generateRefuses bool
 }
 
 type stateInfo struct {
@@ -181,10 +189,17 @@ func status(o streams, args []string) error {
 	}
 	if res != nil {
 		r.Uncovered = res.Summary()
-		for _, ref := range res.Refusals {
-			r.Refused = append(r.Refused, ref.String())
+		r.Refused = groupUndecided(res.Refusals)
+	}
+	_, findings := s.cfg.Worst(head.Findings)
+	errorFindings := 0
+	for _, f := range findings {
+		r.Findings = append(r.Findings, checkFinding{string(f.Kind), f.Model, f.Row, f.Detail})
+		if s.cfg.FindingMode(f.Kind) == fixturemigrate.ModeError {
+			errorFindings++
 		}
 	}
+	r.generateRefuses = errorFindings > 0 || len(r.NotInState) > 0
 
 	if *asJSON {
 		// A program reads an empty list as [], not as null.
@@ -192,6 +207,9 @@ func status(o streams, args []string) error {
 			if *list == nil {
 				*list = []string{}
 			}
+		}
+		if r.Findings == nil {
+			r.Findings = []checkFinding{}
 		}
 		if r.Migrations == nil {
 			r.Migrations = []migrationInfo{}
@@ -212,6 +230,9 @@ func status(o streams, args []string) error {
 	}
 	if len(r.LeftOut) > 0 {
 		failures = append(failures, plural(len(r.LeftOut), "change")+" left out of a generated migration and not migrated yet")
+	}
+	if errorFindings > 0 {
+		failures = append(failures, plural(errorFindings, "finding")+" in the fixture file that the policy makes errors")
 	}
 	if len(r.Problems) > 0 {
 		failures = append(failures, plural(len(r.Problems), "problem")+" in the migrations directory")
@@ -413,6 +434,62 @@ func lineageProblem(state *fixturemigrate.State, m fixturemigrate.MigrationFile)
 		"file as the one you kept left it, then generate again", m.ID(), how)
 }
 
+// undecidedMarker starts the part of a refusal that says a value is written
+// in a way only the column's type can settle, after the columns it names.
+const undecidedMarker = ", which a column written from a Go string holds as written"
+
+// groupUndecided is the refusals as status lists them: those about a value
+// only the column's type can settle, which without a database is every row of
+// a numeric column written like 29.00, become one line per model and column,
+// and every other refusal stays as it is.
+func groupUndecided(refusals []fixturemigrate.Refusal) []string {
+	type group struct {
+		example string
+		rows    []string
+		why     string
+	}
+	groups := map[string]*group{}
+	var order []string
+	var out []string
+	for _, ref := range refusals {
+		cols, why, ok := strings.Cut(ref.Reason, undecidedMarker)
+		var parts []string
+		for _, part := range strings.Split(cols, "; ") {
+			if !ok || !strings.Contains(part, " is written ") {
+				ok = false
+				break
+			}
+			parts = append(parts, part)
+		}
+		if !ok {
+			out = append(out, ref.String())
+			continue
+		}
+		for _, part := range parts {
+			col, written, _ := strings.Cut(part, " is written ")
+			key := ref.Model + "." + col
+			g := groups[key]
+			if g == nil {
+				g = &group{example: written, why: "which" + strings.TrimPrefix(undecidedMarker, ", which") + why}
+				groups[key] = g
+				order = append(order, key)
+			}
+			g.rows = append(g.rows, ref.Key)
+		}
+	}
+	for _, key := range order {
+		g := groups[key]
+		if len(g.rows) == 1 {
+			model, col, _ := strings.Cut(key, ".")
+			out = append(out, model+" "+g.rows[0]+": "+col+" is written "+g.example+", "+g.why)
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s is written like %s in %d rows, %s the first of them, %s",
+			key, g.example, len(g.rows), g.rows[0], g.why))
+	}
+	return out
+}
+
 // generatedFile reports whether generate wrote a migration, by the comment it
 // opens with, rather than somebody by hand. baseline -force records one
 // written by hand; one generated on another branch has to be generated again.
@@ -485,7 +562,11 @@ func printStatus(o streams, r *statusReport) {
 			fmt.Fprintf(w, "%s\t%s\n", label, line)
 			label = ""
 		}
-		fmt.Fprintf(w, "\trun: bun-fixture-migrate generate -name <what changed>\n")
+		if r.generateRefuses {
+			fmt.Fprintf(w, "\tgenerate refuses to write their migration until what is below is put right\n")
+		} else {
+			fmt.Fprintf(w, "\trun: bun-fixture-migrate generate -name <what changed>\n")
+		}
 	}
 	if len(r.LeftOut) > 0 {
 		label := "left out"
@@ -495,6 +576,9 @@ func printStatus(o streams, r *statusReport) {
 		}
 		fmt.Fprintf(w, "\tgenerate -allow-partial left this out; write the migration by hand, then run: "+
 			"bun-fixture-migrate baseline -force\n")
+	}
+	for _, f := range r.Findings {
+		fmt.Fprintf(w, "finding\t%s: %s\n", f.Kind, fixturemigrate.Finding{Model: f.Model, Row: f.Row, Detail: f.Detail})
 	}
 	w.Flush()
 

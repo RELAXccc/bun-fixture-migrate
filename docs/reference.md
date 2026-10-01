@@ -92,9 +92,10 @@ agrees.
 With `-allow-partial`, the refused changes are recorded in the state file as left out: the next
 `generate` does not see them again, and `status` fails on them until `baseline -force`.
 
-Refused (exit 2), whatever else it finds: a fixture migration in the directory that the state file's
-history does not include, which is one generated on another branch against an older state, or one
-written by hand and not recorded with `baseline -force`. See
+Refused (exit 2), whatever else it finds: a finding in the fixture files that the policy makes an
+error, such as two rows sharing a natural key, as `sync` refuses one; and a fixture migration in the
+directory that the state file's history does not include, which is one generated on another branch
+against an older state, or one written by hand and not recorded with `baseline -force`. See
 [the runbook](production.md#the-state-file-conflicts-in-a-merge).
 
 ### baseline
@@ -108,7 +109,8 @@ is no change, the state is replaced without `-force`.
 Also refused without `-force`: a state that records changes `generate -allow-partial` left out, and a
 fixture migration in the directory that is not in the state's history and was written by hand.
 Refused even with `-force`: a fixture migration generated against another state, on another branch,
-which has to be generated again (see [the runbook](production.md#the-state-file-conflicts-in-a-merge)).
+which has to be generated again (see [the runbook](production.md#the-state-file-conflicts-in-a-merge)),
+and a finding in the fixture files that the policy makes an error.
 
 | Flag | |
 | --- | --- |
@@ -127,6 +129,7 @@ Exit 3 when:
 
 - the fixture files change something no migration makes, or the state file records a change
   `generate -allow-partial` left out;
+- the fixture files have a finding the policy makes an error;
 - the directory holds two migrations bun would record under one name, or a fixture migration the state
   file's history does not include;
 - with a database, bun's locks table holds the lock on the migrations table;
@@ -282,6 +285,7 @@ Finding kinds: `duplicate key`, `zero against a default`, `null against a defaul
   "uncovered": [],
   "refused": [],
   "left_out": [],
+  "findings": [],
   "directory": "migrations",
   "migrations": [
     {"id": "20260930165255_fixture_plan_prices", "name": "20260930165255", "fixture": true, "changes": 3,
@@ -301,6 +305,7 @@ Finding kinds: `duplicate key`, `zero against a default`, `null against a defaul
 | `base` | what `uncovered` was worked out against: `the state file`, or `HEAD` while there is none |
 | `uncovered`, `refused` | what the fixture files change that no migration makes, one line per model, and what of it `generate` would refuse |
 | `left_out` | changes `generate -allow-partial` refused and recorded in the state file, until `baseline -force` |
+| `findings` | as in [check](#check-output), the ones the policy does not ignore |
 | `migrations` | `applied` is `null` for a pending migration and for all of them without a database; `out_of_order` is a pending one that sorts before `newest_applied` |
 | `not_in_state` | fixture migrations of the directory the state's history does not include; `problems` says why |
 | `database` | `null` when none was asked. `locked` is a row in `locks_table` naming `table`: a migrator running now, or one that died and left it |

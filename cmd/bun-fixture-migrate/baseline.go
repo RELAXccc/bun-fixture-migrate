@@ -75,6 +75,7 @@ func baseline(o streams, args []string) error {
 	default:
 		prev = &current
 	}
+
 	// The history. A fixture migration generated on another branch cannot be
 	// recorded as included: its guards expect rows as they were before the
 	// migrations of this branch, so it has to be generated again. One written
@@ -117,6 +118,9 @@ func baseline(o streams, args []string) error {
 	switch {
 	case prev == nil:
 	case fixturemigrate.SameFiles(prev.Files, files) && len(prev.LeftOut) == 0 && covers == prev.Covers:
+		if err := s.refuseFindings(o, next); err != nil {
+			return err
+		}
 		fmt.Fprintf(o.stdout, "%s already records %s\n", s.statePath, source)
 		return nil
 	case *force:
@@ -137,6 +141,9 @@ func baseline(o streams, args []string) error {
 		if respelled {
 			fmt.Fprintf(o.stdout, "%s differs from the state only in how values are written\n", source)
 		}
+	}
+	if err := s.refuseFindings(o, next); err != nil {
+		return err
 	}
 	state := fixturemigrate.State{Files: files, Migration: "baseline", Covers: covers, Base: base}
 	if err := fixturemigrate.WriteState(s.statePath, state); err != nil {
@@ -186,4 +193,23 @@ func (s *setup) baselineDiff(o streams, before, next *fixturemigrate.Snapshot, o
 		fmt.Fprintln(o.stdout, r.String())
 	}
 	return len(res.Changes) + len(res.Refusals), respelled, nil
+}
+
+// refuseFindings stops a baseline of files with a finding the policy makes an
+// error, such as two rows sharing a key: generate refuses to migrate them, and
+// a state that records them only moves the refusal to the next change.
+func (s *setup) refuseFindings(o streams, snap *fixturemigrate.Snapshot) error {
+	mode, findings := s.cfg.Worst(snap.Findings)
+	if mode != fixturemigrate.ModeError {
+		return nil
+	}
+	n := 0
+	for _, f := range findings {
+		fmt.Fprintln(o.stderr, string(f.Kind)+":", f.String())
+		if s.cfg.FindingMode(f.Kind) == fixturemigrate.ModeError {
+			n++
+		}
+	}
+	return exitError{2, fmt.Sprintf("%s in the fixture file that the policy makes errors, nothing written. "+
+		"Fix them, or set the policy to warn", plural(n, "finding"))}
 }

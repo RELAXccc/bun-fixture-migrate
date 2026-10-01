@@ -47,6 +47,11 @@ func generate(o streams, args []string) error {
 	if err != nil {
 		return err
 	}
+	// What the fixture files turn up on their own, such as two rows sharing a
+	// key, stops generate as it stops sync, status and baseline.
+	if err := s.refuseFindings(o, head); err != nil {
+		return err
+	}
 	// The state file is read whatever the base: the changes it records as
 	// left out and its history go on into the next one.
 	var prev *fixturemigrate.State
