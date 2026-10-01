@@ -35,13 +35,17 @@ type State struct {
 	Files []FixtureFile
 	// Migration names the migration that last wrote the state, or "baseline".
 	Migration string
-	// Base is the newest fixture migration the migrations directory held when
-	// the state was written, leaving out Migration itself: the history this
-	// state was built on. generate names a migration after every other one,
-	// so as long as nothing was merged, no fixture migration sorts between
-	// Base and Migration, nor after the newer of the two. One that does was
-	// generated against a state this one never saw. Empty when the directory
-	// held none, and in a state file of format 1, which did not record it.
+	// Covers is the newest fixture migration whose changes Files include: the
+	// one generate wrote with this state, or for a state baseline wrote, the
+	// newest fixture migration of the directory as it was. Empty when there
+	// was none.
+	Covers string
+	// Base is what Covers was generated against: the newest fixture migration
+	// whose changes the state before it included. generate names a migration
+	// after every other one, so as long as nothing was merged no fixture
+	// migration sorts between Base and Covers, nor after Covers; one that does
+	// was generated on another branch, against a state this one never saw.
+	// Equal to Covers when no generated migration is in question.
 	Base string
 	// LeftOut are the changes generate -allow-partial refused, one sentence
 	// each. Files already holds them, so generate does not see them again;
@@ -82,14 +86,16 @@ const (
 # migration, for a change you migrated by hand.
 #
 # Two branches that each generate a migration both change the lines below, so
-# their merge conflicts here, on purpose. Keep both migrations, check with
-# "bun-fixture-migrate plan" against a copy of production that they do not
-# change the same rows, then take either side of this file and run
-# "bun-fixture-migrate baseline -force" on the merged fixture file.
+# their merge conflicts here, on purpose: each migration expects the rows as
+# they were before it, and whichever runs second finds the other's changes.
+# Keep the migration a database already applied and delete the other, take
+# this file as the one you kept left it, then run "bun-fixture-migrate
+# generate" on the merged fixture file.
 #
 `
 	formatPrefix    = "# format: "
 	migrationPrefix = "# migration: "
+	coversPrefix    = "# covers: "
 	basePrefix      = "# base: "
 	leftOutPrefix   = "# left out: "
 	sumPrefix       = "# sha256: "
@@ -111,6 +117,9 @@ func (s State) Encode() []byte {
 	var meta bytes.Buffer
 	fmt.Fprintf(&meta, "%s%d\n", formatPrefix, StateFormat)
 	fmt.Fprintf(&meta, "%s%s\n", migrationPrefix, stateValue(s.Migration))
+	if s.Covers != "" {
+		fmt.Fprintf(&meta, "%s%s\n", coversPrefix, stateValue(s.Covers))
+	}
 	if s.Base != "" {
 		fmt.Fprintf(&meta, "%s%s\n", basePrefix, stateValue(s.Base))
 	}
@@ -201,8 +210,9 @@ var errNotState = errors.New("this is not a state file bun-fixture-migrate wrote
 // errStateConflict is a merge that stopped in the state file, which it does
 // on purpose when two branches each generated a migration.
 var errStateConflict = errors.New("the state file holds git's conflict markers: two branches each generated a " +
-	"migration from the same state. Keep both migrations, take either side of the state file " +
-	"(git checkout --ours or --theirs), then record the merged fixture file with baseline -force")
+	"migration from the same state, and whichever runs second would find the other's changes. Keep the migration " +
+	"a database already applied and delete the other, take the state file as the one you kept left it " +
+	"(git checkout --ours or --theirs), then generate again on the merged fixture file")
 
 // conflicted reports whether git left conflict markers in a file. A fixture
 // file cannot hold such a line: at the start of a line of a YAML sequence it
@@ -258,6 +268,8 @@ func decodeState(data []byte) (State, error) {
 		switch {
 		case strings.HasPrefix(line, migrationPrefix):
 			field, value = &s.Migration, line[len(migrationPrefix):]
+		case strings.HasPrefix(line, coversPrefix):
+			field, value = &s.Covers, line[len(coversPrefix):]
 		case strings.HasPrefix(line, basePrefix):
 			field, value = &s.Base, line[len(basePrefix):]
 		case strings.HasPrefix(line, leftOutPrefix):
@@ -385,6 +397,44 @@ func bodyOf(rest []byte) []byte {
 		return rest[len(stateMarker)+1:]
 	}
 	return rest
+}
+
+// Unaccounted is the fixture migrations, of those given, whose changes the
+// state does not include as far as its history says: one that sorts after
+// Covers, or between Base and Covers. known is false when the state does not
+// say, which is a state file of format 1 that baseline wrote; one of format 1
+// that generate wrote says only that nothing after its migration is included.
+func (s State) Unaccounted(fixtures []MigrationFile) (out []MigrationFile, known bool) {
+	covers, base, between := s.Covers, s.Base, true
+	if s.Format == 1 {
+		if s.Migration == "baseline" || s.Migration == "" {
+			return nil, false
+		}
+		covers, between = s.Migration, false
+	}
+	for _, m := range fixtures {
+		id := m.ID()
+		if id == covers {
+			continue
+		}
+		if CompareMigrations(id, covers) > 0 ||
+			(between && CompareMigrations(id, base) > 0 && CompareMigrations(id, covers) < 0) {
+			out = append(out, m)
+		}
+	}
+	return out, true
+}
+
+// CompareMigrations orders two migrations as bun runs them, by the name bun
+// records and then by the rest of the file name, as ReadMigrations lists
+// them: "20260921120000_fixture_prices". The empty string sorts first.
+func CompareMigrations(a, b string) int {
+	nameA, restA, _ := strings.Cut(a, "_")
+	nameB, restB, _ := strings.Cut(b, "_")
+	if c := strings.Compare(nameA, nameB); c != 0 {
+		return c
+	}
+	return strings.Compare(restA, restB)
 }
 
 // SameFiles reports whether two lists of fixture files hold the same content,

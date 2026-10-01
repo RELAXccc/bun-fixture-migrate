@@ -20,7 +20,8 @@ func FuzzDecodeState(f *testing.F) {
 	f.Add(State{Files: []FixtureFile{{Path: "a.yml", Data: []byte("[]")}, {Path: "b.yml", Data: []byte("- model: X\n")}},
 		Migration: "20260101000000_fixture_x"}.Encode())
 	f.Add(State{Files: []FixtureFile{{Path: "a.yml", Data: []byte("# ----- 1 line of b.yml -----\n")}},
-		Migration: "20260101000000_fixture_x", Base: "20250101000000_fixture_w", LeftOut: []string{"X a: b", "\"c\n"}}.Encode())
+		Migration: "20260101000000_fixture_x", Covers: "20260101000000_fixture_x", Base: "20250101000000_fixture_w",
+		LeftOut: []string{"X a: b", "\"c\n"}}.Encode())
 	f.Add(State{Migration: "baseline"}.Encode())
 	f.Add([]byte(stateMarker + "\n"))
 	for _, golden := range []string{"state-format1-one-file.yml", "state-format1-several-files.yml"} {
@@ -39,7 +40,8 @@ func FuzzDecodeState(f *testing.F) {
 		if err != nil {
 			t.Fatalf("a decoded state does not decode once encoded: %v", err)
 		}
-		if !SameFiles(again.Files, s.Files) || again.Migration != s.Migration || again.Base != s.Base ||
+		if !SameFiles(again.Files, s.Files) || again.Migration != s.Migration || again.Covers != s.Covers ||
+			again.Base != s.Base ||
 			strings.Join(again.LeftOut, "\x00") != strings.Join(s.LeftOut, "\x00") || len(again.LeftOut) != len(s.LeftOut) {
 			t.Fatalf("%+v became %+v", s, again)
 		}

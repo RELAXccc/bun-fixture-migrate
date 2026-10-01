@@ -128,19 +128,21 @@ func TestAMarkerLineInsideAFixtureFileIsData(t *testing.T) {
 // what it was built on, what was left out, its format.
 func TestTheFieldsAreUnderTheChecksum(t *testing.T) {
 	s := State{Files: []FixtureFile{{Path: "fixtures/fixture.yml", Data: []byte(base)}},
-		Migration: "20260921120000_fixture_prices", Base: "20260920120000_fixture_seats",
-		LeftOut: []string{"Plan name=team: its id changed from 2 to 7"}}
+		Migration: "20260921120000_fixture_prices", Covers: "20260921120000_fixture_prices",
+		Base: "20260920120000_fixture_seats", LeftOut: []string{"Plan name=team: its id changed from 2 to 7"}}
 	encoded := string(s.Encode())
 	back, err := DecodeState([]byte(encoded))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if back.Migration != s.Migration || back.Base != s.Base || len(back.LeftOut) != 1 || back.LeftOut[0] != s.LeftOut[0] ||
+	if back.Migration != s.Migration || back.Covers != s.Covers || back.Base != s.Base || len(back.LeftOut) != 1 ||
+		back.LeftOut[0] != s.LeftOut[0] ||
 		back.Format != StateFormat {
 		t.Fatalf("got %+v", back)
 	}
 	for _, edit := range [][2]string{
 		{"# migration: 20260921120000_fixture_prices", "# migration: 20260921120001_fixture_prices"},
+		{"# covers: 20260921120000_fixture_prices", "# covers: 20260921120001_fixture_prices"},
 		{"# base: 20260920120000_fixture_seats", "# base: 20260920120001_fixture_seats"},
 		{"# left out: Plan name=team", "# left out: Plan name=crew"},
 		{"# format: 2", "# format: 2 "},
@@ -240,7 +242,7 @@ func TestAConflictedStateSaysWhatToDo(t *testing.T) {
 		merged.WriteString("<<<<<<< HEAD\n" + oursLines[i] + "=======\n" + theirsLines[i] + ">>>>>>> b\n")
 	}
 	_, err := DecodeState([]byte(merged.String()))
-	if err == nil || !strings.Contains(err.Error(), "conflict markers") || !strings.Contains(err.Error(), "baseline -force") {
+	if err == nil || !strings.Contains(err.Error(), "conflict markers") || !strings.Contains(err.Error(), "generate again") {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -285,5 +287,51 @@ func TestAStateFileOfFormat1StillReads(t *testing.T) {
 	if _, err := DecodeState([]byte(strings.Replace(string(data), "2000", "2500", 1))); err == nil ||
 		!strings.Contains(err.Error(), "checksum") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// The state's history says which fixture migrations of the directory it
+// includes. One generated on another branch, against the state this one was
+// generated against or an older one, sorts between the two or after both.
+func TestWhichMigrationsAStateIncludes(t *testing.T) {
+	dir := func(ids ...string) []MigrationFile {
+		var out []MigrationFile
+		for _, id := range ids {
+			name, comment, _ := strings.Cut(id, "_")
+			out = append(out, MigrationFile{Name: name, Comment: comment})
+		}
+		return out
+	}
+	ids := func(ms []MigrationFile) string {
+		var out []string
+		for _, m := range ms {
+			out = append(out, m.ID())
+		}
+		return strings.Join(out, ",")
+	}
+	const x, a, b = "20261001000000_fixture_x", "20261001100000_fixture_a", "20261001110000_fixture_b"
+	for _, c := range []struct {
+		name  string
+		state State
+		dir   []MigrationFile
+		want  string
+		known bool
+	}{
+		{"linear", State{Covers: b, Base: a}, dir(x, a, b), "", true},
+		{"kept the newer side", State{Covers: b, Base: x}, dir(x, a, b), a, true},
+		{"kept the older side", State{Covers: a, Base: x}, dir(x, a, b), b, true},
+		{"nothing before it", State{Covers: b}, dir(a, b), a, true},
+		{"a baseline", State{Migration: "baseline", Covers: b, Base: b}, dir(x, a, b), "", true},
+		{"a baseline of nothing", State{Migration: "baseline"}, dir(x), x, true},
+		{"format 1, generated", State{Format: 1, Migration: a}, dir(x, a, b), b, true},
+		{"format 1, baseline", State{Format: 1, Migration: "baseline"}, dir(x, a, b), "", false},
+	} {
+		got, known := c.state.Unaccounted(c.dir)
+		if ids(got) != c.want || known != c.known {
+			t.Errorf("%s: got %q %v, want %q %v", c.name, ids(got), known, c.want, c.known)
+		}
+	}
+	if CompareMigrations("9_x", "10_x") <= 0 || CompareMigrations("", "1_a") >= 0 || CompareMigrations("1_a", "1_b") >= 0 {
+		t.Fatal("migrations compare as bun orders them: by name as a string, then the rest")
 	}
 }
