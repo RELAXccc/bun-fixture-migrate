@@ -182,7 +182,7 @@ func DecodeState(data []byte) (State, error) {
 	data = normalizeNewlines(data)
 	s, err := decodeAnyState(data)
 	if err != nil && conflicted(data) {
-		return State{}, errStateConflict
+		return State{}, ErrStateConflict
 	}
 	return s, err
 }
@@ -207,9 +207,10 @@ func decodeAnyState(data []byte) (State, error) {
 
 var errNotState = errors.New("this is not a state file bun-fixture-migrate wrote: the marker line is missing")
 
-// errStateConflict is a merge that stopped in the state file, which it does
-// on purpose when two branches each generated a migration.
-var errStateConflict = errors.New("the state file holds git's conflict markers: two branches each generated a " +
+// ErrStateConflict is what DecodeState and ReadState return, wrapped, for a
+// merge that stopped in the state file, which it does on purpose when two
+// branches each generated a migration.
+var ErrStateConflict = errors.New("the state file holds git's conflict markers: two branches each generated a " +
 	"migration from the same state, and whichever runs second would find the other's changes. Keep the migration " +
 	"a database already applied and delete the other, take the state file as the one you kept left it " +
 	"(git checkout --ours or --theirs), then generate again on the merged fixture file")
@@ -423,6 +424,26 @@ func (s State) Unaccounted(fixtures []MigrationFile) (out []MigrationFile, known
 		}
 	}
 	return out, true
+}
+
+// Covered is the newest fixture migration whose changes the state says it
+// includes: Covers, or for a state file of format 1 the migration that wrote
+// it. "" when it names none, as a state baseline wrote before any fixture
+// migration, or one of format 1 that baseline wrote, says nothing.
+//
+// Unaccounted finds a migration the state does not include; this is the
+// other way round. Deleted from the directory, the migration is no longer
+// there to make its changes, while the state, which generate diffs against,
+// still says they are made: they reach no database, and every gate built on
+// the state stays green.
+func (s State) Covered() string {
+	if s.Format == 1 {
+		if s.Migration == "baseline" {
+			return ""
+		}
+		return s.Migration
+	}
+	return s.Covers
 }
 
 // CompareMigrations orders two migrations as bun runs them, by the name bun

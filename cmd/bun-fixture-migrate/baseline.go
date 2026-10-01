@@ -59,21 +59,36 @@ func baseline(o streams, args []string) error {
 	if err != nil {
 		return err
 	}
-	fixtures, err := s.fixtureMigrations()
+	ms, err := s.migrations()
 	if err != nil {
 		return err
 	}
+	fixtures := ms.Fixtures()
 
+	// A conflicted state file is two histories, and replacing it with -force
+	// would drop one of them without a word, the lineage check with it: one
+	// side is taken first, and then baseline sees what that side says.
 	var prev *fixturemigrate.State
 	current, err := fixturemigrate.ReadState(s.statePath)
 	switch {
 	case errors.Is(err, fixturemigrate.ErrNoState):
+	case errors.Is(err, fixturemigrate.ErrStateConflict):
+		return exitError{2, fmt.Sprintf("%v; baseline does not replace a conflicted state file, even with -force: "+
+			"take one side first, git checkout --ours -- %s or git checkout --theirs -- %s",
+			err, s.statePath, s.statePath)}
 	case err != nil:
 		if !*force {
-			return fmt.Errorf("%w\npass -force to replace it", err)
+			return exitError{2, fmt.Sprintf("%v; pass -force to replace it", err)}
 		}
 	default:
 		prev = &current
+	}
+	// The migration the state says it includes last is gone, so what the
+	// state says is made, nothing makes; a baseline would make that final.
+	if prev != nil && s.outDir != "" {
+		if gone := coveredGone(prev, ms.List, s.outDir, s.statePath); gone != "" {
+			return exitError{2, gone + "; nothing written"}
+		}
 	}
 
 	// The history. A fixture migration generated on another branch cannot be

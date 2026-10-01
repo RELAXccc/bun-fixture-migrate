@@ -55,6 +55,9 @@ type statusReport struct {
 	// migration for Uncovered as things stand, so the report does not tell
 	// anybody to run it.
 	generateRefuses bool
+	// coveredMissing is true when the migration the state file names as the
+	// newest it includes is not in the directory, which generate refuses.
+	coveredMissing bool
 }
 
 type stateInfo struct {
@@ -133,13 +136,14 @@ func status(o streams, args []string) error {
 		return err
 	}
 
-	var fixtures []fixturemigrate.MigrationFile
+	var fixtures, all []fixturemigrate.MigrationFile
 	if s.outDir != "" {
 		ms, err := fixturemigrate.ReadMigrations(s.outDir)
 		if err != nil {
 			return fmt.Errorf("the migrations directory: %w", err)
 		}
 		r.Problems = append(r.Problems, ms.Problems...)
+		all = ms.List
 		for _, m := range ms.List {
 			info := migrationInfo{ID: m.ID(), Name: m.Name, Fixture: m.Fixture != nil}
 			if m.Fixture != nil {
@@ -155,6 +159,12 @@ func status(o streams, args []string) error {
 		for _, m := range unaccounted(state, fixtures) {
 			r.NotInState = append(r.NotInState, m.ID())
 			r.Problems = append(r.Problems, lineageProblem(state, m))
+		}
+		if s.outDir != "" {
+			if gone := coveredGone(state, all, s.outDir, s.statePath); gone != "" {
+				r.Problems = append(r.Problems, gone)
+				r.coveredMissing = true
+			}
 		}
 	}
 
@@ -205,7 +215,7 @@ func status(o streams, args []string) error {
 			errorFindings++
 		}
 	}
-	r.generateRefuses = errorFindings > 0 || len(r.NotInState) > 0
+	r.generateRefuses = errorFindings > 0 || len(r.NotInState) > 0 || r.coveredMissing
 
 	if *asJSON {
 		// A program reads an empty list as [], not as null.
@@ -522,20 +532,39 @@ func lineageOf(state *fixturemigrate.State, fixtures []fixturemigrate.MigrationF
 	return newest, newest
 }
 
-// fixtureMigrations is the fixture migrations of the migrations directory,
-// none when there is no directory yet.
-func (s *setup) fixtureMigrations() ([]fixturemigrate.MigrationFile, error) {
+// migrations is the migrations directory, empty when there is none yet.
+func (s *setup) migrations() (*fixturemigrate.Migrations, error) {
 	if s.outDir == "" {
-		return nil, nil
+		return &fixturemigrate.Migrations{}, nil
 	}
 	ms, err := fixturemigrate.ReadMigrations(s.outDir)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		return &fixturemigrate.Migrations{}, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("the migrations directory: %w", err)
 	}
-	return ms.Fixtures(), nil
+	return ms, nil
+}
+
+// coveredGone says, when the migration the state names as the newest it
+// includes is not in the directory, that its changes are lost: the state,
+// which generate diffs against, says they are made, and no migration makes
+// them. "" when it is there, or the state names none. A file that is there
+// and no longer reads as a change set is a problem of its own already.
+func coveredGone(state *fixturemigrate.State, all []fixturemigrate.MigrationFile, dir, statePath string) string {
+	covered := state.Covered()
+	if covered == "" {
+		return ""
+	}
+	for _, m := range all {
+		if m.ID() == covered {
+			return ""
+		}
+	}
+	return fmt.Sprintf("the state file includes the changes of %s, which is not in %s: it was deleted or renamed and "+
+		"no migration makes its changes. Put it back, or take the state file back from git (git checkout <rev> -- %s) "+
+		"and generate again", covered, dir, statePath)
 }
 
 // newestFixture is the fixture migration that sorts last, "" for none.

@@ -335,3 +335,27 @@ func TestWhichMigrationsAStateIncludes(t *testing.T) {
 		t.Fatal("migrations compare as bun orders them: by name as a string, then the rest")
 	}
 }
+
+// The migration a state says it includes last: what a deleted migration is
+// checked against.
+func TestTheMigrationAStateCovers(t *testing.T) {
+	for _, c := range []struct {
+		state State
+		want  string
+	}{
+		{State{Format: 2, Migration: "2_fixture_b", Covers: "2_fixture_b", Base: "1_fixture_a"}, "2_fixture_b"},
+		{State{Format: 2, Migration: "baseline", Covers: "2_fixture_b", Base: "2_fixture_b"}, "2_fixture_b"},
+		{State{Format: 2, Migration: "baseline"}, ""},
+		{State{Format: 1, Migration: "2_fixture_b"}, "2_fixture_b"},
+		{State{Format: 1, Migration: "baseline"}, ""},
+		{State{Format: 1}, ""},
+	} {
+		if got := c.state.Covered(); got != c.want {
+			t.Errorf("%+v: got %q, want %q", c.state, got, c.want)
+		}
+	}
+	// And a conflict is told apart from every other state that does not read.
+	if _, err := DecodeState([]byte("<<<<<<< HEAD\n# format: 2\n=======\n>>>>>>> b\n")); !errors.Is(err, ErrStateConflict) {
+		t.Fatalf("got %v", err)
+	}
+}

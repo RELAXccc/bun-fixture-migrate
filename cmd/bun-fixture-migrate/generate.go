@@ -54,6 +54,9 @@ func generate(o streams, args []string) error {
 	}
 	// The state file is read whatever the base: the changes it records as
 	// left out and its history go on into the next one.
+	// A state file that does not read is never passed over, whatever the
+	// base: this run would overwrite it, and with it the history and the
+	// changes left out that it records, or the other side of a conflict.
 	var prev *fixturemigrate.State
 	if s.statePath != "" {
 		state, err := fixturemigrate.ReadState(s.statePath)
@@ -61,7 +64,7 @@ func generate(o streams, args []string) error {
 		case err == nil:
 			prev = &state
 		case errors.Is(err, fixturemigrate.ErrNoState):
-		case !*fromDB && *oldPath == "" && *base == "":
+		default:
 			return err
 		}
 	}
@@ -149,7 +152,7 @@ func generate(o streams, args []string) error {
 		dir = s.outDir
 	}
 	var existing []string
-	var fixtures []fixturemigrate.MigrationFile
+	var fixtures, all []fixturemigrate.MigrationFile
 	var dirErr error
 	if dir != "" {
 		var ms *fixturemigrate.Migrations
@@ -157,26 +160,41 @@ func generate(o streams, args []string) error {
 			for _, m := range ms.List {
 				existing = append(existing, m.Name)
 			}
-			fixtures = ms.Fixtures()
+			fixtures, all = ms.Fixtures(), ms.List
 		}
 	}
 	// A fixture migration the state does not include was generated on another
 	// branch, or written by hand and not recorded. A migration generated now
 	// would expect rows as that one did not leave them, and the state would
-	// go on without it, so the history is put right first.
+	// go on without it, so the history is put right first. So is a state
+	// whose newest migration is gone: what it says is made, nothing makes.
 	if prev != nil {
-		if missing := unaccounted(prev, fixtures); len(missing) > 0 {
-			for _, m := range missing {
-				if *dryRun {
-					fmt.Fprintln(o.stderr, "warning:", lineageProblem(prev, m))
-				} else {
-					fmt.Fprintln(o.stderr, "refused:", lineageProblem(prev, m))
-				}
-			}
-			if !*dryRun {
-				return exitError{2, fmt.Sprintf("%s the state file does not include, nothing written",
-					plural(len(missing), "fixture migration"))}
-			}
+		label := "refused:"
+		if *dryRun {
+			label = "warning:"
+		}
+		missing := unaccounted(prev, fixtures)
+		for _, m := range missing {
+			fmt.Fprintln(o.stderr, label, lineageProblem(prev, m))
+		}
+		gone := ""
+		if dir != "" && (dirErr == nil || errors.Is(dirErr, os.ErrNotExist)) {
+			gone = coveredGone(prev, all, dir, s.statePath)
+		}
+		if gone != "" && *dryRun {
+			fmt.Fprintln(o.stderr, label, gone)
+		}
+		switch {
+		case *dryRun:
+		case gone != "" && len(missing) > 0:
+			fmt.Fprintln(o.stderr, label, gone)
+			return exitError{2, fmt.Sprintf("%s the state file does not include, and the one it includes last is "+
+				"gone, nothing written", plural(len(missing), "fixture migration"))}
+		case gone != "":
+			return exitError{2, gone + "; nothing written"}
+		case len(missing) > 0:
+			return exitError{2, fmt.Sprintf("%s the state file does not include, nothing written",
+				plural(len(missing), "fixture migration"))}
 		}
 	}
 	if len(res.Changes) == 0 {
