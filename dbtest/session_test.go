@@ -185,6 +185,39 @@ func TestAConstraintKeepsTheModeItIsDeclaredWithAfterApply(t *testing.T) {
 	}
 }
 
+// SET CONSTRAINTS looks a constraint's schema up as the role running it, and
+// refuses a schema the role may not use: a deferred constraint in another
+// application's schema failed every change set the role ran.
+func TestADeferredConstraintInASchemaTheRoleCannotUseIsLeftAlone(t *testing.T) {
+	db := testDB(t)
+	seed(t, db)
+	ctx := context.Background()
+	run(t, db, "DROP SCHEMA IF EXISTS bfm_hidden CASCADE", "CREATE SCHEMA bfm_hidden",
+		"CREATE TABLE bfm_hidden.p (id int PRIMARY KEY)",
+		"CREATE TABLE bfm_hidden.c (id int PRIMARY KEY, p int CONSTRAINT c_p REFERENCES bfm_hidden.p DEFERRABLE INITIALLY DEFERRED)",
+		`DO $$BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'bfm_plain') THEN CREATE ROLE bfm_plain; END IF; END$$`,
+		"GRANT USAGE ON SCHEMA public TO bfm_plain",
+		"GRANT SELECT, INSERT, UPDATE, DELETE ON plans, features TO bfm_plain",
+		"GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO bfm_plain")
+	t.Cleanup(func() { run(t, db, "DROP SCHEMA IF EXISTS bfm_hidden CASCADE") })
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "SET LOCAL ROLE bfm_plain"); err != nil {
+		t.Fatal(err)
+	}
+	set := fixturechange.Set{Name: "hidden", Tables: tables(), Changes: []fixturechange.Change{{Model: "Plan",
+		Kind: fixturechange.Update,
+		Key:  fixturechange.Values{"name": fixturechange.Lit("team")},
+		Old:  fixturechange.Values{"price_cents": fixturechange.Lit("2000")},
+		New:  fixturechange.Values{"price_cents": fixturechange.Lit("2100")}}}}
+	if err := fixtureapply.Apply(ctx, tx, set, quiet()); err != nil {
+		t.Fatalf("a schema the role cannot use stopped the change set: %v", err)
+	}
+}
+
 // plan simulates a fixture migration and then a .tx.up.sql migration that
 // inserts a child row before its parent, in one transaction. bun's migrator
 // commits the first before the second and applies both; the plan said the SQL

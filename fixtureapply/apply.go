@@ -400,7 +400,9 @@ func withDeferredConstraints(ctx context.Context, tx bun.IDB, set fixturechange.
 // gets the mode it is declared with. SET CONSTRAINTS finds a constraint by its
 // name in its schema, and takes every constraint of that name there: a name
 // that one constraint declared INITIALLY DEFERRED shares with another that is
-// not is left immediate rather than defer the other one too.
+// not is left immediate rather than defer the other one too. A schema the role
+// may not use is left out: SET CONSTRAINTS would refuse its name, and nothing
+// the role does reaches its tables.
 func deferredByDefault(ctx context.Context, tx bun.IDB) error {
 	var names string
 	if err := tx.QueryRowContext(ctx, `
@@ -408,7 +410,7 @@ SELECT coalesce(string_agg(quote_ident(n.nspname) || '.' || quote_ident(c.connam
                            ORDER BY n.nspname, c.conname), '')
 FROM (SELECT DISTINCT connamespace, conname FROM pg_constraint WHERE condeferrable AND condeferred) c
 JOIN pg_namespace n ON n.oid = c.connamespace
-WHERE NOT pg_is_other_temp_schema(n.oid)
+WHERE NOT pg_is_other_temp_schema(n.oid) AND has_schema_privilege(n.oid, 'USAGE')
   AND NOT EXISTS (SELECT 1 FROM pg_constraint o
                   WHERE o.connamespace = c.connamespace AND o.conname = c.conname AND NOT o.condeferred)`).
 		Scan(&names); err != nil {
