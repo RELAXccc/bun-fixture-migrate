@@ -121,6 +121,9 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 	if err != nil {
 		return err
 	}
+	if err := rowSecurity(ctx, tx, set, revert); err != nil {
+		return err
+	}
 	// One change set at a time, whoever runs it: two replicas of an
 	// application migrating at the same start-up would otherwise both find a
 	// row missing and both insert it. The lock is the transaction's and ends
@@ -221,38 +224,89 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 // as 2026-01-02 has to be year-month-day. The settings are local to the
 // transaction; restore puts back what a caller's own transaction had, and a
 // rollback does that by itself.
-//
-// row_security is turned off as well, which makes PostgreSQL raise an error
-// instead of quietly filtering when a row-level security policy applies to
-// the role. Filtered, a policy that hides a row from UPDATE makes the update
-// change nothing, which reads as a row somebody edited and is skipped, and one
-// that hides the seed guard table's rows makes the whole set a no-op that bun
-// records as applied. A role the policies do not apply to -- the table's owner
-// without FORCE ROW LEVEL SECURITY, a superuser, one with BYPASSRLS -- notices
-// nothing.
 func session(ctx context.Context, tx bun.IDB) (func(context.Context) error, error) {
-	var tz, ds, rs string
-	if err := tx.QueryRowContext(ctx,
-		"SELECT current_setting('TimeZone'), current_setting('DateStyle'), current_setting('row_security')").
-		Scan(&tz, &ds, &rs); err != nil {
+	var tz, ds string
+	if err := tx.QueryRowContext(ctx, "SELECT current_setting('TimeZone'), current_setting('DateStyle')").
+		Scan(&tz, &ds); err != nil {
 		return nil, fmt.Errorf("read the session's settings: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, "SELECT set_config('TimeZone', 'UTC', true), "+
-		"set_config('DateStyle', 'ISO, YMD', true), set_config('row_security', 'off', true)"); err != nil {
+		"set_config('DateStyle', 'ISO, YMD', true)"); err != nil {
 		return nil, fmt.Errorf("fix the session's settings: %w", err)
 	}
 	return func(ctx context.Context) error {
-		if _, err := tx.ExecContext(ctx, "SELECT set_config('TimeZone', ?, true), set_config('DateStyle', ?, true), "+
-			"set_config('row_security', ?, true)", tz, ds, rs); err != nil {
+		if _, err := tx.ExecContext(ctx, "SELECT set_config('TimeZone', ?, true), set_config('DateStyle', ?, true)",
+			tz, ds); err != nil {
 			return fmt.Errorf("restore the session's settings: %w", err)
 		}
 		return nil
 	}, nil
 }
 
+// rowSecurity refuses a change set that a row-level security policy would
+// reach, before any of it runs. Filtered by a policy, an update of a row the
+// policy hides changes nothing, which reads as a row somebody edited and is
+// skipped; a seed guard table whose rows it hides makes the whole set a no-op
+// that bun records as applied; a child table whose rows it hides lets a delete
+// cascade into rows nobody counted.
+//
+// It looks at the tables the set reads and writes, the seed guard table, and
+// the tables whose foreign keys point at a table the set deletes from. A table
+// that only a trigger writes into is not among them: the policy applies to the
+// trigger's rows as to any other write, which is what the trigger's author
+// meant. Turning row_security off would have made those writes fail instead.
+func rowSecurity(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool) error {
+	deletes := map[string]bool{}
+	for _, c := range set.Changes {
+		// Revert turns an insert into a delete, and a delete into an insert.
+		if (c.Kind == fixturechange.Delete) != revert && c.Kind != fixturechange.Update {
+			deletes[c.Model] = true
+		}
+	}
+	var rows []string
+	var args []any
+	add := func(name string, deleted bool) {
+		q, err := quoteIdent(name)
+		if err != nil {
+			return // Validate has refused it already
+		}
+		rows = append(rows, "(?, ?)")
+		args = append(args, q, deleted)
+	}
+	for _, model := range sortedModels(set.Tables) {
+		add(set.Tables[model].Name, deletes[model])
+	}
+	if set.SeedGuardTable != "" {
+		add(set.SeedGuardTable, false)
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	// A table that does not exist is left to the statement that needs it,
+	// which fails with PostgreSQL's own words.
+	query := `WITH t (rel, deleted) AS (SELECT to_regclass(n), d FROM (VALUES ` + strings.Join(rows, ", ") + `) v (n, d))
+SELECT DISTINCT rel::text FROM (
+  SELECT rel FROM t WHERE rel IS NOT NULL
+  UNION ALL
+  SELECT con.conrelid FROM pg_constraint con JOIN t ON con.confrelid = t.rel WHERE t.deleted AND con.contype = 'f'
+) s WHERE row_security_active(rel) ORDER BY 1`
+	var active []string
+	if err := tx.NewRaw(query, args...).Scan(ctx, &active); err != nil {
+		return fmt.Errorf("look for row-level security on the tables of the change set: %w", err)
+	}
+	if len(active) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s: row-level security is active on %s for the role running the migration: a row-level "+
+		"security policy applies to it, which would hide rows from the change set or stop its changes, so nothing "+
+		"was changed. Run migrations as the tables' owner while they are not FORCE ROW LEVEL SECURITY, or as a "+
+		"role with BYPASSRLS", set.Name, strings.Join(active, ", "))
+}
+
 // privilege adds what to do to an error PostgreSQL raised because the role may
-// not do something. With row_security off, that is also how a row-level
-// security policy that applies to the role makes itself known.
+// not do something. A row-level security policy on a table a trigger writes
+// into makes itself known the same way, when the trigger's row does not pass
+// it.
 func privilege(err error) error {
 	if pgerr.State(err) != pgerr.InsufficientPrivilege {
 		return err
