@@ -634,6 +634,11 @@ func TestARenameRunsTwiceAndReverts(t *testing.T) {
 // longer holds what the change was generated against, and goes through the
 // policy like any other. It used to fail the deploy outright, whatever
 // changed_row said, which is the admin-UI case the policy exists for.
+//
+// The natural key of a delete referring to such a row is the same: the row it
+// deletes may be there still, pointing at the renamed row, and nothing can
+// tell. It was reported as already gone, at info level, whatever the policy
+// said, with the row still in the database.
 func TestAGuardReferenceToARenamedRowFollowsThePolicy(t *testing.T) {
 	db := connect(t)
 	db.RegisterModel((*Currency)(nil), (*Plan)(nil), (*Feature)(nil))
@@ -680,8 +685,11 @@ func TestAGuardReferenceToARenamedRowFollowsThePolicy(t *testing.T) {
 			fixtureapply.StatusFailed, fixtureapply.ProblemMissingRow, `Plan "team" is not in this database`},
 		{"the natural key, missing_row warn", feature, fixturechange.Policy{MissingRow: fixturechange.ModeWarn}, false,
 			fixtureapply.StatusSkipped, fixtureapply.ProblemMissingRow, `Plan "team" is not in this database`},
-		{"the natural key of a delete", gone, fixturechange.Policy{}, false,
-			fixtureapply.StatusUnchanged, "", `Plan "team" is not in this database`},
+		{"the natural key of a delete, changed_row warn", gone, fixturechange.Policy{}, false,
+			fixtureapply.StatusSkipped, fixtureapply.ProblemChangedRow,
+			"the key refers to Plan(team), which no row holds any more: renamed or removed in this database"},
+		{"the natural key of a delete, changed_row error", gone, fixturechange.Policy{ChangedRow: fixturechange.ModeError}, true,
+			fixtureapply.StatusFailed, fixtureapply.ProblemChangedRow, "the key refers to Plan(team)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			reset()
@@ -700,6 +708,52 @@ func TestAGuardReferenceToARenamedRowFollowsThePolicy(t *testing.T) {
 				t.Fatalf("nothing may change:\n%s\nwas\n%s", after, before)
 			}
 		})
+	}
+}
+
+// A set that deletes a plan and the feature pointing at it, run a second time,
+// finds the feature's key referring to the plan it deleted the first time:
+// that is the set's own work, already done, and not a row it cannot find. The
+// same holds for Revert run twice, whose deletes are the set's inserts.
+func TestASecondRunOfADeleteKeyedOnARowTheSetRemovesIsUnchanged(t *testing.T) {
+	db := testDB(t)
+	seed(t, db)
+	ctx := context.Background()
+	strict := fixturechange.Policy{ChangedRow: fixturechange.ModeError}
+	set := fixturechange.Set{Name: "gone", Tables: tables(), Policy: strict, Changes: []fixturechange.Change{
+		{Model: "Feature", Kind: fixturechange.Delete,
+			Key: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "free"), "code": fixturechange.Lit("api")},
+			Old: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "free"), "code": fixturechange.Lit("api"),
+				"quota": fixturechange.Lit("100")}},
+		{Model: "Plan", Kind: fixturechange.Delete, Key: fixturechange.Values{"name": fixturechange.Lit("free")},
+			Old: fixturechange.Values{"name": fixturechange.Lit("free"), "price_cents": fixturechange.Lit("0"),
+				"rating": fixturechange.Lit("0"), "public": fixturechange.Lit("true"), "note": fixturechange.Null()}},
+	}}
+	statuses := func(outcomes []fixtureapply.Outcome) string {
+		var out []string
+		for _, o := range outcomes {
+			out = append(out, string(o.Status))
+		}
+		return strings.Join(out, ",")
+	}
+	for _, want := range []string{"applied,applied", "unchanged,unchanged"} {
+		outcomes, err := applyReporting(t, db, set)
+		if err != nil || statuses(outcomes) != want {
+			t.Fatalf("want %s: %v %+v", want, err, outcomes)
+		}
+	}
+	insert := changeSet()
+	insert.Changes, insert.Policy = insert.Changes[:2], strict // pro, and its feature sso
+	if err := fixtureapply.Apply(ctx, db, insert, quiet()); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"applied,applied", "unchanged,unchanged"} {
+		var outcomes []fixtureapply.Outcome
+		err := fixtureapply.Revert(ctx, db, insert, quiet(),
+			fixtureapply.WithReport(func(o fixtureapply.Outcome) { outcomes = append(outcomes, o) }))
+		if err != nil || statuses(outcomes) != want {
+			t.Fatalf("Revert, want %s: %v %+v", want, err, outcomes)
+		}
 	}
 }
 

@@ -34,13 +34,13 @@ func (r *runner) diagnose(ctx context.Context, c fixturechange.Change, t fixture
 	if byKey > 1 {
 		return duplicate(t, c, byKey), nil
 	}
+	if byKey == 0 && c.Kind == fixturechange.Delete {
+		return r.diagnoseGone(ctx, c, t)
+	}
 	if byKey == 0 {
 		note, err := r.unresolved(ctx, c.Key)
 		if err != nil {
 			return outcome{}, err
-		}
-		if c.Kind == fixturechange.Delete {
-			return outcome{problem: problemBenign, message: "the row is already gone, nothing to delete." + note}, nil
 		}
 		if out, done, err := r.diagnoseMoved(ctx, c, t, table, wanted); err != nil || done {
 			return out, err
@@ -104,6 +104,41 @@ func (r *runner) diagnose(ctx context.Context, c fixturechange.Change, t fixture
 		"%s %s no longer holds the values this change was generated against: it was changed in this database, or "+
 			"by a migration that ran before this one.%s It was left alone. Compare it with the fixture file and "+
 			"decide which one is right", t.Name, keyLabel(c.Key), note)}, nil
+}
+
+// diagnoseGone explains a delete whose natural key no row holds. The row is
+// gone, unless the key refers to a row that no row holds any more: then it may
+// be there still, pointing at that row under its new name, and nothing can
+// tell. That is a row that no longer holds what the change was generated
+// against, under ChangedRow. A reference to a row this change set removes
+// itself is the exception: the set deletes the row before removing that one,
+// so finding neither is a second run.
+func (r *runner) diagnoseGone(ctx context.Context, c fixturechange.Change, t fixturechange.Table) (outcome, error) {
+	refs, err := r.missingRefs(ctx, c.Key)
+	if err != nil {
+		return outcome{}, err
+	}
+	var lost, removed []string
+	for _, ref := range refs {
+		label := fixturechange.Value{Ref: &ref}.String()
+		if r.removes(ref) {
+			removed = append(removed, label)
+		} else {
+			lost = append(lost, label)
+		}
+	}
+	if len(lost) > 0 {
+		return outcome{problem: problemChanged, message: fmt.Sprintf(
+			"%s %s cannot be found: the key refers to %s, which no row holds any more: renamed or removed in this "+
+				"database. Whether the row this change deletes is still there, pointing at it under another name, "+
+				"cannot be told, so nothing was deleted. Look for the row, and delete it if it is to go",
+			t.Name, keyLabel(c.Key), strings.Join(lost, " and "))}, nil
+	}
+	msg := "the row is already gone, nothing to delete"
+	if len(removed) > 0 {
+		msg += fmt.Sprintf("; its key refers to %s, which this change set removes", strings.Join(removed, " and "))
+	}
+	return outcome{problem: problemBenign, message: msg}, nil
 }
 
 // stopped fails a change whose statement changed no row although its guard

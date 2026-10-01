@@ -288,7 +288,21 @@ func (e *missingRef) Error() string {
 // to add to a diagnosis, or "" when they all do. An operator reading "changed
 // row" alone would look for an edit to the row and find none.
 func (r *runner) unresolved(ctx context.Context, values ...fixturechange.Values) (string, error) {
-	var names []string
+	refs, err := r.missingRefs(ctx, values...)
+	if err != nil || len(refs) == 0 {
+		return "", err
+	}
+	names := make([]string, len(refs))
+	for i, ref := range refs {
+		names[i] = fmt.Sprintf("%s %q", ref.Model, ref.Key)
+	}
+	return fmt.Sprintf(" %s is not in this database under that name, so no row can point at it: it was renamed "+
+		"or removed here.", strings.Join(names, " and ")), nil
+}
+
+// missingRefs are the references among values that name no row, each once.
+func (r *runner) missingRefs(ctx context.Context, values ...fixturechange.Values) ([]fixturechange.Ref, error) {
+	var out []fixturechange.Ref
 	seen := map[string]bool{}
 	for _, vs := range values {
 		for _, col := range sortedColumns(vs) {
@@ -300,19 +314,47 @@ func (r *runner) unresolved(ctx context.Context, values ...fixturechange.Values)
 			_, err := r.resolve(ctx, *ref)
 			var missing *missingRef
 			if errors.As(err, &missing) {
-				names = append(names, fmt.Sprintf("%s %q", ref.Model, ref.Key))
+				out = append(out, *ref)
 				continue
 			}
 			if err != nil {
-				return "", err
+				return nil, err
 			}
 		}
 	}
-	if len(names) == 0 {
-		return "", nil
+	return out, nil
+}
+
+// removes says whether the change set itself deletes the row ref names, or
+// renames it away, as it runs now (Revert runs the changes inverted). The
+// generator puts every change naming a row before the change that removes it,
+// so a reference to such a row that names nothing is a second run finding the
+// set's work done.
+func (r *runner) removes(ref fixturechange.Ref) bool {
+	keyCol := r.set.Tables[ref.Model].Key
+	holds := func(vs fixturechange.Values) bool {
+		v, ok := vs[keyCol]
+		return ok && v.Ref == nil && !v.IsNull && v.Lit == ref.Key
 	}
-	return fmt.Sprintf(" %s is not in this database under that name, so no row can point at it: it was renamed "+
-		"or removed here.", strings.Join(names, " and ")), nil
+	for _, c := range r.set.Changes {
+		if c.Model != ref.Model {
+			continue
+		}
+		if r.revert {
+			c = invert(c)
+		}
+		switch c.Kind {
+		case fixturechange.Delete:
+			if holds(c.Key) || holds(c.Old) {
+				return true
+			}
+		case fixturechange.Update:
+			if _, renamed := c.New[keyCol]; renamed && !holds(c.New) && (holds(c.Key) || holds(c.Old)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // compare is "col IS NOT DISTINCT FROM value", typed. The value is cast to
