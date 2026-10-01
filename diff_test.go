@@ -1,8 +1,10 @@
 package fixturemigrate
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
@@ -504,6 +506,37 @@ func TestKeyAnyOfPicksTheColumnThatIsSet(t *testing.T) {
 	}
 	if _, ok := c.Key["plan_id"]; ok {
 		t.Fatalf("the column that is not set does not belong in the key: %+v", c.Key)
+	}
+}
+
+// A key_any_of column a row leaves out, with no default, is NULL, as the
+// database holds it: a row setting none of the group is keyed by NULL, and
+// every row carries the group, so a column no row writes is still compared.
+func TestKeyAnyOfLeftOutIsNull(t *testing.T) {
+	cfg := &Config{
+		Models: map[string]*Model{
+			"User": {Table: "users"},
+			"Grant": {Table: "grants", Key: []string{"perm"}, KeyAnyOf: [][]string{{"user_id", "team_id"}},
+				References: map[string]string{"user_id": "User", "team_id": "User"}},
+		},
+	}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	s := snap(t, cfg, `- model: User
+  rows:
+    - {_id: u, id: 1, name: u}
+- model: Grant
+  rows:
+    - {id: 1, perm: admin}
+    - {id: 2, perm: read, user_id: '{{ $.User.u.ID }}'}
+`, "fixture.yml")
+	admin, read := s.Entries["Grant"][0], s.Entries["Grant"][1]
+	if v := admin.Key["user_id"]; !v.IsNull || !admin.Cells["team_id"].IsNull || !admin.Cells["user_id"].IsNull {
+		t.Fatalf("admin: key %+v cells %+v", admin.Key, admin.Cells)
+	}
+	if !read.Cells["team_id"].IsNull || strings.Join(s.Columns["Grant"], ",") != "perm,team_id,user_id" {
+		t.Fatalf("read: cells %+v, columns %v", read.Cells, s.Columns["Grant"])
 	}
 }
 
@@ -1117,14 +1150,22 @@ func TestTheCatalogSaysWhichColumnsAreUnique(t *testing.T) {
     - {id: 1, code: g, slot: 9, cur: GBP}
     - {id: 2, code: f, slot: 2, cur: EUR}
 `, "new")
-	guessed := uniqueColumns(cfg, old, next)["Seat"]
-	if !guessed["cur"] || !guessed["slot"] {
+	has := func(u uniques, cols ...string) bool {
+		for _, index := range u.indexes["Seat"] {
+			if strings.Join(index, ",") == strings.Join(cols, ",") {
+				return true
+			}
+		}
+		return false
+	}
+	guessed := uniqueIndexes(cfg, old, next)
+	if !has(guessed, "cur") || !has(guessed, "slot") || !guessed.guessed["Seat"] {
 		t.Fatalf("without the catalog both could be unique: %v", guessed)
 	}
 	old.noteUniques("Seat", &dbschema.Table{Uniques: [][]string{{"id"}, {"code"}, {"slot"}, {"cur", "slot"}}})
-	known := uniqueColumns(cfg, old, next)["Seat"]
-	if !known["slot"] || !known["id"] || known["cur"] {
-		t.Fatalf("the catalog says id, code and slot: %v", known)
+	known := uniqueIndexes(cfg, old, next)
+	if !has(known, "slot") || !has(known, "id") || has(known, "cur") || !has(known, "cur", "slot") || known.guessed["Seat"] {
+		t.Fatalf("the catalog says id, code, slot, and cur with slot: %v", known)
 	}
 	res, err := Compute(cfg, old, next)
 	if err != nil {
@@ -1136,7 +1177,189 @@ func TestTheCatalogSaysWhichColumnsAreUnique(t *testing.T) {
 
 	// A reference is never guessed to be unique: in a few rows it is
 	// distinct by chance more often than not.
-	if cols := uniqueColumns(testConfig(t), snap(t, testConfig(t), base, "base"))["Plan"]; cols["currency_id"] {
-		t.Fatalf("a reference was guessed unique: %v", cols)
+	for _, index := range uniqueIndexes(testConfig(t), snap(t, testConfig(t), base, "base")).indexes["Plan"] {
+		if strings.Join(index, ",") == "currency_id" {
+			t.Fatalf("a reference was guessed unique")
+		}
+	}
+}
+
+// A row that keeps its key and changes the value a reference names it by is
+// followed by the base state, as a rename is: the rows pointing at it do not
+// change, and nothing waits for itself in a circle. Before, the city got an
+// update of its own, waiting for the country and the country for it, and the
+// circle made every unique index of the set give way: the tags' slugs moved
+// in the wrong order.
+func TestARefValueChangeMovesNothingThatPointsAtTheRow(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{
+		"Country": {Table: "countries", Key: []string{"code"}, Ref: "name"},
+		"City":    {Table: "cities", Key: []string{"name"}, References: map[string]string{"country_id": "Country"}},
+		"Tag":     {Table: "tags", Key: []string{"name"}},
+	}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	text := `- model: Country
+  rows:
+    - {_id: de, id: 1, code: DE, name: Germany}
+- model: City
+  rows:
+    - {id: 1, name: Berlin, country_id: '{{ $.Country.de.ID }}'}
+- model: Tag
+  rows:
+    - {id: 1, name: t1, slug: a}
+    - {id: 2, name: t2, slug: b}
+`
+	next := strings.NewReplacer("name: Germany", "name: Deutschland", "slug: b", "slug: c", "slug: a", "slug: b").Replace(text)
+	old := snap(t, cfg, text, "old")
+	old.noteUniques("Tag", &dbschema.Table{Uniques: [][]string{{"id"}, {"name"}, {"slug"}}})
+	res, err := Compute(cfg, old, snap(t, cfg, next, "new"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := kindsOf(res); got != "update Country/code=DE; update Tag/name=t2; update Tag/name=t1" {
+		t.Fatalf("got %s", got)
+	}
+}
+
+// A unique index over several columns orders changes by the values it holds
+// together: an item put at the top of a list moves the others down first,
+// the last one first.
+func TestACompositeUniqueIndexOrdersChanges(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{"Item": {Table: "items", Key: []string{"name"}}}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	old := snap(t, cfg, "- model: Item\n  rows:\n    - {id: 1, name: a, cat: x, pos: 1}\n    - {id: 2, name: b, cat: x, pos: 2}\n"+
+		"    - {id: 3, name: c, cat: x, pos: 3}\n    - {id: 5, name: q, cat: y, pos: 1}\n", "old")
+	next := snap(t, cfg, "- model: Item\n  rows:\n    - {id: 1, name: a, cat: x, pos: 2}\n    - {id: 2, name: b, cat: x, pos: 3}\n"+
+		"    - {id: 3, name: c, cat: x, pos: 4}\n    - {id: 4, name: z, cat: x, pos: 1}\n    - {id: 5, name: q, cat: y, pos: 1}\n", "new")
+	old.noteUniques("Item", &dbschema.Table{Uniques: [][]string{{"id"}, {"name"}, {"cat", "pos"}}})
+	res, err := Compute(cfg, old, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := kindsOf(res); got != "update Item/name=c; update Item/name=b; update Item/name=a; insert Item/name=z" {
+		t.Fatalf("got %s", got)
+	}
+}
+
+// Without the database, which columns are unique is a guess. Two guesses that
+// would order the changes in opposite ways both give way, and the result says
+// so, instead of the first in name order deciding.
+func TestGuessedUniquesThatContradictEachOtherGiveWay(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{"Item": {Table: "items", Key: []string{"name"}}}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	res := computeWith(t, cfg, "- model: Item\n  rows:\n    - {id: 1, name: r1, cat: a, pos: 0}\n    - {id: 2, name: r2, cat: c, pos: 1}\n",
+		"- model: Item\n  rows:\n    - {id: 1, name: r1, cat: b, pos: 1}\n    - {id: 2, name: r2, cat: a, pos: 2}\n")
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0].String(), "Item: without the database the tool guesses") ||
+		!strings.Contains(res.Warnings[0].Reason, "the guesses cat and pos") {
+		t.Fatalf("expected a warning about the guesses, got %+v", res.Warnings)
+	}
+}
+
+// When nothing's wait is over, the circle is broken at a change of a circle
+// nothing else holds up, never at a change that only waits behind one.
+func TestACircleIsBrokenWhereNothingElseWaits(t *testing.T) {
+	// 0 waits for 2; 1 and 2 wait for each other.
+	waiting := []int{1, 1, 1}
+	next := [][]int{nil, {2}, {0, 1}}
+	got := topological(waiting, next, func(i int) int { return i })
+	if fmt.Sprint(got) != "[1 2 0]" {
+		t.Fatalf("got %v", got)
+	}
+}
+
+// Compute grows with the size of a master-data set, not with its square: a
+// rename used to look at every row of every model, and an insert at every
+// row of its own, which took 18 seconds at 20,000 rows. Four times the rows
+// may take four times as long, and with noise, not sixteen times.
+func TestComputeScales(t *testing.T) {
+	if testing.Short() {
+		t.Skip("a timing test")
+	}
+	cfg := &Config{Models: map[string]*Model{
+		"Region":  {Table: "regions"},
+		"Country": {Table: "countries", References: map[string]string{"region_id": "Region"}},
+		"City":    {Table: "cities", References: map[string]string{"country_id": "Country"}},
+	}, Policy: Policy{Renames: RenameUpdate}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	file := func(cities int, renamed bool) string {
+		countries := cities / 10
+		var b strings.Builder
+		name := func(kind string, i int) string {
+			if renamed && i%4 == 0 {
+				return fmt.Sprintf("%s%d_x", kind, i)
+			}
+			return fmt.Sprintf("%s%d", kind, i)
+		}
+		b.WriteString("- model: Region\n  rows:\n")
+		for i := 1; i <= 100; i++ {
+			fmt.Fprintf(&b, "    - {_id: r%d, id: %d, name: region%d}\n", i, i, i)
+		}
+		b.WriteString("- model: Country\n  rows:\n")
+		for i := 1; i <= countries; i++ {
+			fmt.Fprintf(&b, "    - {_id: c%d, id: %d, name: %s, region_id: '{{ $.Region.r%d.ID }}', pop: %d}\n",
+				i, i, name("country", i), 1+i%100, i)
+		}
+		b.WriteString("- model: City\n  rows:\n")
+		for i := 1; i <= cities; i++ {
+			fmt.Fprintf(&b, "    - {id: %d, name: %s, code: C%d, country_id: '{{ $.Country.c%d.ID }}', pop: %d}\n",
+				i, name("city", i), i, 1+i%countries, i)
+		}
+		return b.String()
+	}
+	empty := snap(t, cfg, "[]", "empty")
+	took := func(cities int, renames bool) time.Duration {
+		full := snap(t, cfg, file(cities, false), "full")
+		old, next := empty, full
+		if renames {
+			old, next = full, snap(t, cfg, file(cities, true), "renamed")
+		}
+		start := time.Now()
+		res, err := Compute(cfg, old, next)
+		if err != nil || len(res.Changes) == 0 {
+			t.Fatalf("%v, %d changes", err, len(res.Changes))
+		}
+		return time.Since(start)
+	}
+	for _, renames := range []bool{false, true} {
+		small, large := took(5000, renames), took(20000, renames)
+		if large > 10*small+time.Second {
+			t.Errorf("renames %v: 5,000 rows in %v, 20,000 in %v", renames, small, large)
+		}
+	}
+}
+
+// Two keys one value to their type, Go and go in a citext column, name one
+// row: without ids to pair them, their folded keys do, and the new spelling
+// is a rename. A key of another type is never folded.
+func TestAKeyRespelledInItsTypeIsARename(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{"Lang": {Table: "langs", Ref: "code", Key: []string{"code"}}}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	old := snap(t, cfg, "- model: Lang\n  rows:\n    - {id: 7, code: go}\n", "the database")
+	next := snap(t, cfg, "- model: Lang\n  rows:\n    - {code: Go}\n", "fixture.yml")
+	if res, err := Compute(cfg, old, next); err != nil || kindsOf(res) != "delete Lang/code=go; insert Lang/code=Go" {
+		t.Fatalf("unfolded keys are two rows: %v %s", err, kindsOf(res))
+	}
+	old.Entries["Lang"][0].folded = map[string]string{"code": "go"}
+	next.Entries["Lang"][0].folded = map[string]string{"code": "go"}
+	res, err := Compute(cfg, old, next)
+	if err != nil || len(res.Changes) != 0 || len(res.Refusals) != 1 ||
+		res.Refusals[0].String() != "Lang id 7: renamed from Lang/code=go to Lang/code=Go. An insert plus a delete is "+
+			"not a rename: rows elsewhere point at this one and so does whatever knows the old name outside the "+
+			"database. Hand-write the migration, or set policy.renames to update and run this again" {
+		t.Fatalf("%v %+v / %+v", err, res.Changes, res.Refusals)
+	}
+	cfg.Policy.Renames = RenameUpdate
+	res, err = Compute(cfg, old, next)
+	if err != nil || len(res.Changes) != 1 || res.Changes[0].ID != "7" || res.Changes[0].New["code"].Lit != "Go" {
+		t.Fatalf("%v %+v / %+v", err, res.Changes, res.Refusals)
 	}
 }

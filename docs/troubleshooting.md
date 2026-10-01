@@ -283,7 +283,17 @@ statements succeed and the deploy fails when it commits, as in the plan. `sync` 
 `the changes would fail when committed`.
 
 **`plan -file takes a fixture migration generate wrote, a .go file`.** A SQL migration is not planned
-by name: `plan -with-sql` runs the pending ones in bun's order with the fixture migrations.
+by name: `plan -with-sql` runs the pending ones in bun's order with the fixture migrations. `apply
+-file` says the same.
+
+**`migration X is recorded in bun_migrations already`** (`apply -record`, exit 2). bun's migrator
+does not run a recorded migration, and apply does not record it twice. Leave out `-record` to run
+the change set again, which finds every change it made. **`... is not recorded in bun_migrations,
+so there is no record to take back`** (`apply -revert -record`, exit 2) is the same the other way
+round.
+
+**`bun_migrations does not exist, so there is nothing to record the migration in`** (`apply
+-record`, exit 1). The migrator's `Init` creates it; run it once, or leave out `-record`.
 
 **`bufio.Scanner: token too long`.** A line of a SQL migration is longer than 64 KiB, and bun reads
 SQL migrations a line at a time. The deploy fails before running any of the file, and unless the
@@ -318,6 +328,14 @@ database, a value whose meaning depends on the column's type is refused, once pe
 Configure `database` and run `status` without `-offline`, or write the value the way the column
 reads it back (`29`, or `"29.00"` for a text column).
 
+**`edited after it ran here`** (`status` with an `audit_table`). The migration file's change set is
+not the one the audit table recorded when it ran in this database: somebody edited the file since,
+for instance to set `MissingRow` for a database where it failed. Databases that have not run it yet
+run the edited one. A revert here matches the file's changes to that run by model, key and kind.
+
+**`the audit table X cannot be read as this role`** (`status`, exit 1). Grant the role status
+connects as `SELECT` on the table, or run `status -offline`.
+
 **`N findings in the fixture file that the policy makes errors`** (`status`, exit 3; `generate` and
 `baseline`, exit 2). The fixture files turned up something the policy makes an error, such as two
 rows sharing a natural key. Fix it, or set the policy to `warn`.
@@ -335,20 +353,30 @@ Messages a generated migration returns through bun's migrator:
 | `no row of plans has name=team` | missing row | [a migration failed](production.md#a-fixture-migration-failed-during-a-deploy) |
 | `is to point at Currency "EUR", and no row of currencies has code = "EUR"` | error: the row a change writes a reference to is not there | put it back, or fix the fixture file and generate again |
 | `Currency "EUR" is not in this database under that name` | added to a missing or changed row: a guard names a row that was renamed or removed | [a migration failed](production.md#a-fixture-migration-failed-during-a-deploy) |
+| `cannot be found: the key refers to Plan(free), which no row holds any more` | changed row: a delete whose key names a row that was renamed or removed in this database, so whether the row to delete is still there cannot be told | look for the row under the new name, and delete it if it is to go |
 | `no longer holds the values this change was generated against` | changed row | [a change was skipped](production.md#a-change-was-skipped) |
 | `changed no row all the same: a BEFORE trigger that returned NULL, a rule, or a row-level security policy stopped it` | error | find the trigger, rule or policy on the table; the change set cannot be made past it |
-| `a row-level security policy applies to it` | error: `row_security` is off while a change set runs, so a policy raises an error instead of hiding rows | run migrations as the tables' owner or a role with `BYPASSRLS` |
+| `row-level security is active on plans for the role running the migration` | error, before anything runs: a policy would hide rows of a table the set reads or writes, of the seed guard table, or of a table pointing at one the set deletes from | run migrations as the tables' owner while they are not `FORCE ROW LEVEL SECURITY`, or as a role with `BYPASSRLS`. A table only a trigger writes into is not checked: the policy applies to the trigger's rows as to any write |
+| `The role running the migration lacks a privilege, or a row-level security policy applies to it` | error: PostgreSQL refused a statement, or a row a trigger wrote did not pass a policy's check | grant what is missing, or run migrations as the tables' owner or a role with `BYPASSRLS` |
 | `exists, but under id 7 and not 3` | id drift | [a migration failed](production.md#a-fixture-migration-failed-during-a-deploy) |
 | `2 rows of features point at plans name=pro through ...` | referenced | [a migration failed](production.md#a-fixture-migration-failed-during-a-deploy) |
 | `rows of plans hold name=team` | duplicate key: more than one row has the natural key, none is touched | remove the extra rows and add a unique index on the key |
 | `held a lock on a row of plans for longer than the lock timeout` | lock timeout: nothing was changed | the next deploy runs it again; find the long transaction |
+| `checking the constraints PostgreSQL defers waited for a lock another session held` | lock timeout, while the `DEFERRABLE` constraints were checked at the end of the set: a foreign key's check locks the row it points at | the next deploy runs it again; find the long transaction |
 | `does not hold the model's where` | error: the row a change writes would not be master data | the fixture row and the model's `where` disagree; fix one |
 | `once every change was made, a constraint did not hold` | error: a `DEFERRABLE` constraint, checked when the set is done | the set leaves a foreign key or unique key broken; [plan](production.md#a-fixture-migration-failed-during-a-deploy) shows the changes |
 | `is a bytea column` | error: a list of numbers for binary data | write the bytes as `\x` and hex digits |
 | `PostgreSQL only stores an array whose rows all have the same length` | error | make every row of the array as long as the others |
+| `empty list inside a list` | error: an array cannot have an empty row | drop the empty list, or make the whole value an empty list |
+| `PostgreSQL stores arrays of at most 6 dimensions` | error: lists nested more than six deep | nest them less deep |
+| `the value holds a NUL character, which PostgreSQL cannot store` | error, before anything runs: a NUL, written `\u0000` in a list, which bun would drop without a word | remove it from the fixture file and generate again |
 | `the change set is in format 2` | the file was generated by a newer version | upgrade `github.com/RELAXccc/bun-fixture-migrate` in the application |
 | `plans is empty, nothing to do` | not a problem: the database is not seeded yet | [a new environment](production.md#a-new-environment) |
 | `wait for another change set to finish` | the advisory lock wait was cancelled | another process was applying a change set; retry |
+| `the audit table bun_fixture_audit does not exist, and the role running the migration may not create it` | error, after the changes: nothing was changed | grant the role `CREATE` on the schema, or have a role that may run a migration once and grant this one `SELECT` and `INSERT` on the table |
+| `may not write into the audit table` / `may not read the audit table` / `may not use the schema of the audit table` | error: nothing was changed | grant the role `SELECT` and `INSERT` on the table, and `USAGE` on its schema |
+| `holds no Apply of this change set that was not reverted since, so every change is reverted` | not an error, a revert's log line: the set never ran here with an audit table, or ran before it had one | look at the rows the migration reported `unchanged` before rolling back; see [rolling back](production.md#rolling-back) |
+| `not reverted: the migration did not make it in this database` | not an error: the audit table says the migration found the change made, or skipped it, so the revert leaves the row alone | nothing |
 
 **`bun had recorded X as applied before running it, and the record could not be removed`.** The
 migration failed and rolled back, but its record in the migrations table is still there. Delete the

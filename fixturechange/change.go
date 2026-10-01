@@ -54,6 +54,13 @@ type Table struct {
 	// stands; fixtureapply refuses one that could reach outside the
 	// parentheses it is put in.
 	Where string
+	// Policy, when set, is what the changes of this model do when the
+	// database is not in the state they were generated against, in place of
+	// the set's Policy: the configuration's changed_row, missing_row,
+	// id_drift and duplicate_key of the model. A field left empty here is
+	// the set's, so Policy{ChangedRow: ModeWarn} changes that one decision
+	// for this model and no other. Nil is the set's Policy throughout.
+	Policy *Policy
 }
 
 // Tables maps a model name to its table.
@@ -155,9 +162,38 @@ type Set struct {
 	// and rolls back instead of waiting behind, say, an admin's open
 	// transaction while the application's own writes queue up behind it; the
 	// next deploy runs it again. Waiting for another change set to finish is
-	// not affected. Empty means the session's own lock_timeout, which is
-	// usually none.
+	// not affected, nor limited by a lock_timeout the session has, unless the
+	// set runs inside a caller's transaction, whose lock_timeout limits that
+	// wait. Empty means the session's own lock_timeout, which is usually none.
 	LockTimeout string
+	// AuditTable, when set, is the table, optionally schema-qualified, in
+	// which every successful Apply and Revert of the set records what it did
+	// with each change, in the same transaction: one row per run, which
+	// fixtureapply creates the table for when it is missing. Revert then
+	// undoes only the changes Apply made in this database, and status shows
+	// per database which changes a deploy skipped. Empty records nothing, and
+	// Revert inverts every change.
+	AuditTable string
+}
+
+// PolicyFor is the policy the changes of a model run under: the set's
+// Policy, with every field the model's table sets in its own Policy in its
+// place.
+func (s Set) PolicyFor(model string) Policy {
+	p := s.Policy
+	t, ok := s.Tables[model]
+	if !ok || t.Policy == nil {
+		return p
+	}
+	for _, f := range []struct{ to, from *Mode }{
+		{&p.MissingRow, &t.Policy.MissingRow}, {&p.ChangedRow, &t.Policy.ChangedRow},
+		{&p.IDDrift, &t.Policy.IDDrift}, {&p.DuplicateKey, &t.Policy.DuplicateKey},
+	} {
+		if *f.from != "" {
+			*f.to = *f.from
+		}
+	}
+	return p
 }
 
 // Concat joins parts of a change set's Changes in order. A generated file of

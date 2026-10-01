@@ -7,6 +7,7 @@ import (
 	"text/tabwriter"
 
 	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
+	"github.com/RELAXccc/bun-fixture-migrate/fixtureapply"
 
 	"github.com/uptrace/bun"
 )
@@ -52,6 +53,51 @@ func status(o streams, args []string) error {
 		return exitError{3, strings.Join(r.Failures, "; ")}
 	}
 	return nil
+}
+
+// printAudit lists what the audit table says each fixture migration's last
+// run did here.
+func printAudit(o streams, r *fixturemigrate.StatusReport) {
+	if r.Database == nil || r.Database.Audit == nil {
+		return
+	}
+	a := r.Database.Audit
+	if !a.Exists {
+		fmt.Fprintf(o.stdout, "\n%s does not exist yet: no fixture migration with an audit table ran here\n", a.Table)
+		return
+	}
+	header := false
+	for _, m := range r.Migrations {
+		if m.Audit == nil {
+			continue
+		}
+		if !header {
+			fmt.Fprintf(o.stdout, "\nwhat the fixture migrations did here, according to %s\n", a.Table)
+			header = true
+		}
+		// A Revert's applied changes are the ones it reverted.
+		run := "applied"
+		if m.Audit.Direction == string(fixtureapply.DirectionDown) {
+			run = "reverted"
+		}
+		fmt.Fprintf(o.stdout, "  %s: %s %s by %s: ", m.ID, run, m.Audit.At.UTC().Format("2006-01-02 15:04:05"),
+			m.Audit.By)
+		if m.Audit.Unseeded {
+			fmt.Fprintln(o.stdout, "nothing, the database was not seeded yet")
+		} else {
+			fmt.Fprintf(o.stdout, "%d %s, %d unchanged, %d skipped\n", m.Audit.Applied, run, m.Audit.Unchanged,
+				m.Audit.Skipped)
+		}
+		for _, c := range m.Audit.SkippedChanges {
+			fmt.Fprintf(o.stdout, "    skipped %s %s %s [%s]\n", c.Model, c.Key, c.Kind, c.Problem)
+		}
+		if m.Audit.Edited {
+			fmt.Fprintln(o.stdout, "    edited after it ran here: the file's change set is not the one that ran")
+		}
+	}
+	if !header {
+		fmt.Fprintf(o.stdout, "\n%s holds no run of a fixture migration in this directory\n", a.Table)
+	}
 }
 
 func printStatus(o streams, r *fixturemigrate.StatusReport) {
@@ -145,6 +191,7 @@ func printStatus(o streams, r *fixturemigrate.StatusReport) {
 			fmt.Fprintf(o.stdout, "recorded in %s, not in this directory: %s\n",
 				r.Database.Table, strings.Join(r.Database.NotInDirectory, ", "))
 		}
+		printAudit(o, r)
 	}
 	if r.Database != nil && r.Database.Locked {
 		fmt.Fprintf(o.stdout, "\nlocked: %s holds bun's lock on %s. If no migration is running now, one died and "+

@@ -63,14 +63,14 @@ func ranChanges(res *fixturemigrate.SyncResult) bool {
 
 func printSync(o streams, r *fixturemigrate.SyncReport) {
 	for _, f := range r.Findings {
-		fmt.Fprintln(o.stdout, string(f.Kind)+": "+f.Model+" "+f.Row+": "+f.Detail)
+		fmt.Fprintln(o.stdout, string(f.Kind)+": "+f.Where()+": "+f.Detail)
 	}
 	if r.Diff != nil {
 		for _, ref := range r.Diff.Refusals {
-			fmt.Fprintln(o.stdout, "refused: "+ref.Model+" "+ref.Key+": "+ref.Reason)
+			fmt.Fprintln(o.stdout, "refused: "+ref.Where()+": "+ref.Reason)
 		}
 		for _, w := range r.Diff.Warnings {
-			fmt.Fprintln(o.stdout, "warning: "+w.Model+" "+w.Key+": "+w.Reason)
+			fmt.Fprintln(o.stdout, "warning: "+w.Where()+": "+w.Reason)
 		}
 	}
 	changes := 0

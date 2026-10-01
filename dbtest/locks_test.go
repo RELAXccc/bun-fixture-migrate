@@ -7,6 +7,7 @@ package dbtest_test
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -202,6 +203,67 @@ func TestTheLockTimeoutDoesNotCutShortTheWaitForAnotherChangeSet(t *testing.T) {
 	}
 	if err := <-done; err != nil {
 		t.Fatalf("once the other change set finished this one has to go through: %v", err)
+	}
+}
+
+// A lock_timeout the connection has, from the DSN's options or the role's
+// settings, cut short the wait for another change set all the same, and the
+// second replica failed instead of finding the work done. Inside a caller's
+// transaction the caller's lock_timeout still bounds that wait: plan sets one
+// so as not to wait behind a deploy while it holds locks of its own.
+func TestASessionLockTimeoutDoesNotCutShortTheWaitForAnotherChangeSet(t *testing.T) {
+	lockedPlans(t)
+	db := openDB(t, os.Getenv("BUN_FIXTURE_MIGRATE_POSTGRES"), map[string]string{"lock_timeout": "100ms"})
+	t.Cleanup(func() { db.Close() })
+	ctx := context.Background()
+	hold := func() bun.Tx {
+		t.Helper()
+		other, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := other.ExecContext(ctx, "SELECT pg_advisory_xact_lock(?)", int64(0x62666d0001)); err != nil {
+			t.Fatal(err)
+		}
+		return other
+	}
+
+	other := hold()
+	done := make(chan error, 1)
+	go func() {
+		_, err := applyReporting(t, db, lockedSet(""))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("the change set did not wait for the other one: %v", err)
+	case <-time.After(700 * time.Millisecond):
+	}
+	if err := other.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("once the other change set finished this one has to go through: %v", err)
+	}
+	var got string
+	if err := db.QueryRowContext(ctx, "SHOW lock_timeout").Scan(&got); err != nil || got != "100ms" {
+		t.Fatalf("the session's lock_timeout is %q after Apply: %v", got, err)
+	}
+
+	other = hold()
+	defer other.Rollback()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	start := time.Now()
+	_, err = applyReporting(t, tx, lockedSet(""))
+	if err == nil || !strings.Contains(err.Error(), "wait for another change set to finish") {
+		t.Fatalf("inside a caller's transaction its lock_timeout applies, got %v", err)
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("waited %s", took)
 	}
 }
 

@@ -12,6 +12,27 @@ import (
 )
 
 func (r *runner) exec(ctx context.Context, c fixturechange.Change) (outcome, error) {
+	out, err := r.execOne(ctx, c)
+	// A row deleted, or given another name, is no longer where a reference
+	// to its old name was resolved: a later change of the set naming that
+	// name has to look again, and find nothing or the row now holding it.
+	if _, renamed := c.New[r.set.Tables[c.Model].Key]; err == nil && out.rows > 0 &&
+		(c.Kind == fixturechange.Delete || (c.Kind == fixturechange.Update && renamed)) {
+		r.forget(c.Model)
+	}
+	return out, err
+}
+
+// forget drops the references to a model's rows resolved so far.
+func (r *runner) forget(model string) {
+	for k := range r.refs {
+		if strings.HasPrefix(k, model+"\x00") {
+			delete(r.refs, k)
+		}
+	}
+}
+
+func (r *runner) execOne(ctx context.Context, c fixturechange.Change) (outcome, error) {
 	t := r.set.Tables[c.Model]
 	table, err := quoteIdent(t.Name)
 	if err != nil {
@@ -33,11 +54,12 @@ func (r *runner) exec(ctx context.Context, c fixturechange.Change) (outcome, err
 		// nothing and be skipped, and it is the setting such databases use:
 		// the old natural key and the old values find the row on their own,
 		// and onlyRow makes sure it is one row.
-		if c.ID != "" && (r.set.Policy.IDDrift == fixturechange.ModeWarn || r.set.Policy.IDDrift == fixturechange.ModeIgnore) {
+		idDrift := r.set.PolicyFor(c.Model).IDDrift
+		if c.ID != "" && (idDrift == fixturechange.ModeWarn || idDrift == fixturechange.ModeIgnore) {
 			id := c.ID
 			c.ID = ""
 			out, err := r.update(ctx, c, t, table)
-			if err != nil || out.problem != "" || r.set.Policy.IDDrift != fixturechange.ModeWarn {
+			if err != nil || out.problem != "" || idDrift != fixturechange.ModeWarn {
 				return out, err
 			}
 			return r.warnID(ctx, c, t, table, id, out)
@@ -71,7 +93,7 @@ func (r *runner) insert(ctx context.Context, c fixturechange.Change, t fixturech
 	// An explicit id that another row already holds is checked before the
 	// statement runs, so the failure names the row instead of arriving as a
 	// primary-key violation from somewhere inside the driver.
-	if id, ok := c.New[t.ID]; ok && id.Ref == nil && !id.IsNull && r.set.Policy.IDDrift != fixturechange.ModeIgnore {
+	if id, ok := c.New[t.ID]; ok && id.Ref == nil && !id.IsNull && r.set.PolicyFor(c.Model).IDDrift != fixturechange.ModeIgnore {
 		taken, err := r.idTakenByAnotherRow(ctx, c, t, table, id.Lit)
 		if err != nil {
 			return outcome{}, err
@@ -90,7 +112,11 @@ func (r *runner) insert(ctx context.Context, c fixturechange.Change, t fixturech
 	// on the primary key, or make this insert fail. setval is not undone by a
 	// rollback; a sequence left ahead only leaves a gap.
 	if id, ok := c.New[t.ID]; ok && t.Serial && id.Ref == nil && !id.IsNull && !r.dryRun {
-		moved, err := advanceSequence(ctx, r.tx, table, t.ID, id.Lit)
+		seq, err := r.sequence(ctx, c.Model, table)
+		if err != nil {
+			return outcome{}, err
+		}
+		moved, err := advanceSequence(ctx, r.tx, seq, table, id.Lit)
 		if err != nil {
 			return outcome{}, err
 		}
@@ -122,7 +148,7 @@ func (r *runner) insert(ctx context.Context, c fixturechange.Change, t fixturech
 	// exists under a different id is somebody else's row, not ours to insert
 	// again: keying on the id as well is how a second copy appears, and then
 	// every later lookup by name finds two.
-	where, whereArgs, err := r.match(ctx, c.Model, c.Key)
+	where, whereArgs, err := r.match(ctx, c.Model, c.Key, true)
 	if err != nil {
 		return outcome{}, err
 	}
@@ -207,7 +233,7 @@ func (r *runner) delete(ctx context.Context, c fixturechange.Change, t fixturech
 // why. The subquery reads the table as it was before the statement, which is
 // what the count has to be about.
 func (r *runner) onlyRow(ctx context.Context, c fixturechange.Change, table, where string, args []any) (string, []any, error) {
-	keyWhere, keyArgs, err := r.match(ctx, c.Model, c.Key)
+	keyWhere, keyArgs, err := r.match(ctx, c.Model, c.Key, true)
 	if err != nil {
 		return "", nil, err
 	}

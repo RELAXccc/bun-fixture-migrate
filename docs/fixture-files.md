@@ -41,6 +41,13 @@ it means to `dbfixture` and PostgreSQL. Each rule below is checked against the r
   Without the database, a change that depends on which one it is is refused, as a
   [value](#values) is. A ref column that is itself a template, and a copy of a field that is, are
   refused: write the value.
+- A template copying a field other than the id stores what the field holds as Go's `fmt` prints it.
+  That is the value for a field of a string or an integer column, and nothing a file can write for
+  any other: a `float64` of 100000000 prints as `1e+08`, a `time.Time` as
+  `2026-01-01 10:00:00 +0000 UTC`, a nil pointer as `<nil>`. So a copy of a null, of a mapping or
+  sequence, or of a column of another type is refused; without the database, which says the column's
+  type, a change carrying a copy is. An id written as a template is refused too: the tool reads the
+  id as the row's own value.
 - `export` writes anchors from the natural key (prefixed with `r` when the key starts with a digit)
   and every reference as a template.
 
@@ -55,14 +62,15 @@ as written, and any other field the value it resolves to:
 | `"01234"`, `' spaced '` | exactly that text | exactly that text, cast to the column's type |
 | `01234`, `0x1F`, `1_000` | `01234`, `0x1F`, `1_000` | the integer YAML makes of it: 668, 31, 1000; of any size |
 | `1.10`, `1e3`, `.5` | `1.10`, `1e3`, `.5` | the exact decimal 1.1, 1000, 0.5, never rounded through a float |
+| `0.1234567890123456789`, `9007199254740993` in a `numeric` column | | an `ambiguous value`: a `float64` field stores 0.12345678901234568 and 9007199254740992, an integer, string or decimal field the number; quoted, a `float64` field cannot load it, and it is the number |
 | `.inf`, `.nan` | `.inf`, `.nan` | `Infinity`, `NaN` |
 | `True`, `false` | `True`, `false` | a boolean. `yes` and `on` are strings in YAML 1.2 |
 | `2026-03-04 10:00:00` | `2026-03-04 10:00:00` | that instant, in UTC; unquoted, because a quoted one decodes into a `time.Time` only in RFC 3339 |
-| `2026-03-04` | `2026-03-04` | a date |
+| `2026-03-04` | `2026-03-04` | a date; in a `timestamptz` column midnight UTC, which is what a `time.Time` field holds |
 | `~`, `null` | NULL (and see `null_default`) | NULL; in `json` and `jsonb` [a finding](#json-and-jsonb) |
 | `!!binary SGk=` | the text it encodes, `Hi` | the text it encodes |
 | `1.5` in an integer column | | a finding: an integer field holds `1`, a string field is refused |
-| a mapping `{sso: true}` or a sequence | | in `json` or `jsonb` the JSON document; in an array column the array, nested for a multidimensional one; in `bytea` the bytes of a sequence of byte values, the only YAML a `[]byte` field loads |
+| a mapping `{sso: true}` or a sequence | | in `json` or `jsonb` the JSON document; in an array column the array, and a sequence of sequences an `invalid value`, because bun cannot write a nested slice into an array column and `dbfixture` fails to load it; in `bytea` the bytes of a sequence of byte values, the only YAML a `[]byte` field loads |
 | an alias `*name` | the value it names | the value it names |
 
 A null inside a sequence, `[a, ~, b]`, is left out by a `[]string` or `[]int64` field and kept by a
@@ -88,6 +96,10 @@ PostgreSQL's: `1.50` equals `1.5` in a `numeric` column and not in a `text` one,
 instant are one timestamp, and key order in a `jsonb` document does not matter. A value the column
 cannot hold is an `invalid value` finding before anything is generated.
 
+A migration spells every value the same whether `generate` read the database or not, as the
+file's own unquoted value reads without one: a number canonically, a timestamp in RFC 3339 in UTC, a
+JSON document or an array compact with the keys sorted. One edit of the file is one migration.
+
 **At run time** a migration compares through the column's type too: `json` through `jsonb`, arrays
 as their type, and the few types without an equality operator (`point`, `xml`) through their text.
 
@@ -105,13 +117,14 @@ is not, it is an `invalid value` finding that names both and says how to write t
 | `2026-01-01 10:00:00`, `2026-01-01T10:00:00Z`, `"2026-01-01T10:00:00Z"` | `timestamp` | 10:00 |
 | `2026-01-01T10:00:00+02:00`, quoted or not | `timestamptz` | that instant |
 | `2026-01-01 10:00:00`, unquoted | `timestamptz` | 10:00 UTC: the column is taken to be written from a `time.Time`, to which yaml.v3 hands a timestamp without a zone in UTC |
+| `2026-01-01`, unquoted | `timestamptz` | midnight UTC, for the same reason, in an array too |
 | `2026-01-01`, `2026-01-01T10:00:00+02:00` | `date` | the 1st |
 | `"10:00:00"`, `"10:00:00+02"` | `time`, `timetz` | that time; `time` drops the offset whoever writes it |
 | `"infinity"` | any of them | infinity, which only a string field or a type that reads it holds |
 | `2026-01-01T10:00:00+02:00`, quoted or not | `timestamp` | refused: 08:00 through a `time.Time`, 10:00 through a string |
 | `2026-01-01T23:30:00-05:00` | `date` | refused: the 2nd through a `time.Time`, the 1st through a string |
 | `2026-01-01T10:00:00.1234567Z` | any | refused: bun cuts to `.123456`, PostgreSQL rounds to `.123457` |
-| `"2026-01-01 10:00:00"`, `2026-01-01`, `"10:00"` | `timestamptz`, `timetz` | refused: a string is read in the seeding session's time zone |
+| `"2026-01-01 10:00:00"`, `"2026-01-01"`, `"10:00"` | `timestamptz`, `timetz` | refused: a string is read in the seeding session's time zone |
 | `"01/02/2026"` | any | refused: January or February by `DateStyle` |
 | `"now"`, `"today"`, `"tomorrow"` | any | refused: a different value every day |
 
@@ -120,16 +133,24 @@ and at most six fractional digits. `export` writes every value that way.
 
 ### JSON and jsonb
 
-A mapping or sequence in a `json` or `jsonb` column is what a `map[string]any` or `any` field makes of
-it, as `encoding/json` marshals that: a key as it is written (`017: x` is the key `"017"`), a number
-as a `float64` (`0.1234567890123456789` is stored as `0.12345678901234568`, an integer beyond 64 bits
-the same way), a timestamp as the `time.Time` yaml.v3 makes of it (`2026-01-01` is
-`"2026-01-01T00:00:00Z"`, an offset is kept), `!!binary` as the text it encodes. Two documents are
-compared as `jsonb` compares them, with every number written canonically, so `{"a": 1.0}` written by
-SQL and `{a: 1}` in the file agree.
+A mapping or sequence in a `json` or `jsonb` column is what a `map[string]any`, `[]any` or `any` field
+makes of it, as `encoding/json` marshals that, at the top of the column as inside it: a key as it is
+written (`017: x` is the key `"017"`), a number as a `float64` (`0.1234567890123456789` is stored as
+`0.12345678901234568`, an integer beyond 64 bits the same way), a timestamp as the `time.Time` yaml.v3
+makes of it (`2026-01-01` is `"2026-01-01T00:00:00Z"`, an offset is kept), `!!binary` as the text it
+encodes. So `[2026-01-01T10:00:00+02:00]` is `["2026-01-01T10:00:00+02:00"]` there, where a
+`timestamptz[]` column holds that instant. Two documents are compared as `jsonb` compares them, with
+every number written canonically, so `{"a": 1.0}` written by SQL and `{a: 1}` in the file agree. A
+migration writes a document, and an array, in one spelling, compact with the keys sorted, whether
+`generate` read the database or not. A YAML merge key `<<` inside a mapping is merged as yaml.v3
+merges it: a key the mapping writes itself wins over a merged one, and of several mappings merged,
+the first.
 
-A scalar is the document a string field hands bun when it is JSON (`'{"a": 1}'`, `1.5`, `true`), and
-the JSON string an `any` field makes of it when it is not (`hello` is `"hello"`).
+A scalar is read the same way: a timestamp, a date and a float are what an `any` field makes of them
+(`2026-01-01T10:00:00+02:00` is the JSON string `"2026-01-01T10:00:00+02:00"`, `2026-01-01` is
+`"2026-01-01T00:00:00Z"`, `0.1234567890123456789` is `0.12345678901234568`). A string is the document
+a string field hands bun when it is JSON (`'{"a": 1}'`, `"1.5"`), and the JSON string an `any` field
+makes of it when it is not (`hello` is `"hello"`).
 
 `~` is the JSON null to a map, slice or `any` field and SQL NULL, or the column default, to a nil
 pointer or a `nullzero` field, so in a column without a default it is a `null against a default`
@@ -156,7 +177,9 @@ a cast does:
   key and a trigger are not evaluated: `plan` runs the migration and reports what they refuse, and
   without it the deploy fails.
 - Two natural keys that differ as text but are one value to the key's type, `Go` and `GO` in a
-  `citext` column, are a `duplicate key`.
+  `citext` column, are a `duplicate key`. A key that changes only that way between two states, `go` in
+  the database and `Go` in the file, is one row under a new spelling, which a fresh seed stores: a
+  rename, under `policy.renames`, even when the file has no ids to say so.
 
 ### What export writes
 
@@ -174,8 +197,11 @@ and held against the database before anything is written, and a difference fails
   refused: no spelling reads back as itself. A model with `defaults: {settings: 'null'}` gets its JSON
   nulls left out of the rows instead, which is what a map field leaves there. SQL NULL is `~`,
   refused unless `policy.null_default` is `warn`, because a map field loads `~` as the JSON null.
-- Arrays as sequences, a multidimensional one as nested sequences. An array whose lower bound is not
-  1, `[0:1]={7,8}`, is refused.
+- Arrays as sequences. An array of more than one dimension is refused: a file can only write it as a
+  sequence of sequences, which `dbfixture` fails to load, because bun cannot write a nested slice into
+  an array column; put the column in `ignore`. So is an array whose lower bound is not 1,
+  `[0:1]={7,8}`, and, unless the model's `array_nulls` is `keep`, an array holding a NULL element,
+  which a `[]string` or `[]int64` field would load without it.
 - Text double-quoted, everything YAML would refuse or fold escaped: control characters, DEL, the C1
   range, NEL, U+2028 and U+2029, U+FFFE. Text that `dbfixture` would evaluate as a template,
   `Hello {{ name }}`, is written as a template whose only action is that text as a string literal,
@@ -197,6 +223,10 @@ defaults:
   note: ~        # a row without note stands for NULL
 ```
 
+A column of a `key_any_of` group that a row leaves out is NULL unless `defaults` says otherwise: the
+group's columns are the references a row sets one of, and the database holds NULL in the others. So a
+row setting none of them is keyed by NULL, as the database reads it.
+
 `scaffold` fills `defaults` from the column defaults. `~` is right for a column added to a table
 later, which holds NULL in the rows written before it.
 
@@ -211,6 +241,11 @@ a column with a default) is a fault in the file, and the lint says so.
 
 When comparing against a database, only the columns the fixture files mention are read. A column no
 fixture row writes is not master data, and a difference in it is not drift.
+
+Every configured model is compared, though. A model the files hold no block of has no rows in a fresh
+seed, so `check` reports its rows as in the database only and `sync` deletes them, under the model's
+`deletes`, as `generate` does when a block leaves the files. Its rows are read whole, as those of a
+block that holds no row are.
 
 ## What it refuses
 
@@ -261,6 +296,9 @@ hand and `baseline -force`. See the [runbook](production.md#generate-refused-a-c
 - Only `{{ $.Model.row.Field }}` templates are understood, and the field is mapped to a column by
   bun's default naming. A template naming a field whose column is spelled otherwise is an error, not
   a guess.
+- A model's `id` is the row's own value, never a reference: a primary key that also points at another
+  model, a plan's limits keyed by the plan, is refused in the configuration. Leave `id` out for such a
+  table, which is then read without one, and keep the column in `key` and `references`.
 - A structured value (mapping or sequence) is supported in `json`, `jsonb`, array and `bytea` columns,
   and not as a reference. A mapping in an `hstore` column, which a `map[string]string` field loads, is
   an `invalid value`.
@@ -268,6 +306,15 @@ hand and `baseline -force`. See the [runbook](production.md#generate-refused-a-c
   writes.
 - A top-level string that is itself JSON, in a `json` or `jsonb` column, is taken as that document,
   which is what a string field stores; an `any` field stores it as a JSON string.
+- A `~` in a nullable column is NULL, which is what a pointer, an `sql.Null` type or a `nullzero` field
+  writes. A plain `string` or `int64` field without `nullzero` cannot hold NULL and writes its zero,
+  `""` or `0`; the tool takes the model to be able to hold what its column holds.
+- A sequence in a `json` or `jsonb` column is read as an `[]any` field reads it. A `[]string` field
+  stores every element as the text it is written as, so `[1, 2026-01-01]` is `["1", "2026-01-01"]`
+  through one: quote the elements of such a field.
+- Without a database the JSON reading of a value is not known to apply: a date, a timestamp's offset
+  and a float of more digits than a `float64` holds are compared as a `date`, `timestamptz` or
+  `numeric` column reads them, which is what they are wherever they are not JSON.
 - The two readings of a date or time are compared in scalar columns. Inside an array a date or time is
   what a `[]time.Time` field makes of it, and only the seeding session is checked.
 - Keys equal under their type are found for the type's own equality; a column's nondeterministic

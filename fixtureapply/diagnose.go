@@ -3,6 +3,7 @@ package fixtureapply
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
@@ -34,13 +35,13 @@ func (r *runner) diagnose(ctx context.Context, c fixturechange.Change, t fixture
 	if byKey > 1 {
 		return duplicate(t, c, byKey), nil
 	}
+	if byKey == 0 && c.Kind == fixturechange.Delete {
+		return r.diagnoseGone(ctx, c, t)
+	}
 	if byKey == 0 {
 		note, err := r.unresolved(ctx, c.Key)
 		if err != nil {
 			return outcome{}, err
-		}
-		if c.Kind == fixturechange.Delete {
-			return outcome{problem: problemBenign, message: "the row is already gone, nothing to delete." + note}, nil
 		}
 		if out, done, err := r.diagnoseMoved(ctx, c, t, table, wanted); err != nil || done {
 			return out, err
@@ -51,10 +52,14 @@ func (r *runner) diagnose(ctx context.Context, c fixturechange.Change, t fixture
 		}
 		// Not "drop the change from the migration": every other database
 		// would then never get it, and nothing would say so.
+		where := "this migration's Policy"
+		if t.Policy != nil {
+			where = fmt.Sprintf("the Policy of %s in this migration's Tables", strconv.Quote(c.Model))
+		}
 		return outcome{problem: problemMissing, message: fmt.Sprintf(
 			"no row of %s has %s.%s %s. Put the row back; or, if it is meant to be gone in this database, set "+
-				"MissingRow to \"warn\" in this migration's Policy, and the change is recorded as done here "+
-				"without being made", t.Name, keyLabel(c.Key), note, what)}, nil
+				"MissingRow to \"warn\" in %s, and the change is recorded as done here without being made",
+			t.Name, keyLabel(c.Key), note, what, where)}, nil
 	}
 	if err := r.stopped(ctx, c, t, table); err != nil {
 		return outcome{}, err
@@ -104,6 +109,41 @@ func (r *runner) diagnose(ctx context.Context, c fixturechange.Change, t fixture
 		"%s %s no longer holds the values this change was generated against: it was changed in this database, or "+
 			"by a migration that ran before this one.%s It was left alone. Compare it with the fixture file and "+
 			"decide which one is right", t.Name, keyLabel(c.Key), note)}, nil
+}
+
+// diagnoseGone explains a delete whose natural key no row holds. The row is
+// gone, unless the key refers to a row that no row holds any more: then it may
+// be there still, pointing at that row under its new name, and nothing can
+// tell. That is a row that no longer holds what the change was generated
+// against, under ChangedRow. A reference to a row this change set removes
+// itself is the exception: the set deletes the row before removing that one,
+// so finding neither is a second run.
+func (r *runner) diagnoseGone(ctx context.Context, c fixturechange.Change, t fixturechange.Table) (outcome, error) {
+	refs, err := r.missingRefs(ctx, c.Key)
+	if err != nil {
+		return outcome{}, err
+	}
+	var lost, removed []string
+	for _, ref := range refs {
+		label := fixturechange.Value{Ref: &ref}.String()
+		if r.removes(ref) {
+			removed = append(removed, label)
+		} else {
+			lost = append(lost, label)
+		}
+	}
+	if len(lost) > 0 {
+		return outcome{problem: problemChanged, message: fmt.Sprintf(
+			"%s %s cannot be found: the key refers to %s, which no row holds any more: renamed or removed in this "+
+				"database. Whether the row this change deletes is still there, pointing at it under another name, "+
+				"cannot be told, so nothing was deleted. Look for the row, and delete it if it is to go",
+			t.Name, keyLabel(c.Key), strings.Join(lost, " and "))}, nil
+	}
+	msg := "the row is already gone, nothing to delete"
+	if len(removed) > 0 {
+		msg += fmt.Sprintf("; its key refers to %s, which this change set removes", strings.Join(removed, " and "))
+	}
+	return outcome{problem: problemBenign, message: msg}, nil
 }
 
 // stopped fails a change whose statement changed no row although its guard
@@ -190,7 +230,7 @@ func (r *runner) diagnoseInsert(ctx context.Context, c fixturechange.Change, t f
 	// under another id is not the row the file describes, even when every
 	// other value agrees: whatever knows the file's id -- a reference in
 	// another table, a URL, a client -- will not find it.
-	if id, ok := c.New[t.ID]; ok && id.Ref == nil && !id.IsNull && r.set.Policy.IDDrift != fixturechange.ModeIgnore {
+	if id, ok := c.New[t.ID]; ok && id.Ref == nil && !id.IsNull && r.set.PolicyFor(c.Model).IDDrift != fixturechange.ModeIgnore {
 		withID, err := r.count(ctx, c.Model, table, c.Key, fixturechange.Values{t.ID: id})
 		if err != nil {
 			return outcome{}, err
@@ -230,7 +270,7 @@ func (r *runner) diagnoseInsert(ctx context.Context, c fixturechange.Change, t f
 func (r *runner) idTakenByAnotherRow(ctx context.Context, c fixturechange.Change, t fixturechange.Table,
 	table, id string) (string, error) {
 
-	keyWhere, keyArgs, err := r.match(ctx, c.Model, c.Key)
+	keyWhere, keyArgs, err := r.match(ctx, c.Model, c.Key, true)
 	if err != nil {
 		return "", err
 	}
@@ -278,7 +318,7 @@ func (r *runner) idTakenByAnotherRow(ctx context.Context, c fixturechange.Change
 func (r *runner) idsFor(ctx context.Context, model, table string, t fixturechange.Table,
 	key fixturechange.Values) ([]string, error) {
 
-	where, args, err := r.match(ctx, model, key)
+	where, args, err := r.match(ctx, model, key, true)
 	if err != nil {
 		return nil, err
 	}
@@ -307,8 +347,11 @@ func (r *runner) idsFor(ctx context.Context, model, table string, t fixturechang
 	return out, rows.Close()
 }
 
-func (r *runner) count(ctx context.Context, model, table string, sets ...fixturechange.Values) (int64, error) {
-	where, args, err := r.matchAll(ctx, model, sets...)
+// count counts the rows of a model holding a natural key and further values.
+func (r *runner) count(ctx context.Context, model, table string, key fixturechange.Values,
+	values ...fixturechange.Values) (int64, error) {
+
+	where, args, err := r.matchAll(ctx, model, key, values...)
 	if err != nil {
 		return 0, err
 	}

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 )
 
@@ -310,6 +311,82 @@ func TestARowWithTwoFaultsIsRefusedForTheSameOneEveryTime(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		if err := snapErr(t, text); err == nil || err.Error() != first.Error() {
 			t.Fatalf("run %d: %v, not %v", i, err, first)
+		}
+	}
+}
+
+// dbfixture copies a field by printing it with fmt, which prints a nil
+// pointer as <nil> and a plain field's zero as "" or 0, and a map or a slice
+// as fmt does: a copy of a null or of a structured value is refused, and so
+// is an id written as a template.
+func TestACopyOfANullOrAStructureIsRefused(t *testing.T) {
+	for _, tc := range []struct{ note, want string }{
+		{"note: ~", "copies note, which is null in that row"},
+		{"note: [a]", "copies note, which is a mapping or a sequence in that row"},
+	} {
+		err := snapErr(t, `- model: Currency
+  rows:
+    - {_id: eur, id: 1, code: EUR}
+- model: Plan
+  rows:
+    - {_id: a, id: 1, name: a, currency_id: '{{ $.Currency.eur.ID }}', `+tc.note+`}
+    - {id: 2, name: b, currency_id: '{{ $.Currency.eur.ID }}', note: '{{ $.Plan.a.Note }}'}
+`)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: expected the copy to be refused, got %v", tc.note, err)
+		}
+	}
+	err := snapErr(t, `- model: Currency
+  rows:
+    - {_id: eur, id: 1, code: EUR}
+    - {id: '{{ $.Currency.eur.ID }}', code: USD}
+`)
+	if err == nil || !strings.Contains(err.Error(), "Currency.id is {{ $.Currency.eur.ID }}, a template") {
+		t.Errorf("expected the template id to be refused, got %v", err)
+	}
+}
+
+// What a copy stores depends on the Go type of the field it copies, which
+// only the column's type tells: without the database a change carrying one
+// is refused, with it a copy of a string or an integer column is the value
+// and a copy of any other is an invalid value.
+func TestACopyOfAFieldIsDecidedByItsColumnsType(t *testing.T) {
+	cfg := testConfig(t)
+	text := `- model: Currency
+  rows:
+    - {_id: eur, id: 1, code: EUR, symbol: "E"}
+- model: Plan
+  rows:
+    - {_id: a, id: 1, name: a, currency_id: '{{ $.Currency.eur.ID }}', seats: 3, note: x}
+`
+	next := text + "    - {id: 2, name: b, currency_id: '{{ $.Currency.eur.ID }}', seats: 3, note: '{{ $.Plan.a.Seats }}'}\n"
+	res := computeWith(t, cfg, text, next)
+	if len(res.Changes) != 0 || len(res.Refusals) != 1 ||
+		!strings.Contains(res.Refusals[0].Reason, "note copies seats of a Plan row, and dbfixture stores") {
+		t.Fatalf("expected the insert to be refused, got %+v / %+v", res.Changes, res.Refusals)
+	}
+
+	tables := testTables()
+	tables["public.plans"].Columns = append(tables["public.plans"].Columns,
+		dbschema.Column{Name: "rate", Position: 8, Type: "float8", FullType: "double precision", Nullable: true})
+	for _, tc := range []struct {
+		field   string
+		settled bool
+	}{{"Seats", true}, {"Name", true}, {"Rate", false}} {
+		text := strings.Replace(next, "Plan.a.Seats", "Plan.a."+tc.field, 1)
+		text = strings.Replace(text, "seats: 3, note: x", "seats: 3, note: x, rate: 100000000", 1)
+		s := snap(t, cfg, text, "fixture.yml")
+		settleCopies(cfg, s, tables)
+		b := s.Entries["Plan"][1]
+		if _, open := b.copied["note"]; open {
+			t.Errorf("%s: the copy is still open", tc.field)
+		}
+		var found bool
+		for _, f := range s.Findings {
+			found = found || (f.Kind == FindingInvalidValue && strings.Contains(f.Detail, "note copies rate of a Plan row, a double precision column"))
+		}
+		if found == tc.settled {
+			t.Errorf("%s: findings %+v", tc.field, s.Findings)
 		}
 	}
 }

@@ -374,7 +374,7 @@ func refuseFindings(cfg *Config, snap *Snapshot) ([]Finding, error) {
 	}
 	n := 0
 	for _, f := range findings {
-		if cfg.FindingMode(f.Kind) == ModeError {
+		if cfg.ModeOf(f) == ModeError {
 			n++
 		}
 	}
@@ -462,7 +462,7 @@ type CheckReport struct {
 	Diff *Result
 	// Findings are those of both sides the policy does not ignore: a natural
 	// key two rows share, a zero written against a column default, a column
-	// the table does not have. Config.FindingMode says the level of each.
+	// the table does not have. Config.ModeOf says the level of each.
 	Findings []Finding
 
 	cfg *Config

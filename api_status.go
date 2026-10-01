@@ -12,6 +12,9 @@ import (
 	"time"
 
 	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
+	"github.com/RELAXccc/bun-fixture-migrate/fixtureapply"
+	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+	"github.com/RELAXccc/bun-fixture-migrate/internal/pgerr"
 
 	"github.com/uptrace/bun"
 )
@@ -103,6 +106,45 @@ type StatusMigration struct {
 	// OutOfOrder is a pending migration that sorts before one the database
 	// applied already. bun runs it all the same, after that one.
 	OutOfOrder bool `json:"out_of_order"`
+	// Audit is what the audit table says the migration's last run did in
+	// the database; nil, and left out of the JSON, when it holds no row of
+	// it.
+	Audit *StatusAudit `json:"audit,omitempty"`
+}
+
+// StatusAudit is the newest row of a fixture migration in the audit table:
+// what its last run did here.
+type StatusAudit struct {
+	// Direction is "up" for an Apply, "down" for a Revert.
+	Direction string    `json:"direction"`
+	At        time.Time `json:"at"`
+	By        string    `json:"by"`
+	// Applied, Unchanged and Skipped count the run's changes by what became
+	// of them, a Revert's Applied being those it reverted; SkippedChanges
+	// lists the skipped ones with their problems.
+	Applied        int                 `json:"applied"`
+	Unchanged      int                 `json:"unchanged"`
+	Skipped        int                 `json:"skipped"`
+	Unseeded       bool                `json:"unseeded"`
+	SkippedChanges []StatusAuditChange `json:"skipped_changes"`
+	// Edited is a migration file whose change set is not the one that ran
+	// here: somebody edited it after it ran.
+	Edited bool `json:"edited"`
+}
+
+// StatusAuditChange is a change a run skipped, and why.
+type StatusAuditChange struct {
+	Index   int    `json:"index"`
+	Model   string `json:"model"`
+	Key     string `json:"key"`
+	Kind    string `json:"kind"`
+	Problem string `json:"problem"`
+}
+
+// StatusAuditTable is the audit table Status read.
+type StatusAuditTable struct {
+	Table  string `json:"table"`
+	Exists bool   `json:"exists"`
 }
 
 // StatusApplied is when a database applied a migration, as bun recorded it.
@@ -126,6 +168,9 @@ type StatusDatabase struct {
 	// after which every migrate fails until the row is deleted.
 	LocksTable string `json:"locks_table"`
 	Locked     bool   `json:"locked"`
+	// Audit is the audit table the configuration names; nil, and left out
+	// of the JSON, when it names none.
+	Audit *StatusAuditTable `json:"audit,omitempty"`
 }
 
 // ReportedFinding is a finding as a report carries it, with the level the
@@ -151,7 +196,7 @@ func reportFindings(cfg *Config, findings []Finding) []ReportedFinding {
 	for _, f := range findings {
 		level := ModeError
 		if cfg != nil {
-			level = cfg.FindingMode(f.Kind)
+			level = cfg.ModeOf(f)
 		}
 		out = append(out, ReportedFinding{Kind: f.Kind, Level: level, Model: f.Model, Row: f.Row, Detail: f.Detail})
 	}
@@ -223,6 +268,7 @@ func (p *Project) Status(ctx context.Context, db bun.IDB, opts StatusOptions) (*
 	var res *Result
 	if db != nil {
 		var applied map[string]Applied
+		var audit map[string]fixtureapply.AuditRecord
 		info := &StatusDatabase{Table: p.Config.MigrationsTable, LocksTable: p.Config.MigrationLocksTable}
 		err = ReadOnly(ctx, db, func(tx bun.Tx) error {
 			if old != nil {
@@ -233,7 +279,18 @@ func (p *Project) Status(ctx context.Context, db bun.IDB, opts StatusOptions) (*
 			if applied, info.TableExists, err = ReadApplied(ctx, tx, p.Config.MigrationsTable); err != nil {
 				return err
 			}
-			info.Locked, err = readLock(ctx, tx, p.Config.MigrationLocksTable, p.Config.MigrationsTable)
+			if info.Locked, err = readLock(ctx, tx, p.Config.MigrationLocksTable, p.Config.MigrationsTable); err != nil {
+				return err
+			}
+			if p.Config.AuditTable == "" {
+				return nil
+			}
+			info.Audit = &StatusAuditTable{Table: p.Config.RunTimeTable(p.Config.AuditTable)}
+			audit, info.Audit.Exists, err = fixtureapply.ReadAudit(ctx, tx, info.Audit.Table)
+			if pgerr.State(err) == pgerr.InsufficientPrivilege {
+				return fmt.Errorf("the audit table %s cannot be read as this role: grant it SELECT on the table, or "+
+					"run status -offline: %w", info.Audit.Table, err)
+			}
 			return err
 		})
 		if err != nil {
@@ -241,6 +298,7 @@ func (p *Project) Status(ctx context.Context, db bun.IDB, opts StatusOptions) (*
 		}
 		r.Database = info
 		markApplied(r, applied)
+		markAudit(r, all, audit)
 	} else if old != nil {
 		if res, err = Compute(p.Config, old, head); err != nil {
 			return nil, err
@@ -391,7 +449,11 @@ func (p *Project) uncoveredInDB(ctx context.Context, tx bun.Tx, r *StatusReport,
 	if err != nil {
 		return nil, err
 	}
-	if len(res.Changes)+len(res.Refusals) == 0 && len(offline.Changes)+len(offline.Refusals) > 0 {
+	// Unless a finding is what took the difference out, such as a column the
+	// table does not have, which generate refuses rather than records.
+	worst, _ := p.Config.Worst(head.Findings)
+	if worst != ModeError && len(res.Changes)+len(res.Refusals) == 0 &&
+		len(offline.Changes)+len(offline.Refusals) > 0 {
 		r.Notes = append(r.Notes, "the fixture file differs from "+r.Base+" only in how values are written, which "+
 			"status -offline cannot tell from a change; run bun-fixture-migrate generate to record the new spelling")
 	}
@@ -430,6 +492,46 @@ func markApplied(r *StatusReport, applied map[string]Applied) {
 			r.Notes = append(r.Notes, fmt.Sprintf("%s is pending and sorts before %s, which this database applied: "+
 				"bun runs it on the next migrate all the same, after migrations it was not written to follow. Run bun-fixture-migrate plan "+
 				"against a copy of this database to see what it does here", m.ID, r.Database.NewestApplied))
+		}
+	}
+}
+
+// markAudit fills in, for every fixture migration of the directory the audit
+// table holds a row of, what its newest row says the last run did here, and
+// whether the file still holds the change set that ran.
+func markAudit(r *StatusReport, all []MigrationFile, audit map[string]fixtureapply.AuditRecord) {
+	sets := map[string]*fixturechange.Set{}
+	for _, m := range all {
+		sets[m.ID()] = m.Fixture
+	}
+	for i, m := range r.Migrations {
+		set := sets[m.ID]
+		if set == nil {
+			continue
+		}
+		rec, ok := audit[set.Name]
+		if !ok {
+			continue
+		}
+		info := &StatusAudit{Direction: string(rec.Direction), At: rec.AppliedAt, By: rec.AppliedBy,
+			Applied: rec.Count(fixtureapply.StatusApplied), Unchanged: rec.Count(fixtureapply.StatusUnchanged),
+			Skipped: rec.Count(fixtureapply.StatusSkipped), SkippedChanges: []StatusAuditChange{},
+			Edited: rec.SetSHA256 != fixtureapply.SetSHA256(*set)}
+		for _, c := range rec.Outcomes {
+			switch {
+			case c.Status == fixtureapply.StatusUnseeded:
+				info.Unseeded = true
+			case c.Index >= 0 && c.Status == fixtureapply.StatusSkipped:
+				info.SkippedChanges = append(info.SkippedChanges, StatusAuditChange{Index: c.Index, Model: c.Model,
+					Key: c.Key, Kind: string(c.Kind), Problem: string(c.Problem)})
+			}
+		}
+		r.Migrations[i].Audit = info
+		if info.Edited {
+			r.Notes = append(r.Notes, fmt.Sprintf("%s was edited after it ran here: its change set is not the one "+
+				"%s recorded on %s. What it does on a database that has not run it differs from what it did here; "+
+				"a Revert here matches its changes to that run by model, key and kind", m.ID,
+				r.Database.Audit.Table, rec.AppliedAt.UTC().Format("2006-01-02 15:04:05")))
 		}
 	}
 }
@@ -566,7 +668,8 @@ func groupUndecided(refusals []Refusal) []string {
 		g := groups[key]
 		if len(g.rows) == 1 {
 			model, col, _ := strings.Cut(key, ".")
-			out = append(out, model+" "+g.rows[0]+": "+col+" is written "+g.example+", "+g.why)
+			out = append(out, Refusal{Model: model, Key: g.rows[0]}.Where()+": "+col+" is written "+
+				g.example+", "+g.why)
 			continue
 		}
 		out = append(out, fmt.Sprintf("%s is written like %s in %d rows, %s the first of them, %s",

@@ -3,6 +3,7 @@ package fixturemigrate
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
@@ -115,6 +116,11 @@ func (ix *index) loaded(model string, m *Model, row Row) {
 // cell returns a column of a row, falling back to the configured default. The
 // second result is false when the column is neither in the row nor in the
 // defaults, which the caller has to handle rather than guess at.
+//
+// A key_any_of column the row leaves out, with no default, is NULL: the
+// columns of such a group are the references a row sets one of, and the
+// database holds NULL in the others, which every comparison and every key
+// has to read alike on both sides.
 func (ix *index) cell(m *Model, col string, row Row) (Cell, bool) {
 	if c, ok := row[col]; ok {
 		return c, true
@@ -124,6 +130,9 @@ func (ix *index) cell(m *Model, col string, row Row) (Cell, bool) {
 			return Cell{IsNull: true}, true
 		}
 		return Cell{Text: def}, true
+	}
+	if m.inKeyAnyOf(col) {
+		return Cell{IsNull: true}, true
 	}
 	return Cell{}, false
 }
@@ -141,6 +150,16 @@ type reading struct {
 	from *source
 	// unsure is Cell.Unsure.
 	unsure string
+	// json is what a json or jsonb column, or a timestamptz one, holds in
+	// place of the value, when that is something else; see Cell.JSONText.
+	json string
+	// float is what a float64 field holds of an unquoted number, when that
+	// is not the number: 9007199254740993 is 9007199254740992 there.
+	float string
+	// copied is, for a template copying a field other than the id, that
+	// field: dbfixture stores what the field holds as fmt prints it, which
+	// its Go type decides.
+	copied *source
 }
 
 // source names a column of a model.
@@ -160,7 +179,8 @@ func (ix *index) value(model, col string, row Row) (reading, bool, error) {
 			return reading{}, false, fmt.Errorf(
 				"%s.%s is a reference and holds a mapping or a sequence", model, col)
 		}
-		return reading{Value: fixturechange.Lit(cell.Text), written: cell.StringText, unsure: cell.Unsure}, true, nil
+		return reading{Value: fixturechange.Lit(cell.Text), written: cell.StringText, unsure: cell.Unsure,
+			json: cell.JSONText}, true, nil
 	}
 	if cell.IsNull {
 		return reading{Value: fixturechange.Null()}, true, nil
@@ -197,7 +217,8 @@ func (ix *index) value(model, col string, row Row) (reading, bool, error) {
 	// resolves it.
 	lit := scalarText(cell)
 	if !isRef {
-		return reading{Value: fixturechange.Lit(lit), written: cell.StringText}, true, nil
+		return reading{Value: fixturechange.Lit(lit), written: cell.StringText, json: cell.JSONText,
+			float: floatReading(cell)}, true, nil
 	}
 	// A reference column holding nothing or 0 points at no row, unless a row
 	// has that id.
@@ -240,8 +261,17 @@ func (ix *index) resolveTemplate(model, col, text string, match []string, target
 	if !ok {
 		return reading{}, fmt.Errorf("%s.%s: %s names no column %q of %s", model, col, text, column, tmodel)
 	}
+	// dbfixture copies a field by printing what it holds with fmt, which
+	// prints a nil pointer as <nil>, a plain field's zero as "" or 0, a map
+	// or a slice as map[...] or [...]: nothing that is the value written.
 	if tcell.IsNull {
-		return reading{Value: fixturechange.Null()}, nil
+		return reading{}, fmt.Errorf("%s.%s: %s copies %s, which is null in that row, and dbfixture copies what the "+
+			"field holds as fmt prints it: <nil> for a nil pointer, \"\" or 0 for a plain field, which only the "+
+			"model knows: write the value here", model, col, text, column)
+	}
+	if tcell.Structured {
+		return reading{}, fmt.Errorf("%s.%s: %s copies %s, which is a mapping or a sequence in that row, and "+
+			"dbfixture copies it as fmt prints a map or a slice: write the value here", model, col, text, column)
 	}
 	if !tcell.Structured && anyTemplate.MatchString(tcell.Text) {
 		lit, ok := literalTemplate(tcell.Text)
@@ -253,7 +283,7 @@ func (ix *index) resolveTemplate(model, col, text string, match []string, target
 		tcell = Cell{Text: lit, Tag: "!!str"}
 	}
 	return reading{Value: fixturechange.Lit(scalarText(tcell)), written: tcell.StringText,
-		from: &source{tmodel, column}}, nil
+		from: &source{tmodel, column}, copied: &source{tmodel, column}}, nil
 }
 
 // refByID turns the id a reference column holds into a reference by key, using
@@ -302,7 +332,7 @@ func (ix *index) keyValues(model string, row Row) (fixturechange.Values, error) 
 		out[col] = r.Value
 	}
 	for _, group := range m.KeyAnyOf {
-		chosen, value := group[0], fixturechange.Lit("")
+		chosen, value := group[0], fixturechange.Null()
 		for _, col := range group {
 			r, present, err := ix.value(model, col, row)
 			if err != nil {
@@ -319,6 +349,27 @@ func (ix *index) keyValues(model string, row Row) (fixturechange.Values, error) 
 		out[chosen] = value
 	}
 	return out, nil
+}
+
+// floatReading is what yaml.v3 hands a float64 field of an unquoted number,
+// written canonically, when that is not the number itself, and "" otherwise:
+// a float64 holds 9007199254740993 as 9007199254740992, and
+// 0.1234567890123456789 as 0.12345678901234568. A quoted number a float64
+// field does not load at all, so it has none.
+func floatReading(c Cell) string {
+	if c.Tag != "!!int" && c.Tag != "!!float" {
+		return ""
+	}
+	exact := scalarText(c)
+	f, err := strconv.ParseFloat(exact, 64)
+	if err != nil {
+		return ""
+	}
+	canon, ok := canonicalDecimal(strconv.FormatFloat(f, 'g', -1, 64))
+	if !ok || canon == exact {
+		return ""
+	}
+	return canon
 }
 
 func isZero(v fixturechange.Value) bool {
@@ -383,6 +434,10 @@ func (ix *index) entry(model string, m *Model, row Row) (*Entry, error) {
 	if err != nil {
 		return nil, err
 	}
+	if c, ok := row[m.ID]; ok && !c.IsNull && !c.Structured && c.Tag == "!!str" && anyTemplate.MatchString(c.Text) {
+		return nil, fmt.Errorf("%s.%s is %s, a template, and this tool reads %s as the row's own id, not as "+
+			"something dbfixture works out: write the id", model, m.ID, strings.TrimSpace(c.Text), m.ID)
+	}
 	e := &Entry{
 		Anchor: row.Str(anchorColumn),
 		ID:     idText(m, row),
@@ -394,6 +449,11 @@ func (ix *index) entry(model string, m *Model, row Row) (*Entry, error) {
 	}
 	for col := range m.Defaults {
 		cols[col] = true
+	}
+	for _, group := range m.KeyAnyOf {
+		for _, col := range group {
+			cols[col] = true
+		}
 	}
 	// In name order, so a row with two faults is refused for the same one on
 	// every run.
@@ -432,6 +492,28 @@ func (e *Entry) record(col string, r reading) {
 			e.unsure = map[string]string{}
 		}
 		e.unsure[col] = r.unsure
+	}
+	if r.json != "" {
+		if e.asJSON == nil {
+			e.asJSON = map[string]string{}
+		}
+		e.asJSON[col] = r.json
+	}
+	if r.float != "" {
+		if e.asFloat == nil {
+			e.asFloat = map[string]string{}
+		}
+		e.asFloat[col] = r.float
+	}
+	if r.copied != nil {
+		if e.copied == nil {
+			e.copied = map[string]source{}
+		}
+		e.copied[col] = *r.copied
+		if e.from == nil {
+			e.from = map[string]source{}
+		}
+		e.from[col] = *r.from
 	}
 	if r.written == "" {
 		return
@@ -564,48 +646,83 @@ func LintNullDefaults(cfg *Config, snap *Snapshot, tables map[string]*dbschema.T
 // LintColumns reports every column of the fixture file the table does not have.
 // Without it the mistake surfaces when the generated migration runs, which is
 // the worst moment for it to surface.
+//
+// It reports a column the table generates too, which nothing can write, and
+// takes both kinds out of the snapshot: they are said once, here, and a
+// comparison with the database does not say each again as a column written
+// on one side only.
 func LintColumns(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table) {
 	for _, model := range snap.Order {
-		m := cfg.Models[model]
-		if m == nil {
+		gone := lintColumns(cfg, snap, tables, model)
+		if len(gone) == 0 {
 			continue
 		}
-		table := tables[cfg.QualifiedTable(m)]
-		if table == nil {
-			snap.Findings = append(snap.Findings, Finding{
-				Kind: FindingUnknownColumn, Model: model,
-				Detail: "the configuration says this model lives in " + cfg.QualifiedTable(m) + ", which does not exist",
-			})
-			continue
-		}
-		if idCol, ok := table.Column(m.ID); ok && idCol.IdentityAlways {
-			for _, e := range snap.Entries[model] {
-				if e.ID != "" {
-					snap.Findings = append(snap.Findings, Finding{
-						Kind: FindingUnknownColumn, Model: model, Row: e.label(model),
-						Detail: fmt.Sprintf("%s is %s, but %s.%s is an identity GENERATED ALWAYS, which refuses "+
-							"an explicit value from dbfixture as from a migration: leave %s out and name the row "+
-							"by its _id", m.ID, e.ID, table.Qualified(), m.ID, m.ID),
-					})
-				}
-			}
-		}
+		var kept []string
 		for _, col := range snap.Columns[model] {
-			column, ok := table.Column(col)
-			if !ok {
-				snap.Findings = append(snap.Findings, Finding{
-					Kind: FindingUnknownColumn, Model: model, Row: col,
-					Detail: "the fixture file writes this column, " + table.Qualified() + " does not have it",
-				})
-				continue
+			if !gone[col] {
+				kept = append(kept, col)
 			}
-			if column.Generated {
+		}
+		snap.Columns[model] = kept
+		for _, e := range snap.Entries[model] {
+			for col := range gone {
+				delete(e.Cells, col)
+				delete(e.AsWritten, col)
+				delete(e.asJSON, col)
+				delete(e.copied, col)
+				delete(e.unsure, col)
+				delete(e.from, col)
+			}
+		}
+	}
+}
+
+// lintColumns reports the columns of one model the table does not have or
+// generates, and returns them.
+func lintColumns(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table, model string) map[string]bool {
+	gone := map[string]bool{}
+	m := cfg.Models[model]
+	if m == nil {
+		return gone
+	}
+	table := tables[cfg.QualifiedTable(m)]
+	if table == nil {
+		snap.Findings = append(snap.Findings, Finding{
+			Kind: FindingUnknownColumn, Model: model,
+			Detail: "the configuration says this model lives in " + cfg.QualifiedTable(m) + ", which does not exist",
+		})
+		return gone
+	}
+	if idCol, ok := table.Column(m.ID); ok && idCol.IdentityAlways {
+		for _, e := range snap.Entries[model] {
+			if e.ID != "" {
 				snap.Findings = append(snap.Findings, Finding{
-					Kind: FindingUnknownColumn, Model: model, Row: col,
-					Detail: "the fixture file writes this column, but " + table.Qualified() +
-						" generates it and nothing can write into it: put it in derived",
+					Kind: FindingUnknownColumn, Model: model, Row: e.label(model),
+					Detail: fmt.Sprintf("%s is %s, but %s.%s is an identity GENERATED ALWAYS, which refuses "+
+						"an explicit value from dbfixture as from a migration: leave %s out and name the row "+
+						"by its _id", m.ID, e.ID, table.Qualified(), m.ID, m.ID),
 				})
 			}
 		}
 	}
+	for _, col := range snap.Columns[model] {
+		column, ok := table.Column(col)
+		if !ok {
+			snap.Findings = append(snap.Findings, Finding{
+				Kind: FindingUnknownColumn, Model: model, Row: col,
+				Detail: "the fixture file writes this column, " + table.Qualified() + " does not have it",
+			})
+			gone[col] = true
+			continue
+		}
+		if column.Generated {
+			snap.Findings = append(snap.Findings, Finding{
+				Kind: FindingUnknownColumn, Model: model, Row: col,
+				Detail: "the fixture file writes this column, but " + table.Qualified() +
+					" generates it and nothing can write into it: put it in derived",
+			})
+			gone[col] = true
+		}
+	}
+	return gone
 }

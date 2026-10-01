@@ -92,16 +92,23 @@ func Scaffold(tables map[string]*dbschema.Table, only []string, schema string, o
 	// The tables proposed as models; one without a key to guess is
 	// written commented out, and a reference to it is no reference.
 	models := map[string]string{} // qualified table -> model name
+	for _, n := range names {
+		models[n] = modelName(tables[n].Name)
+	}
+	// A primary key that points at another model's row is the key: a
+	// plan's limits are told apart by their plan.
 	commented := map[string]bool{}
 	for _, n := range names {
 		t := tables[n]
-		if guessKey(t, scaffoldID(t)) == nil {
-			if _, ok := t.Column("name"); !ok {
-				commented[n] = true
-				continue
-			}
+		if guessKey(t, scaffoldID(t)) != nil || primaryKeyReference(tables, t, models) != "" {
+			continue
 		}
-		models[n] = modelName(t.Name)
+		if _, ok := t.Column("name"); !ok {
+			commented[n] = true
+		}
+	}
+	for n := range commented {
+		delete(models, n)
 	}
 
 	var b strings.Builder
@@ -185,6 +192,27 @@ func scaffoldID(t *dbschema.Table) string {
 	return "id"
 }
 
+// primaryKeyReference is the model a table's one-column primary key points
+// at, "" when it points nowhere this configuration has or at a column other
+// than that model's id.
+func primaryKeyReference(tables map[string]*dbschema.Table, t *dbschema.Table, models map[string]string) string {
+	if len(t.PrimaryKey) != 1 {
+		return ""
+	}
+	fk := t.ForeignKeyOf(t.PrimaryKey[0])
+	if fk == nil {
+		return ""
+	}
+	target, ok := models[fk.RefSchema+"."+fk.RefTable]
+	if !ok {
+		return ""
+	}
+	if pk := tables[fk.RefSchema+"."+fk.RefTable].PrimaryKey; len(pk) != 1 || pk[0] != fk.RefColumns[0] {
+		return ""
+	}
+	return target
+}
+
 // scaffoldModel is the entry of one model.
 func scaffoldModel(tables map[string]*dbschema.Table, t *dbschema.Table, model, schema string,
 	models map[string]string, triggers []string) string {
@@ -202,15 +230,23 @@ func scaffoldModel(tables map[string]*dbschema.Table, t *dbschema.Table, model, 
 	fmt.Fprintf(&b, "    table: %s\n", table)
 
 	id := scaffoldID(t)
-	if len(t.PrimaryKey) > 1 {
+	// A primary key that points at another model's row, a plan's limits
+	// keyed by the plan, is a reference: the tool reads an id as the row's
+	// own value, so the model has no id and the key is that column.
+	pkRef := primaryKeyReference(tables, t, models)
+	switch {
+	case len(t.PrimaryKey) > 1:
 		b.WriteString("    # This table has a composite primary key (" +
 			strings.Join(t.PrimaryKey, ", ") + "). Name one column as id, or\n" +
 			"    # leave id out and put every key column in key.\n")
-	}
-	if len(t.PrimaryKey) == 1 {
+	case pkRef != "":
+		fmt.Fprintf(&b, "    # The primary key, %s, points at a row of %s, so it is a reference and\n"+
+			"    # the natural key, not an id: id is left out.\n", id, pkRef)
+		id = ""
+	case len(t.PrimaryKey) == 1:
 		fmt.Fprintf(&b, "    id: %s\n", id)
 	}
-	if c, ok := t.Column(id); ok && c.Serial() {
+	if c, ok := t.Column(id); ok && id != "" && c.Serial() {
 		b.WriteString("    # The id comes from a sequence, so the migration moves the sequence\n" +
 			"    # past any explicit id it writes. Without that the next ordinary insert\n" +
 			"    # collides with an id the migration already used.\n")
@@ -218,19 +254,26 @@ func scaffoldModel(tables map[string]*dbschema.Table, t *dbschema.Table, model, 
 	}
 
 	key := guessKey(t, id)
+	if pkRef != "" {
+		key = []string{t.PrimaryKey[0]}
+	}
 	if key == nil {
 		b.WriteString("    # GUESS: this table has no unique index besides its primary key, so\n" +
 			"    # there is nothing to tell two rows apart by name. Say which columns do,\n" +
 			"    # and give the table a unique index on them; without one the database\n" +
 			"    # cannot stop a duplicate appearing and no guard here is reliable.\n")
 		key = []string{"name"}
+	} else if pkRef != "" {
+		b.WriteString("    # The natural key: the row of " + pkRef + " the primary key points at.\n")
 	} else {
 		b.WriteString("    # The natural key: what identifies a row when its id is meaningless,\n" +
 			"    # taken from the narrowest unique index. Every guard the generated\n" +
 			"    # migration writes matches on these columns.\n")
 	}
 	fmt.Fprintf(&b, "    key: [%s]\n", strings.Join(key, ", "))
-	if ref := guessRef(t, key, id); ref != "" && ref != "name" {
+	// A model keyed by a reference has no column of its own a reference to it
+	// could name it by.
+	if ref := guessRef(t, key, id); ref != "" && ref != "name" && pkRef == "" {
 		b.WriteString("    # The column another model's reference to this one names it by.\n")
 		fmt.Fprintf(&b, "    ref: %s\n", ref)
 	}
@@ -564,6 +607,12 @@ migrator: Migrations
 # long as that transaction stays open, and the application's own writes to
 # those rows queue up behind it.
 lock_timeout: 10s
+# Uncomment to have every generated migration record, in a table of this name,
+# which changes each of its runs applied, found made already and skipped: a
+# rollback then undoes only what the migration did in that database, and status
+# shows per database what a deploy skipped. The first run creates the table,
+# which takes CREATE on its schema.
+# audit_table: bun_fixture_audit
 # Where the commands connect, unless -dsn names another database. "env:NAME"
 # reads the DSN from an environment variable, which is how the password stays
 # out of the repository.
@@ -575,7 +624,9 @@ database: env:DATABASE_URL
 
 const policyBlock = `# The choices that depend on how you run your databases rather than on what is
 # correct. Everything not here is fixed, because the alternative would let this
-# tool corrupt a database.
+# tool corrupt a database. A model can set id_drift, missing_row, changed_row,
+# duplicate_key, deletes and array_nulls for itself, as in the policy block:
+# changed_row: warn for translations an admin UI edits, error for prices.
 policy:
   # The id in the fixture file is not the id the database gave the row: the
   # file's id belongs to another row, or the row lives under a different id.

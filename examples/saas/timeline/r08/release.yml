@@ -40,8 +40,8 @@ probes:
       - generate: {name: delete scale, at: "20260728100000"}
         exit: 2
         output:
-          - "refused: Plan Plan/code=scale: deletes of this model are refused by the configuration"
-          - "refused: PlanPrice PlanPrice/currency_id=Currency(EUR)/plan_id=Plan(scale)/valid_from=2026-03-01: deletes of this model are refused"
+          - "refused: Plan/code=scale: deletes of this model are refused by the configuration"
+          - "refused: PlanPrice/currency_id=Currency(EUR)/plan_id=Plan(scale)/valid_from=2026-03-01: deletes of this model are refused"
   - name: delete the scale plan with deletes allowed
     steps:
       - overlay: probe-delete-allowed

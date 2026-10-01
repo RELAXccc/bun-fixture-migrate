@@ -310,3 +310,47 @@ func TestTheProjectReadsInACallersTransaction(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+// What the audit table says each run did is in the library's status report as
+// in the command's: before any run, after an apply, and once the file was
+// edited after it ran.
+func TestTheProjectReadsTheAuditTableAsStatusDoes(t *testing.T) {
+	db := itemDB(t)
+	ctx := context.Background()
+	run(t, db, "DROP TABLE IF EXISTS bun_migrations, bun_migration_locks, bfm_api_audit")
+	t.Cleanup(func() { run(t, db, "DROP TABLE IF EXISTS bfm_api_audit") })
+	loadFixture(t, db, itemFixture)
+	c := buildCLI(t)
+	c.write("fixture-migrate.yml", strings.Replace(cliConfig, "seed_guard_table: items\n",
+		"seed_guard_table: items\naudit_table: bfm_api_audit\n", 1))
+	c.must(0, "baseline")
+	p := c.project()
+
+	r, err := p.Status(ctx, db, fixturemigrate.StatusOptions{})
+	if err != nil || r.Database.Audit == nil || r.Database.Audit.Exists {
+		t.Fatalf("before the first run: %v %+v", err, r.Database)
+	}
+	same(t, "status before the first run", c.json(0, "status"), asJSON(t, r))
+
+	c.write("fixtures/fixture.yml", replaceOnce(t, itemFixture, "      cost: 120\n", "      cost: 130\n"))
+	c.must(0, "generate", "-name", "cost", "-at", "20300101000000")
+	file := filepath.Join(c.dir, "migrations", "20300101000000_fixture_cost.go")
+	c.must(0, "apply", "-file", file, "-yes")
+	if err := p.ReadFiles(); err != nil {
+		t.Fatal(err)
+	}
+	r, err = p.Status(ctx, db, fixturemigrate.StatusOptions{})
+	if err != nil || !r.Database.Audit.Exists || len(r.Migrations) != 1 || r.Migrations[0].Audit == nil ||
+		r.Migrations[0].Audit.Applied != 1 || r.Migrations[0].Audit.Edited {
+		t.Fatalf("after the run: %v %+v", err, r.Migrations)
+	}
+	same(t, "status after the run", c.json(0, "status"), asJSON(t, r))
+
+	c.write("migrations/20300101000000_fixture_cost.go",
+		replaceOnce(t, string(c.read("migrations/20300101000000_fixture_cost.go")), `Lit("130")`, `Lit("131")`))
+	r, err = p.Status(ctx, db, fixturemigrate.StatusOptions{})
+	if err != nil || !r.Migrations[0].Audit.Edited || len(r.Notes) == 0 {
+		t.Fatalf("an edited file: %v %+v %q", err, r.Migrations, r.Notes)
+	}
+	same(t, "status of an edited file", c.json(0, "status"), asJSON(t, r))
+}

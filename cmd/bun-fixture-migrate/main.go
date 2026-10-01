@@ -14,6 +14,8 @@
 //	           transaction that is rolled back, and report what each change did
 //	sync       bring a database to the fixture file directly, without a
 //	           migration file: a developer's, a test run's, a staging copy
+//	apply      run one generated migration outside the migrator, and with
+//	           -record record it as bun's migrator would
 //
 // Every command that reads a configuration takes -config, which defaults to
 // $BUN_FIXTURE_MIGRATE_CONFIG and then to fixture-migrate.yml, and every one
@@ -21,7 +23,7 @@
 //
 // Exit codes: 0 when there was nothing to do or the work was done, 1 on an
 // error, 2 when something was refused and nothing was written, 3 when check,
-// status or plan found something.
+// status or plan found something, or a migration apply ran failed.
 package main
 
 import (
@@ -54,6 +56,7 @@ const usage = `bun-fixture-migrate <command> [flags]
   status     list the migrations, what a database applied, what nothing covers
   plan       dry-run the pending fixture migrations against a database
   sync       bring a development or test database to the fixture file
+  apply      run one generated migration by hand, outside the migrator
   version    print the version of this binary
 
 Run "bun-fixture-migrate <command> -h" for the flags of one command.`
@@ -68,6 +71,7 @@ const configEnv = "BUN_FIXTURE_MIGRATE_CONFIG"
 // configuration.
 var connects = map[string]bool{
 	"export": true, "check": true, "generate": true, "baseline": true, "status": true, "plan": true, "sync": true,
+	"apply": true,
 }
 
 func main() {
@@ -103,6 +107,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		"status":   status,
 		"plan":     plan,
 		"sync":     syncCmd,
+		"apply":    applyCmd,
 	}
 	var err error
 	switch cmd, ok := commands[args[0]]; {

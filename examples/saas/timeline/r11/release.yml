@@ -18,7 +18,7 @@ steps:
   - generate: {name: plan order, at: "20261019100000"}
     exit: 2
     output:
-      - 'refused: Plan Plan/code=free: column "position" is written on one side and left out on the other'
+      - 'refused: Plan/code=free: column "position" is written on one side and left out on the other'
       - "5 changes refused, nothing written"
   - cli: [baseline]
     exit: 2

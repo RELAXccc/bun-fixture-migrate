@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/RELAXccc/bun-fixture-migrate/fixtureapply"
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 
 	"github.com/uptrace/bun"
@@ -596,6 +597,62 @@ func TestStatusMarksOrder(t *testing.T) {
 		r.Migrations[2].Applied == nil || r.Migrations[2].Applied.Group != 2 || len(r.Notes) != 1 ||
 		!strings.Contains(r.Notes[0], "2_b is pending and sorts before 3") {
 		t.Fatalf("%+v %+v %q", r.Database, r.Migrations, r.Notes)
+	}
+}
+
+// status says per migration what its last run did here, by the audit table:
+// the counts, the changes it skipped and why, and a file edited since.
+func TestStatusMarksWhatTheAuditTableSays(t *testing.T) {
+	set := fixturechange.Set{Name: "20260921120000_fixture_prices", AuditTable: "bun_fixture_audit",
+		Tables: fixturechange.Tables{"Plan": {Name: "plans", ID: "id", Key: "name"}},
+		Changes: []fixturechange.Change{{Model: "Plan", Kind: fixturechange.Update,
+			Key: fixturechange.Values{"name": fixturechange.Lit("team")},
+			Old: fixturechange.Values{"price": fixturechange.Lit("1")},
+			New: fixturechange.Values{"price": fixturechange.Lit("2")}}}}
+	other := set
+	other.Name = "20260922120000_fixture_other"
+	all := []MigrationFile{
+		{Name: "20260921120000", Comment: "fixture_prices", Fixture: &set},
+		{Name: "20260922120000", Comment: "fixture_other", Fixture: &other},
+		{Name: "20260923120000", Comment: "schema"},
+	}
+	r := &StatusReport{Database: &StatusDatabase{Audit: &StatusAuditTable{Table: "bun_fixture_audit", Exists: true}}}
+	for _, m := range all {
+		r.Migrations = append(r.Migrations, StatusMigration{ID: m.ID(), Name: m.Name, Fixture: m.Fixture != nil})
+	}
+	at := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	edited := set
+	edited.Changes = nil
+	audit := map[string]fixtureapply.AuditRecord{
+		set.Name: {Set: set.Name, Direction: fixtureapply.DirectionUp, AppliedAt: at, AppliedBy: "deploy",
+			SetSHA256: fixtureapply.SetSHA256(set), Outcomes: []fixtureapply.AuditOutcome{
+				{Index: 0, Model: "Plan", Key: "name=team", Kind: "update", Status: "skipped", Problem: "changed row"},
+				{Index: 1, Model: "Plan", Key: "name=pro", Kind: "insert", Status: "applied"},
+				{Index: 2, Model: "Plan", Key: "name=solo", Kind: "update", Status: "unchanged"},
+				{Index: -1, Model: "Plan", Status: "sequence"},
+			}},
+		other.Name: {Set: other.Name, Direction: fixtureapply.DirectionDown, AppliedAt: at, AppliedBy: "ops",
+			SetSHA256: fixtureapply.SetSHA256(edited)},
+	}
+	markAudit(r, all, audit)
+	a := r.Migrations[0].Audit
+	if a == nil || a.Applied != 1 || a.Unchanged != 1 || a.Skipped != 1 || len(a.SkippedChanges) != 1 ||
+		a.SkippedChanges[0].Key != "name=team" || a.Edited || a.By != "deploy" {
+		t.Fatalf("the first migration: %+v", a)
+	}
+	if b := r.Migrations[1].Audit; b == nil || b.Direction != "down" || !b.Edited {
+		t.Fatalf("the second migration: %+v", b)
+	}
+	if r.Migrations[2].Audit != nil {
+		t.Fatal("a migration with no row has none")
+	}
+	if len(r.Notes) != 1 || !strings.Contains(r.Notes[0], "20260922120000_fixture_other was edited after it ran here") {
+		t.Fatalf("notes: %v", r.Notes)
+	}
+	data, err := json.Marshal(r.Migrations)
+	if err != nil || !strings.Contains(string(data), `"audit":{"direction":"up"`) ||
+		strings.Count(string(data), `"audit"`) != 2 {
+		t.Fatalf("%v %s", err, data)
 	}
 }
 

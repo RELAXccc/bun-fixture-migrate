@@ -108,7 +108,10 @@ Four details matter:
 - **Sequences.** A fixture file names its ids, and `dbfixture` writes them explicitly; a sequence
   does not see an explicit id go by, so the application's first insert collides with id 1.
   `fixtureapply.SyncSequences` moves each serial and identity column's sequence past the largest
-  value, and never backwards. Generated migrations do the same for every explicit id they write.
+  value, and never backwards: a sequence restarted at 1000 and not called since stays at 1000 when
+  the ids are below it. Generated migrations do the same for every explicit id they write. Both read
+  the sequence itself, which takes `SELECT` on it besides the `UPDATE` that `setval` takes; the
+  tables' owner has both.
 
 ## Which migrator settings
 
@@ -120,12 +123,17 @@ Four details matter:
 | `WithLocksTableName` | set `migration_locks_table` to the same name; `status` reads it to report a lock left behind |
 | `WithUpsert(true)` and `RunMigration` | re-running an applied fixture migration finds its changes made and reports them `unchanged` |
 | `BeforeMigration` / `AfterMigration` | run around the migration as usual |
-| `Rollback` | runs the generated down function, which reverts the change set with the same guards |
+| `Rollback` | runs the generated down function, which reverts the change set with the same guards: with an `audit_table`, only the changes the migration made in that database |
 
 The record removal only happens when `Apply` runs under bun's migrator, on the migrator's own
-`*bun.DB`, and only to the row that, before the change set ran, was the newest of the migrations
-table, carried the migration's name and had been written in the last minute: the record bun's
-default mode makes just before calling the migration. A generated file registers
+`*bun.DB`, and only to the rows that, before the change set ran, carried the migration's name, had
+been written in the last minute and were newer than every other migration's record: the record bun's
+default mode makes just before calling the migration, or one per replica when replicas start it at
+the same moment without bun's `Lock`. A failing replica deletes them all, so the migration is not
+left recorded by the record of another replica that failed too; when that other replica succeeded
+instead, the next migrate runs the migration again and finds every change made. bun's `Lock`, or
+`WithUpsert(true)`, which keeps one record per name, keeps replicas from writing more than one record
+of a run in the first place. A generated file registers
 `fixtureapply.Up(set)` and `fixtureapply.Down(set)`; `Up` reads the migration's name from the file
 that calls it, as bun's `Register` reads it from the same file, so both are called in the
 migration's own file. Files from earlier versions register functions that call `Apply` and `Revert`
@@ -148,9 +156,10 @@ applying the same set, one of them outside the migrator's lock, cannot both inse
 finds every change made and reports `unchanged`. The seed step needs the migrator's lock too: hold
 it around the seed, as above.
 
-**By hand, in an emergency.** Every generated migration is a plain Go value; `plan -file` shows
-what one does against any database, applied or not, and `Apply` runs it from a small program. Do
-not edit the rows by hand instead: the next fixture migration's guards compare against the values
+**By hand, in an emergency.** `apply -file` shows what one generated migration does against any
+database, applied or not, and with `-yes -record` runs it and records it as bun's migrator would, in
+one transaction; see [the runbook](production.md#running-a-migration-by-hand). Do not edit the rows
+by hand instead: the next fixture migration's guards compare against the values
 the state file says the database holds, and a hand edit shows up there as a changed row.
 
 ## SQL migrations next to fixture migrations
@@ -382,8 +391,18 @@ schedule calls `Check` and exits non-zero unless the report's `Agree`. A CI prog
 
 The command connects with `pgdriver`. The run time, `fixtureapply`, runs in your application with
 whatever driver it uses: it is tested under bun's `pgdriver` and under `pgx/v5/stdlib` with
-`pgdialect`. It sets `TimeZone` and `DateStyle` for its own transaction and restores them, so values
-compare the same whatever the connection's settings.
+`pgdialect`. It sets `TimeZone`, `DateStyle` and `IntervalStyle` for its own transaction and restores
+them, so values compare the same whatever the connection's settings.
+
+What else runs in that transaction sees them too: `TimeZone` is `UTC`, `DateStyle` `ISO, YMD` and
+`IntervalStyle` `postgres` for every trigger a change fires and every column default an insert
+fills. `now()` is the same instant either way, but `current_date`, `localtimestamp`, `localtime`,
+`now()::date`, `date_trunc('day', now())` and `to_char(now(), ...)` are UTC's: an insert into a
+table whose `created_on date DEFAULT current_date` the fixture leaves out gets the date in UTC, and a
+trigger stamping the local date writes UTC's. A trigger turning a date or an interval into text
+gets the ISO and `postgres` spellings. The setting is not avoidable by binding the values
+differently: a change set written by an earlier version, or by hand, may hold a timestamp without
+an offset, which is a UTC time, and only the session's `TimeZone` reads it as one.
 
 The DSN is a URL (`postgres://user:password@host:5432/db?sslmode=require`). The command refuses a
 keyword DSN (`host=... user=...`) with a sentence, never repeats a password in a message, and sets

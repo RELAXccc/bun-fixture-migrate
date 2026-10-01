@@ -72,6 +72,15 @@ func TestValidateRejects(t *testing.T) {
 					Key: fixturechange.Values{"code": fixturechange.Lit("sso")},
 					New: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "a\x00")}},
 			}}, "NUL"},
+		// The same NUL in an element of a list, which JSON spells \u0000:
+		// the array's element lost it, {ab} for ["a\u0000b"].
+		"NUL in an element of a list": {
+			fixturechange.Set{Tables: tables(), Changes: []fixturechange.Change{
+				{Model: "Plan", Kind: fixturechange.Insert,
+					Key: fixturechange.Values{"name": fixturechange.Lit("team")},
+					New: fixturechange.Values{"name": fixturechange.Lit("team"),
+						"tags": fixturechange.Lit(`["ok", ["a\u0000b"]]`)}},
+			}}, "NUL character, which PostgreSQL cannot store, in an element of the list"},
 		"lock timeout without a unit": {
 			fixturechange.Set{Tables: tables(), LockTimeout: "5000"}, "ms, s, min, h or d"},
 		"lock timeout in Go's spelling": {
@@ -80,6 +89,8 @@ func TestValidateRejects(t *testing.T) {
 			fixturechange.Set{Tables: tables(), LockTimeout: "5s'; DROP TABLE x; --"}, "ms, s, min, h or d"},
 		"duplicate key policy": {
 			fixturechange.Set{Tables: tables(), Policy: fixturechange.Policy{DuplicateKey: "ignore"}}, "DuplicateKey"},
+		"audit table that is not an identifier": {
+			fixturechange.Set{Tables: tables(), AuditTable: "audit; DROP TABLE x"}, "audit table"},
 		"table that is not an identifier": {
 			fixturechange.Set{Tables: fixturechange.Tables{"Plan": {Name: "plans; DROP TABLE x", ID: "id", Key: "name"}}},
 			"plain SQL identifier"},
@@ -249,6 +260,31 @@ func TestModeForFollowsThePolicy(t *testing.T) {
 	}
 	if got := modeFor(p, problemIDDrift); got != "warn" {
 		t.Errorf("id drift: %q", got)
+	}
+}
+
+// A model's own policy decides for its changes, and only for them.
+func TestModeForFollowsTheTablesPolicy(t *testing.T) {
+	set := fixturechange.Set{
+		Policy: fixturechange.Policy{ChangedRow: fixturechange.ModeError},
+		Tables: fixturechange.Tables{
+			"Plan":        {Name: "plans", ID: "id"},
+			"Translation": {Name: "translations", ID: "id", Policy: &fixturechange.Policy{ChangedRow: "warn"}},
+		},
+	}
+	if got := modeFor(set.PolicyFor("Plan"), problemChanged); got != "error" {
+		t.Errorf("Plan, changed: %q", got)
+	}
+	if got := modeFor(set.PolicyFor("Translation"), problemChanged); got != "warn" {
+		t.Errorf("Translation, changed: %q", got)
+	}
+	if got := modeFor(set.PolicyFor("Translation"), problemMissing); got != "error" {
+		t.Errorf("Translation, missing: %q", got)
+	}
+	set.Tables["Translation"] = fixturechange.Table{Name: "translations", ID: "id",
+		Policy: &fixturechange.Policy{MissingRow: "warm"}}
+	if err := Validate(set); err == nil || !strings.Contains(err.Error(), `model "Translation": policy MissingRow`) {
+		t.Fatalf("a table's policy is validated like the set's, got %v", err)
 	}
 }
 

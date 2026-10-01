@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -379,16 +380,17 @@ func TestPropertyAChangeSetTakesTheDatabaseFromOneFileToTheNext(t *testing.T) {
 	if testing.Short() {
 		iterations = 30
 	}
+	// BFM_PROPERTY_ITERATIONS runs more, or fewer.
+	if n, err := strconv.Atoi(os.Getenv("BFM_PROPERTY_ITERATIONS")); err == nil && n > 0 {
+		iterations = n
+	}
 	r := rand.New(rand.NewSource(20261001))
 	var renamed, viaDB, noRerun int
 	for i := 0; i < iterations; i++ {
 		old, next := ptPair(r, i)
+		// Against the database as between two files, a model the file does
+		// not mention has no rows, as in a fresh seed of the file.
 		viaFile := i%2 == 0
-		if !viaFile {
-			// Against the database, a model the file does not mention is
-			// not compared at all, so an empty one has to be written out.
-			next.omit = false
-		}
 		// Without the database, a value that reads two ways is refused, so
 		// only the database's side gets those.
 		oldText, newText := old.yaml(!viaFile), next.yaml(!viaFile)

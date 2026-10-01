@@ -20,6 +20,7 @@ database drift apart with nothing to say so.
 | `status` | list the migrations, what a database applied, and what no migration covers yet |
 | `plan` | run the pending migrations against a database and roll back, reporting every row |
 | `sync` | bring a development, test or staging database to the fixture files directly |
+| `apply` | run one generated migration by hand, and record it as bun's migrator would |
 
 It never looks at your Go model types. PostgreSQL's catalog knows the tables, the columns and their
 types, the defaults, the keys, the foreign keys and the sequences; the configuration says which
@@ -161,9 +162,10 @@ configuration later does not change what an old migration does. At run time `fix
   `*fixtureapply.ChangeError` that `errors.As` finds.
 
 `Revert` is the same set backwards, every change inverted and guarded the same way. A rename finds
-its row under the name it gave it, so it reverts, and a second run finds it already made. It assumes
-the migration made every change on this database, including those it found already made; see
-[rolling back](docs/production.md#rolling-back).
+its row under the name it gave it, so it reverts, and a second run finds it already made. With an
+`audit_table`, every run records which changes it made, found made already or skipped, and `Revert`
+undoes only the ones it made in that database; without one, it assumes the migration made them all,
+including those it found already made. See [rolling back](docs/production.md#rolling-back).
 
 ## Three things about bun you may not know
 
@@ -242,11 +244,12 @@ production was not in the state it expected is lost for good: fix the data, depl
 `migrate` has nothing to do.
 
 A generated migration fails on purpose whenever it cannot do what it says (below), so it has to
-handle this. Under bun's migrator, `fixtureapply.Apply` first looks for the record the migrator made
-of it a moment before: the newest row of `bun_migrations`, if it carries this migration's name and
-was written in the last minute. If the change set fails, it deletes that row, and only that row,
-through the migrator's own `*bun.DB`. A record another replica writes while this one runs is not the
-row it found, and is left alone. The error says so:
+handle this. Under bun's migrator, the generated migration first looks for the records the migrator
+made of it a moment before: every row of `bun_migrations` with this migration's name, written in the
+last minute and newer than every other migration's record (two replicas racing without bun's `Lock`
+make one each). If the change set fails, it deletes those rows, and only those, through the
+migrator's own `*bun.DB`. A record another replica writes after it looked is not one it found, and is
+left alone. The error says so:
 
 ```
 migrate: 20260921120000: up: …: no row of items has name=anvil. …

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -57,24 +58,35 @@ func migrationFromFrames(frames []runtime.Frame) string {
 // record is what Apply found of bun's record of the migration before running
 // it.
 type record struct {
-	// id is the row bun's migrator inserted just before calling the
-	// migration, 0 when there is none.
-	id int64
-	// err is why it could not be looked for.
+	// ids are the rows bun's migrator inserted just before calling the
+	// migration: one, or one per replica that started it at the same moment.
+	// Empty when there is none.
+	ids []int64
+	// err is why they could not be looked for.
 	err error
 }
 
-// findRecord looks, before the change set runs, for the record bun's migrator
-// made of this run of the migration: the newest row of the migrations table,
-// if it carries this migration's name and was written in the last minute. bun
-// inserts it a moment before calling the migration unless it was built
-// WithMarkAppliedOnSuccess(true).
+// findRecord looks, before the change set runs, for the records bun's migrator
+// made of this run of the migration: every row of the migrations table that
+// carries this migration's name, was written in the last minute, and is newer
+// than every other migration's record. bun inserts one a moment before calling
+// the migration unless it was built WithMarkAppliedOnSuccess(true).
 //
-// Reading it first is what makes taking it back safe. Read after a failure,
-// the newest row could be one another replica wrote while this one waited for
-// the advisory lock: its record of the same migration, made after it applied
-// the change set. Deleting that would leave the migration pending with its
-// changes made, and every later start running it again.
+// Every such row, and not only the newest: two replicas starting together
+// without bun's Lock both insert a record before either runs the migration,
+// and each then has to take back both. Taking back only the newest, each of
+// them deleted the same row and left the other, so a migration that failed on
+// both stayed recorded as applied and never ran again. One of the rows may be
+// the record of a replica whose change set then succeeds; deleting it is
+// harmless, since the next migrate runs the set again and finds every change
+// made.
+//
+// Reading them first is what keeps the rest safe. Read after a failure, they
+// could include one another replica wrote while this one waited for the
+// advisory lock: its record of the same migration, made after it applied the
+// change set (WithMarkAppliedOnSuccess). Deleting that would leave the
+// migration pending with its changes made, and every later start running it
+// again.
 func findRecord(ctx context.Context, db bun.IDB, set fixturechange.Set, o options) record {
 	// Only the migrator's own connection pool. Inside somebody else's
 	// transaction a failing statement would poison it, and the migrator never
@@ -94,13 +106,26 @@ func findRecord(ctx context.Context, db bun.IDB, set fixturechange.Set, o option
 	if !exists {
 		return record{}
 	}
-	var id int64
-	err := bdb.QueryRowContext(ctx, fmt.Sprintf("SELECT id FROM %s WHERE id = (SELECT max(id) FROM %s) "+
-		"AND name = ? AND migrated_at > clock_timestamp() - interval '1 minute'", table, table), o.migration).Scan(&id)
-	if err != nil && !isNoRows(err) {
+	rows, err := bdb.QueryContext(ctx, fmt.Sprintf("SELECT id FROM %s WHERE name = ? "+
+		"AND migrated_at > clock_timestamp() - interval '1 minute' "+
+		"AND id > (SELECT coalesce(max(id), 0) FROM %s WHERE name <> ?) ORDER BY id", table, table),
+		o.migration, o.migration)
+	if err != nil {
 		return record{err: err}
 	}
-	return record{id: id}
+	defer rows.Close()
+	var rec record
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return record{err: err}
+		}
+		rec.ids = append(rec.ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return record{err: err}
+	}
+	return rec
 }
 
 // migrationsTable is the table bun's migrator records in, as bun writes it
@@ -115,8 +140,8 @@ func migrationsTable(set fixturechange.Set) (string, bool) {
 	return table, err == nil
 }
 
-// unrecord deletes the record bun's migrator made of this migration before
-// running it, the one findRecord found, and returns the failure with a note
+// unrecord deletes the records bun's migrator made of this migration before
+// running it, the ones findRecord found, and returns the failure with a note
 // saying what it did.
 func unrecord(ctx context.Context, db bun.IDB, set fixturechange.Set, o options, rec record, failure error) error {
 	bdb, ok := db.(*bun.DB)
@@ -129,18 +154,19 @@ func unrecord(ctx context.Context, db bun.IDB, set fixturechange.Set, o options,
 			"named %s written just before this run, delete it, or the migration will not run again",
 			failure, o.migration, rec.err, table, o.migration)
 	}
-	if rec.id == 0 {
+	if len(rec.ids) == 0 {
 		return failure
 	}
 	// The migration may have failed because the context ended; the record
 	// still has to go, or the next deploy skips this migration.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
-	res, err := bdb.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = ? AND name = ?", table), rec.id, o.migration)
+	res, err := bdb.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id IN (?) AND name = ?", table),
+		bun.List(rec.ids), o.migration)
 	if err != nil {
 		return fmt.Errorf("%w\n\nbun had recorded %s as applied before running it, and the record could not "+
-			"be removed (%v): delete the row of %s with id %d, or the migration will not run again",
-			failure, o.migration, err, table, rec.id)
+			"be removed (%v): delete the rows of %s with id %s, or the migration will not run again",
+			failure, o.migration, err, table, idList(rec.ids))
 	}
 	if n, err := res.RowsAffected(); err != nil || n == 0 {
 		return failure
@@ -152,4 +178,13 @@ func unrecord(ctx context.Context, db bun.IDB, set fixturechange.Set, o options,
 	return &recordRemoved{failure: failure, note: fmt.Sprintf("bun had recorded migration %s as applied before "+
 		"running it, as its migrator does unless built WithMarkAppliedOnSuccess(true); that record was removed, so "+
 		"the migration runs again once this is fixed", o.migration)}
+}
+
+// idList is ids as "4" or "4, 5".
+func idList(ids []int64) string {
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = strconv.FormatInt(id, 10)
+	}
+	return strings.Join(parts, ", ")
 }

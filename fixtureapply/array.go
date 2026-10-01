@@ -3,6 +3,7 @@ package fixtureapply
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -24,19 +25,28 @@ func arrayLiteral(text string) (literal string, ok bool, err error) {
 		return "", false, nil
 	}
 	var b strings.Builder
-	if _, err := writeArray(&b, raw); err != nil {
+	if _, err := writeArray(&b, raw, 1); err != nil {
 		return "", true, err
 	}
 	return b.String(), true, nil
 }
 
-// writeArray writes one level of an array and returns its shape: its length,
-// then the shape of its elements when they are arrays. PostgreSQL only stores
-// arrays whose sub-arrays all have one shape.
-func writeArray(b *strings.Builder, raw json.RawMessage) ([]int, error) {
+// maxDimensions is the most dimensions a PostgreSQL array has (MAXDIM).
+const maxDimensions = 6
+
+// writeArray writes one level of an array, the depth'th, and returns its
+// shape: its length, then the shape of its elements when they are arrays.
+// PostgreSQL only stores arrays whose sub-arrays all have one shape.
+func writeArray(b *strings.Builder, raw json.RawMessage, depth int) ([]int, error) {
+	if depth > maxDimensions {
+		return nil, errTooDeep
+	}
 	var elems []json.RawMessage
 	if err := json.Unmarshal(raw, &elems); err != nil {
 		return nil, err
+	}
+	if len(elems) == 0 && depth > 1 {
+		return nil, errEmptyRow
 	}
 	b.WriteByte('{')
 	var inner []int
@@ -48,7 +58,7 @@ func writeArray(b *strings.Builder, raw json.RawMessage) ([]int, error) {
 		e = bytes.TrimSpace(e)
 		switch e[0] {
 		case '[':
-			shape, err := writeArray(b, e)
+			shape, err := writeArray(b, e, depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -62,13 +72,17 @@ func writeArray(b *strings.Builder, raw json.RawMessage) ([]int, error) {
 			if err := json.Unmarshal(e, &s); err != nil {
 				return nil, err
 			}
-			quoteElement(b, s)
+			if err := quoteElement(b, s); err != nil {
+				return nil, err
+			}
 		case '{':
 			var compact bytes.Buffer
 			if err := json.Compact(&compact, e); err != nil {
 				return nil, err
 			}
-			quoteElement(b, compact.String())
+			if err := quoteElement(b, compact.String()); err != nil {
+				return nil, err
+			}
 		default:
 			if string(e) == "null" {
 				b.WriteString("NULL")
@@ -84,11 +98,24 @@ func writeArray(b *strings.Builder, raw json.RawMessage) ([]int, error) {
 	return append([]int{len(elems)}, inner...), nil
 }
 
-var errRagged = fmt.Errorf("its elements are not all arrays of one length, and PostgreSQL only stores an array " +
-	"whose rows all have the same length")
+var (
+	errRagged = errors.New("its elements are not all arrays of one length, and PostgreSQL only stores an array " +
+		"whose rows all have the same length")
+	errTooDeep = fmt.Errorf("it nests lists more than %d deep, while PostgreSQL stores arrays of at most %d "+
+		"dimensions", maxDimensions, maxDimensions)
+	errEmptyRow = errors.New("it holds an empty list inside a list, which PostgreSQL cannot store: an empty " +
+		"array has no dimensions, so it cannot be a row of another")
+	// errNUL is the sentence Validate refuses any value holding a NUL with.
+	errNUL = errors.New("the value holds a NUL character, which PostgreSQL cannot store")
+)
 
-// quoteElement writes s as a quoted element of an array literal.
-func quoteElement(b *strings.Builder, s string) {
+// quoteElement writes s as a quoted element of an array literal. A NUL is
+// refused: PostgreSQL's text cannot hold one, and bun v1.2.18 drops it from a
+// bound string without a word, so ["a\u0000b"] would be stored as {ab}.
+func quoteElement(b *strings.Builder, s string) error {
+	if strings.ContainsRune(s, 0) {
+		return errNUL
+	}
 	b.WriteByte('"')
 	for _, r := range s {
 		if r == '"' || r == '\\' {
@@ -97,4 +124,5 @@ func quoteElement(b *strings.Builder, s string) {
 		b.WriteRune(r)
 	}
 	b.WriteByte('"')
+	return nil
 }

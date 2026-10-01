@@ -39,6 +39,16 @@ type Cell struct {
 	// which is what a []string field gets. Which one the database holds
 	// depends on the column's type.
 	StringText string
+	// JSONText is what a json or jsonb column holds for this value when that
+	// is not Text, and "" otherwise: the JSON encoding/json writes for what
+	// yaml.v3 makes of the value in an any, slice or map field. A timestamp
+	// is a time.Time there, which keeps its offset, and a date alone is
+	// midnight UTC; a float is a float64, so 0.1234567890123456789 is
+	// 0.12345678901234568. A scalar's is its text, a timestamp unquoted; a
+	// sequence's is its JSON, where Text is what an array column's slice
+	// field makes of the elements. In a timestamptz column, too, a timestamp
+	// is the time.Time yaml.v3 makes of it, and a date alone midnight UTC.
+	JSONText string
 	// Unsure says why the value is one thing to one Go field type and
 	// another to another, which no column type settles and this tool cannot
 	// see: a sequence holding a null, which yaml.v3 drops for a []string or
@@ -117,6 +127,9 @@ func cellOf(node yaml.Node) (Cell, error) {
 		if c.Tag != "!!binary" && scalarText(c) != c.Text {
 			c.StringText = c.Text
 		}
+		if j, ok := jsonScalar(&node); ok && j != scalarText(c) {
+			c.JSONText = j
+		}
 		return c, nil
 	case node.Kind == 0:
 		return Cell{IsNull: true}, nil
@@ -125,7 +138,18 @@ func cellOf(node yaml.Node) (Cell, error) {
 		if err != nil {
 			return Cell{}, err
 		}
+		asAny, err := yamlAnyJSON(&node)
+		if err != nil {
+			return Cell{}, err
+		}
+		// In the one spelling the database's values are read in, so a
+		// migration writes the same text with the database at hand or
+		// without it.
+		text, asAny = normalJSON(text), normalJSON(asAny)
 		c := Cell{Text: text, Structured: true, StringText: sequenceAsWritten(&node)}
+		if asAny != text {
+			c.JSONText = asAny
+		}
 		if holdsNullElement(&node) {
 			c.Unsure = nullElementReason
 		}

@@ -12,8 +12,8 @@ The checks worth running, and ready-made jobs for GitHub Actions and GitLab CI. 
 
 Exit code 3 always means "found something" and 1 "could not run", so a job can treat drift as a
 warning and a broken connection as a failure. A finding the configuration's policy makes a warning is
-reported and does not fail a job. `check`, `export`, `generate`, `baseline`, `status`, `plan` and
-`sync` take `-json` for a report to archive or alert on; see the [reference](reference.md#json-output).
+reported and does not fail a job. `check`, `export`, `generate`, `baseline`, `status`, `plan`, `sync`
+and `apply` take `-json` for a report to archive or alert on; see the [reference](reference.md#json-output).
 A CI program in Go can run the commands as [library calls](usage.md#use-from-go) instead, and gets the
 same reports as Go values. `export -stdout` writes the same bytes for the same database, so a job can
 diff it against a fixture file export wrote. Against a file edited by hand the diff also shows what
