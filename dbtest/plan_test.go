@@ -380,6 +380,27 @@ func TestPlanFailsOnAProblemInTheMigrationsDirectory(t *testing.T) {
 	}
 }
 
+// A state file that does not read, here with git's conflict markers in it
+// after two branches each generated a migration: status fails on it, and plan
+// passed it, every migration planning well.
+func TestPlanFailsOnAStateFileThatDoesNotRead(t *testing.T) {
+	deferredDB(t)
+	c := deferredCLI(t)
+	state := readFileT(t, filepath.Join(c.dir, "migrations", "fixture_state.yml"))
+	c.write("migrations/fixture_state.yml", "<<<<<<< HEAD\n"+state+"=======\n"+state+">>>>>>> other\n")
+	out := c.must(3, "plan")
+	if !strings.Contains(out, "the state file does not read") || !strings.Contains(out, "conflict markers") ||
+		!strings.Contains(out, "1 problem in the migrations directory") {
+		t.Fatalf("plan:\n%s", out)
+	}
+	c.must(3, "status")
+	// Garbage is no better.
+	c.write("migrations/fixture_state.yml", "{")
+	if out := c.must(3, "plan"); !strings.Contains(out, "the state file does not read") {
+		t.Fatalf("plan:\n%s", out)
+	}
+}
+
 // plan holds what it writes locked until it rolls back, and says how much and
 // how long. A sequence is outside every transaction, so what a SQL migration
 // does to one stays done after the rollback, and plan says that too.

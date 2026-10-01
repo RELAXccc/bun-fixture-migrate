@@ -605,8 +605,9 @@ when there are none, say what its `result` and `error` do not: why the plan
 could not tell, or where the deploy can differ from the plan. The top-level `notes` say why a
 migration `-with-sql` would have run is in `not_simulated`. `problems` are those `status` reports in
 the migrations directory, each of which fails the plan: two migrations under one name, a generated
-file that does not read, a fixture migration the state file's history does not include, and the
-one it includes last gone from the directory. `rows_locked` is how many rows the fixture
+file that does not read, a fixture migration the state file's history does not include, the
+one it includes last gone from the directory, and a state file that does not read, such as one
+holding git's conflict markers. `rows_locked` is how many rows the fixture
 migrations wrote and held locked until the rollback, and `locked_seconds` how long the plan's
 transaction was open.
 

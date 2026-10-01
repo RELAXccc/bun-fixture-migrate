@@ -443,6 +443,16 @@ func plan(o streams, args []string) error {
 		// Each is a deploy whose migrations were not generated one after
 		// another, however well each of them plans.
 		report.Problems = append(report.Problems, s.p.LineageProblems(ms)...)
+		// A state file that does not read says nothing about that history,
+		// which LineageProblems then leaves out. status fails on it, and
+		// so does plan: git's conflict markers in it are two branches each
+		// generated a migration, which is the history problem itself.
+		if path := s.p.StatePath(); path != "" {
+			if _, err := fixturemigrate.ReadState(path); err != nil && !errors.Is(err, fixturemigrate.ErrNoState) {
+				report.Problems = append(report.Problems, fmt.Sprintf("the state file does not read, so nothing "+
+					"says which fixture migrations it includes: %s", err))
+			}
+		}
 		var applied map[string]fixturemigrate.Applied
 		err = fixturemigrate.ReadOnly(o.ctx, db, func(tx bun.Tx) error {
 			applied, _, err = fixturemigrate.ReadApplied(o.ctx, tx, s.cfg.MigrationsTable)
