@@ -16,6 +16,7 @@ import (
 	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
 	"github.com/RELAXccc/bun-fixture-migrate/fixtureapply"
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+	"github.com/RELAXccc/bun-fixture-migrate/internal/pgerr"
 
 	"github.com/uptrace/bun"
 )
@@ -218,6 +219,10 @@ func revertNote(ctx context.Context, db *bun.DB, set fixturechange.Set) (string,
 		base, err = fixtureapply.ApplyRecords(ctx, tx, set)
 		return err
 	})
+	if pgerr.State(err) == pgerr.InsufficientPrivilege {
+		return "", fmt.Errorf("the audit table %s, which says what the revert undoes, cannot be read as this role; "+
+			"grant it SELECT on the table, and USAGE on its schema: %w", set.AuditTable, err)
+	}
 	if err != nil {
 		return "", err
 	}

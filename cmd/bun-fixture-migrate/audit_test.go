@@ -66,7 +66,7 @@ func TestStatusReadsWhatTheAuditTableSays(t *testing.T) {
 		"what the fixture migrations did here, according to bun_fixture_audit",
 		"20260921120000_fixture_prices: applied 2026-09-21 12:00:00 by deploy: 1 applied, 1 unchanged, 1 skipped",
 		"    skipped Plan name=team update [changed row]",
-		"20260922120000_fixture_other: reverted 2026-09-21 12:00:00 by ops",
+		"20260922120000_fixture_other: reverted 2026-09-21 12:00:00 by ops: 0 reverted, 0 unchanged, 0 skipped",
 		"edited after it ran here",
 	} {
 		if !strings.Contains(out.String(), want) {

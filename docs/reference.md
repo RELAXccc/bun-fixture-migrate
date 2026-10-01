@@ -471,7 +471,7 @@ field's type could settle, such as a null inside a sequence), `unknown column`.
 | `migrations` | `applied` is `null` for a pending migration and for all of them without a database; `out_of_order` is a pending one that sorts before `newest_applied` |
 | `not_in_state` | fixture migrations of the directory the state's history does not include; `problems` says why, and says when the one the state includes last is gone |
 | `database` | `null` when none was asked. `locked` is a row in `locks_table` naming `table`: a migrator running now, or one that died and left it. `audit` is the `audit_table` read and whether it `exists`, left out when none is configured |
-| `migrations[].audit` | what the newest row of the audit table says the migration's last run did here, left out when there is none: `direction` `up` for an Apply, `down` for a Revert; `at` and `by` (the role); `applied`, `unchanged` and `skipped` count its changes, and `skipped_changes` lists the skipped ones with their `problem`; `unseeded` is a run the empty seed guard table made a no-op; `edited` is a migration file whose change set is not the one that ran |
+| `migrations[].audit` | what the newest row of the audit table says the migration's last run did here, left out when there is none: `direction` `up` for an Apply, `down` for a Revert; `at` and `by` (the role); `applied`, `unchanged` and `skipped` count its changes, a revert's `applied` being those it reverted, and `skipped_changes` lists the skipped ones with their `problem`; `unseeded` is a run the empty seed guard table made a no-op; `edited` is a migration file whose change set is not the one that ran |
 
 ### plan output
 

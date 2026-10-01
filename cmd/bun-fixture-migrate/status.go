@@ -702,6 +702,7 @@ func printAudit(o streams, r *statusReport) {
 			fmt.Fprintf(o.stdout, "\nwhat the fixture migrations did here, according to %s\n", a.Table)
 			header = true
 		}
+		// A Revert's applied changes are the ones it reverted.
 		run := "applied"
 		if m.Audit.Direction == string(fixtureapply.DirectionDown) {
 			run = "reverted"
@@ -711,7 +712,7 @@ func printAudit(o streams, r *statusReport) {
 		if m.Audit.Unseeded {
 			fmt.Fprintln(o.stdout, "nothing, the database was not seeded yet")
 		} else {
-			fmt.Fprintf(o.stdout, "%d applied, %d unchanged, %d skipped\n", m.Audit.Applied, m.Audit.Unchanged,
+			fmt.Fprintf(o.stdout, "%d %s, %d unchanged, %d skipped\n", m.Audit.Applied, run, m.Audit.Unchanged,
 				m.Audit.Skipped)
 		}
 		for _, c := range m.Audit.SkippedChanges {
