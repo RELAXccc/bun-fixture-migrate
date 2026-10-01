@@ -112,13 +112,18 @@ func (d deleted) label() string {
 //
 //  1. a live row holds the key: the insert finds it made, or that row
 //     changed, as any insert would;
-//  2. the newest soft-deleted row holding the key -- or, when the change
-//     writes the id, the one with that id -- holds every value the change
-//     writes: it is restored, and keeps its id and the rows pointing at it;
-//  3. that row holds other values: a new row is inserted beside it, which a
-//     unique index over live rows only lets in, and one over every row
-//     refuses, which is a changed row;
+//  2. a soft-deleted row holds every value the change writes, the key and
+//     the id when it writes one: the newest such row is restored, and keeps
+//     its id and the rows pointing at it. A newer copy holding other values,
+//     which a later migration's row left behind, does not hide it;
+//  3. soft-deleted rows hold the key with other values only: a new row is
+//     inserted beside the newest, which a unique index over live rows only
+//     lets in, and one over every row refuses, which is a changed row;
 //  4. no row at all holds the key: the row is inserted.
+//
+// The rows it looks at are locked FOR UPDATE, so the one it restores, which
+// it finds again by where it is, cannot be changed, moved or deleted, nor its
+// place taken by another row, before it is restored.
 func (r *runner) insertOrRestore(ctx context.Context, c fixturechange.Change, t fixturechange.Table,
 	table string) (outcome, error) {
 
@@ -129,7 +134,20 @@ func (r *runner) insertOrRestore(ctx context.Context, c fixturechange.Change, t 
 	if live > 0 {
 		return r.diagnoseInsert(ctx, c, t, table)
 	}
-	cands, err := r.candidates(ctx, c, t, table)
+	holding, err := r.candidates(ctx, c, t, table, c.New)
+	if err != nil {
+		return outcome{}, err
+	}
+	if len(holding) > 0 {
+		if len(holding) > 1 && holding[1].at == holding[0].at {
+			return outcome{problem: problemDuplicate, message: fmt.Sprintf(
+				"more than one soft-deleted row of %s holds %s and the values of this change, deleted at the same "+
+					"time, %s, and nothing says which of them to restore, so none was. Restore one by hand, or "+
+					"delete the others for good", t.Name, keyLabel(c.Key), holding[0].at)}, nil
+		}
+		return r.restore(ctx, c, t, table, holding[0])
+	}
+	cands, err := r.candidates(ctx, c, t, table, nil)
 	if err != nil {
 		return outcome{}, err
 	}
@@ -137,19 +155,6 @@ func (r *runner) insertOrRestore(ctx context.Context, c fixturechange.Change, t 
 		return r.insert(ctx, c, t, table)
 	}
 	cand := cands[0]
-	if len(cands) > 1 && cands[1].at == cand.at {
-		return outcome{problem: problemDuplicate, message: fmt.Sprintf(
-			"more than one soft-deleted row of %s holds %s, deleted at the same time, %s, and nothing says which of "+
-				"them to restore, so none was. Restore one by hand, or delete the others for good",
-			t.Name, keyLabel(c.Key), cand.at)}, nil
-	}
-	holds, err := r.holdsValues(ctx, c, table, cand)
-	if err != nil {
-		return outcome{}, err
-	}
-	if holds {
-		return r.restore(ctx, c, t, table, cand)
-	}
 	// The row the change names by its id is there, soft-deleted with other
 	// values: a second row cannot have the id.
 	if id, ok := c.New[t.ID]; ok && cand.id != "" && id.Ref == nil && !id.IsNull && id.Lit == cand.id {
@@ -162,11 +167,12 @@ func (r *runner) insertOrRestore(ctx context.Context, c fixturechange.Change, t 
 }
 
 // candidates are the soft-deleted rows an insert can restore, newest first,
-// at most two: the one the change's id names, when it writes one and a
+// at most two, locked FOR UPDATE: with values, those holding the key and
+// values; without, the one the change's id names, when it writes one and a
 // soft-deleted row with that id holds the key, and otherwise those holding
 // the key.
 func (r *runner) candidates(ctx context.Context, c fixturechange.Change, t fixturechange.Table,
-	table string) ([]deleted, error) {
+	table string, values fixturechange.Values) ([]deleted, error) {
 
 	types, err := r.colTypes(ctx, c.Model)
 	if err != nil {
@@ -181,14 +187,17 @@ func (r *runner) candidates(ctx context.Context, c fixturechange.Change, t fixtu
 		}
 		idExpr, order = idCol+"::text", order+", "+idCol+" DESC"
 	}
-	keyWhere, keyArgs, err := r.match(ctx, c.Model, c.Key, true)
+	keyWhere, keyArgs, err := r.matchAll(ctx, c.Model, c.Key, values)
 	if err != nil {
 		return nil, err
 	}
 	keyWhere, keyArgs = r.scopedDeleted(c.Model, keyWhere, keyArgs)
 	find := func(where string, args []any) ([]deleted, error) {
+		// Locked, so the place the row is found by holds it until the
+		// transaction ends: nothing can update, move or delete it, and no
+		// other row can take its place, before restore finds it there.
 		rows, err := r.tx.QueryContext(ctx, fmt.Sprintf("SELECT tableoid::text, ctid::text, %s, %s::text FROM %s "+
-			"WHERE %s ORDER BY %s LIMIT 2", idExpr, col, table, where, order), args...)
+			"WHERE %s ORDER BY %s LIMIT 2 FOR UPDATE", idExpr, col, table, where, order), args...)
 		if err != nil {
 			return nil, fmt.Errorf("look for a soft-deleted row of %s %s: %w", t.Name, keyLabel(c.Key), err)
 		}
@@ -208,29 +217,13 @@ func (r *runner) candidates(ctx context.Context, c fixturechange.Change, t fixtu
 		}
 		return out, rows.Close()
 	}
-	if id, ok := c.New[t.ID]; ok && idCol != "" && id.Ref == nil && !id.IsNull {
+	if id, ok := c.New[t.ID]; ok && values == nil && idCol != "" && id.Ref == nil && !id.IsNull {
 		found, err := find(keyWhere+" AND "+idCol+" = ?", append(append([]any{}, keyArgs...), id.Lit))
 		if err != nil || len(found) > 0 {
 			return found, err
 		}
 	}
 	return find(keyWhere, keyArgs)
-}
-
-// holdsValues reports whether a soft-deleted row holds every value an insert
-// writes: the natural key, and the id when the change writes one.
-func (r *runner) holdsValues(ctx context.Context, c fixturechange.Change, table string, d deleted) (bool, error) {
-	where, args, err := r.matchAll(ctx, c.Model, c.Key, c.New)
-	if err != nil {
-		return false, err
-	}
-	where, args = r.scopedDeleted(c.Model, where, args)
-	var n int64
-	if err := r.tx.QueryRowContext(ctx, fmt.Sprintf("SELECT count(*) FROM %s WHERE tableoid = ?::oid AND "+
-		"ctid = ?::tid AND %s", table, where), append([]any{d.rel, d.ctid}, args...)...).Scan(&n); err != nil {
-		return false, fmt.Errorf("compare the soft-deleted row with the change: %w", err)
-	}
-	return n > 0, nil
 }
 
 // restore sets a soft-deleted row's soft delete column back to NULL. It goes
