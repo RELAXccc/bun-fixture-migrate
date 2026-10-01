@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // State is the state file: the fixture file as the generated migrations leave
@@ -33,6 +35,22 @@ type State struct {
 	Files []FixtureFile
 	// Migration names the migration that last wrote the state, or "baseline".
 	Migration string
+	// Base is the newest fixture migration the migrations directory held when
+	// the state was written, leaving out Migration itself: the history this
+	// state was built on. generate names a migration after every other one,
+	// so as long as nothing was merged, no fixture migration sorts between
+	// Base and Migration, nor after the newer of the two. One that does was
+	// generated against a state this one never saw. Empty when the directory
+	// held none, and in a state file of format 1, which did not record it.
+	Base string
+	// LeftOut are the changes generate -allow-partial refused, one sentence
+	// each. Files already holds them, so generate does not see them again;
+	// they are listed here so that nothing forgets them until baseline -force
+	// says a migration somebody wrote by hand makes them.
+	LeftOut []string
+	// Format is the format DecodeState read: 1 for a state file written
+	// before the format was numbered. Encode always writes StateFormat.
+	Format int
 }
 
 // FixtureFile is one fixture file: its path as the configuration spells it,
@@ -45,64 +63,272 @@ type FixtureFile struct {
 // ErrNoState is what ReadState returns for a state file that does not exist.
 var ErrNoState = errors.New("no state file")
 
+// StateFormat is the format Encode writes.
+//
+// Format 1 put each fixture file after a marker line, and a reader found the
+// next file by looking for the next marker, so a fixture file holding such a
+// line was split in the wrong place under a checksum that still matched; and
+// the name of the migration that wrote it was outside the checksum. Format 2
+// says how many lines each file has and covers everything but the comment on
+// top with the checksum.
+const StateFormat = 2
+
 const (
-	stateMarker     = "# ----- the fixture file, as the migrations leave a database -----"
-	fileMarkerStart = "# ----- fixture file: "
-	fileMarkerEnd   = " -----"
-	stateHeader     = `# bun-fixture-migrate state file. Do not edit it by hand.
+	stateHeader = `# bun-fixture-migrate state file. Do not edit it by hand.
 #
 # It is the fixture file as the generated migrations leave a database.
 # "generate" diffs the fixture file against it, not against git, and rewrites
 # it with every migration it writes. "baseline" rewrites it without writing a
 # migration, for a change you migrated by hand.
 #
-# Two branches that each generate a migration both change the two lines below,
-# so their merge conflicts here, on purpose. Keep both migrations, check with
+# Two branches that each generate a migration both change the lines below, so
+# their merge conflicts here, on purpose. Keep both migrations, check with
 # "bun-fixture-migrate plan" against a copy of production that they do not
-# change the same rows, then run "bun-fixture-migrate baseline" on the merged
-# fixture file.
+# change the same rows, then take either side of this file and run
+# "bun-fixture-migrate baseline -force" on the merged fixture file.
 #
 `
+	formatPrefix    = "# format: "
+	migrationPrefix = "# migration: "
+	basePrefix      = "# base: "
+	leftOutPrefix   = "# left out: "
+	sumPrefix       = "# sha256: "
+	sectionPrefix   = "# ----- "
+	sectionSuffix   = " -----"
+
+	// The markers of format 1.
+	stateMarker     = "# ----- the fixture file, as the migrations leave a database -----"
+	fileMarkerStart = "# ----- fixture file: "
+	fileMarkerEnd   = " -----"
 )
 
-// Encode renders the state file. One fixture file is written after a single
-// marker line; several each after a line naming the file, which a line of the
-// files themselves cannot be mistaken for as long as none of them contains
-// such a comment. The checksum covers everything after it.
+// Encode renders the state file: a comment saying what it is, the fields,
+// the checksum, and each fixture file after a line giving its length and its
+// path. The checksum covers every byte after the comment but its own line.
+// A fixture file is copied verbatim, so the state file parses as the fixture
+// files do; it ends in a newline, which changes nothing.
 func (s State) Encode() []byte {
-	var rest bytes.Buffer
-	if len(s.Files) == 1 {
-		rest.WriteString(stateMarker + "\n")
-		rest.Write(normalizeNewlines(s.Files[0].Data))
-	} else {
-		for _, f := range s.Files {
-			rest.WriteString(fileMarkerStart + f.Path + fileMarkerEnd + "\n")
-			rest.Write(withFinalNewline(normalizeNewlines(f.Data)))
-		}
+	var meta bytes.Buffer
+	fmt.Fprintf(&meta, "%s%d\n", formatPrefix, StateFormat)
+	fmt.Fprintf(&meta, "%s%s\n", migrationPrefix, stateValue(s.Migration))
+	if s.Base != "" {
+		fmt.Fprintf(&meta, "%s%s\n", basePrefix, stateValue(s.Base))
+	}
+	for _, line := range s.LeftOut {
+		fmt.Fprintf(&meta, "%s%s\n", leftOutPrefix, stateValue(line))
+	}
+	var files bytes.Buffer
+	for _, f := range s.Files {
+		data := withFinalNewline(normalizeNewlines(f.Data))
+		fmt.Fprintf(&files, "%s%s of %s%s\n", sectionPrefix, lineCount(bytes.Count(data, []byte("\n"))),
+			stateValue(f.Path), sectionSuffix)
+		files.Write(data)
 	}
 	var b bytes.Buffer
 	b.WriteString(stateHeader)
-	fmt.Fprintf(&b, "# migration: %s\n", s.Migration)
-	fmt.Fprintf(&b, "# sha256: %s\n", checksum(bodyOf(rest.Bytes())))
-	b.Write(rest.Bytes())
+	b.Write(meta.Bytes())
+	fmt.Fprintf(&b, "%s%s\n", sumPrefix, checksum(append(meta.Bytes(), files.Bytes()...)))
+	b.Write(files.Bytes())
 	return b.Bytes()
 }
 
-// bodyOf is what the checksum covers: for one file, its content after the
-// marker line, as it always was; for several, the markers and the files.
-func bodyOf(rest []byte) []byte {
-	if bytes.HasPrefix(rest, []byte(stateMarker+"\n")) {
-		return rest[len(stateMarker)+1:]
+func lineCount(n int) string {
+	if n == 1 {
+		return "1 line"
 	}
-	return rest
+	return strconv.Itoa(n) + " lines"
+}
+
+// stateValue is a field as the state file writes it: as it is when that reads
+// back as the same text, quoted as a Go string otherwise, so that no value can
+// end its line early or start with a quote it did not have.
+func stateValue(v string) string {
+	plain := v != "" && v == strings.TrimSpace(v) && !strings.HasPrefix(v, `"`) && utf8.ValidString(v)
+	for _, r := range v {
+		if r < 0x20 || r == 0x7f {
+			plain = false
+		}
+	}
+	if plain {
+		return v
+	}
+	return strconv.Quote(v)
+}
+
+func readStateValue(v string) (string, error) {
+	if !strings.HasPrefix(v, `"`) {
+		return v, nil
+	}
+	return strconv.Unquote(v)
 }
 
 // DecodeState reads a state file and checks it against its own checksum. A
 // state that does not match is refused rather than used: a wrong base state
 // produces a migration that looks right and is not.
+//
+// It reads both formats. A state file of format 1 is still what the release
+// that wrote it vouched for, and is replaced by format 2 the next time
+// generate or baseline writes it.
 func DecodeState(data []byte) (State, error) {
 	data = normalizeNewlines(data)
-	var s State
+	s, err := decodeAnyState(data)
+	if err != nil && conflicted(data) {
+		return State{}, errStateConflict
+	}
+	return s, err
+}
+
+func decodeAnyState(data []byte) (State, error) {
+	offset := 0
+	for _, raw := range bytes.SplitAfter(data, []byte("\n")) {
+		line := strings.TrimSuffix(string(raw), "\n")
+		switch {
+		case strings.HasPrefix(line, formatPrefix):
+			return decodeState(data[offset:])
+		case line == stateMarker || strings.HasPrefix(line, fileMarkerStart):
+			return decodeStateFormat1(data)
+		case !strings.HasPrefix(line, "#"):
+			// The comment on top is over, and no field was in it.
+			return State{}, errNotState
+		}
+		offset += len(raw)
+	}
+	return State{}, errNotState
+}
+
+var errNotState = errors.New("this is not a state file bun-fixture-migrate wrote: the marker line is missing")
+
+// errStateConflict is a merge that stopped in the state file, which it does
+// on purpose when two branches each generated a migration.
+var errStateConflict = errors.New("the state file holds git's conflict markers: two branches each generated a " +
+	"migration from the same state. Keep both migrations, take either side of the state file " +
+	"(git checkout --ours or --theirs), then record the merged fixture file with baseline -force")
+
+// conflicted reports whether git left conflict markers in a file. A fixture
+// file cannot hold such a line: at the start of a line of a YAML sequence it
+// is not YAML.
+func conflicted(data []byte) bool {
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == "=======" || strings.HasPrefix(line, "<<<<<<< ") || strings.HasPrefix(line, ">>>>>>> ") ||
+			strings.HasPrefix(line, "||||||| ") {
+			return true
+		}
+	}
+	return false
+}
+
+// errStateEdited is the checksum's verdict.
+var errStateEdited = errors.New("the state file does not match its own checksum, so it was edited by hand " +
+	"or merged line by line. Take it back from git, or rewrite it with baseline once you know which " +
+	"state the migrations leave a database in")
+
+// decodeState reads format 2 from its format line on. Every line ends in a
+// newline, so an editor that drops the last one has changed nothing.
+func decodeState(data []byte) (State, error) {
+	lines := bytes.SplitAfter(withFinalNewline(data), []byte("\n"))
+	lines = lines[:len(lines)-1] // what follows the last newline: nothing
+	s := State{}
+	var meta bytes.Buffer
+	sum, i := "", 0
+	for ; i < len(lines) && sum == ""; i++ {
+		line := strings.TrimSuffix(string(lines[i]), "\n")
+		if v, ok := strings.CutPrefix(line, sumPrefix); ok {
+			sum = strings.TrimSpace(v)
+			if sum == "" {
+				return State{}, fmt.Errorf("the state file has an empty checksum line")
+			}
+			continue
+		}
+		meta.Write(lines[i])
+		if v, ok := strings.CutPrefix(line, formatPrefix); ok && i == 0 {
+			n, err := strconv.Atoi(strings.TrimSpace(v))
+			if err != nil || n < 2 {
+				return State{}, fmt.Errorf("the state file says it is format %q, which no release of bun-fixture-migrate "+
+					"wrote", strings.TrimSpace(v))
+			}
+			if n > StateFormat {
+				return State{}, fmt.Errorf("the state file is format %d, written by a newer bun-fixture-migrate than this "+
+					"one, which reads up to format %d. Use the release the project uses", n, StateFormat)
+			}
+			s.Format = n
+			continue
+		}
+		var field *string
+		var value string
+		switch {
+		case strings.HasPrefix(line, migrationPrefix):
+			field, value = &s.Migration, line[len(migrationPrefix):]
+		case strings.HasPrefix(line, basePrefix):
+			field, value = &s.Base, line[len(basePrefix):]
+		case strings.HasPrefix(line, leftOutPrefix):
+			s.LeftOut = append(s.LeftOut, "")
+			field, value = &s.LeftOut[len(s.LeftOut)-1], line[len(leftOutPrefix):]
+		default:
+			return State{}, fmt.Errorf("the state file has a line this release does not know where its fields are: %q", line)
+		}
+		v, err := readStateValue(value)
+		if err != nil {
+			return State{}, fmt.Errorf("the state file has a field that is not a valid quoted string: %q", line)
+		}
+		*field = v
+	}
+	if sum == "" {
+		return State{}, fmt.Errorf("the state file has no checksum line")
+	}
+	rest := bytes.Join(lines[i:], nil)
+	if checksum(append(meta.Bytes(), rest...)) != sum {
+		return State{}, errStateEdited
+	}
+	for i < len(lines) {
+		line := strings.TrimSuffix(string(lines[i]), "\n")
+		n, path, ok := parseSection(line)
+		if !ok {
+			return State{}, fmt.Errorf("the state file has %q where a fixture file should start", line)
+		}
+		i++
+		if i+n > len(lines) {
+			return State{}, fmt.Errorf("the state file ends inside the fixture file %s", path)
+		}
+		s.Files = append(s.Files, FixtureFile{Path: path, Data: bytes.Join(lines[i:i+n], nil)})
+		i += n
+	}
+	return s, nil
+}
+
+// parseSection reads the line before a fixture file in format 2:
+// "# ----- 12 lines of fixtures/plans.yml -----".
+func parseSection(line string) (n int, path string, ok bool) {
+	rest, ok := strings.CutPrefix(line, sectionPrefix)
+	if !ok || !strings.HasSuffix(rest, sectionSuffix) {
+		return 0, "", false
+	}
+	rest = strings.TrimSuffix(rest, sectionSuffix)
+	count, rest, ok := strings.Cut(rest, " ")
+	if !ok {
+		return 0, "", false
+	}
+	n, err := strconv.Atoi(count)
+	if err != nil || n < 0 || strconv.Itoa(n) != count {
+		return 0, "", false
+	}
+	word := "lines of "
+	if n == 1 {
+		word = "line of "
+	}
+	if rest, ok = strings.CutPrefix(rest, word); !ok {
+		return 0, "", false
+	}
+	path, err = readStateValue(rest)
+	if err != nil {
+		return 0, "", false
+	}
+	return n, path, true
+}
+
+// decodeStateFormat1 reads a state file written before the format was
+// numbered, as that release read it.
+func decodeStateFormat1(data []byte) (State, error) {
+	s := State{Format: 1}
 	var sum string
 	start := -1
 	lines := bytes.SplitAfter(data, []byte("\n"))
@@ -113,25 +339,23 @@ func DecodeState(data []byte) (State, error) {
 			start = offset
 			break
 		}
-		if v, ok := strings.CutPrefix(line, "# migration: "); ok {
+		if v, ok := strings.CutPrefix(line, migrationPrefix); ok {
 			s.Migration = strings.TrimSpace(v)
 		}
-		if v, ok := strings.CutPrefix(line, "# sha256: "); ok {
+		if v, ok := strings.CutPrefix(line, sumPrefix); ok {
 			sum = strings.TrimSpace(v)
 		}
 		offset += len(raw)
 	}
 	if start < 0 {
-		return State{}, fmt.Errorf("this is not a state file bun-fixture-migrate wrote: the marker line is missing")
+		return State{}, errNotState
 	}
 	if sum == "" {
 		return State{}, fmt.Errorf("the state file has no checksum line")
 	}
 	rest := data[start:]
 	if checksum(bodyOf(rest)) != sum {
-		return State{}, fmt.Errorf("the state file does not match its own checksum, so it was edited by hand " +
-			"or merged line by line. Take it back from git, or rewrite it with baseline once you know which " +
-			"state the migrations leave a database in")
+		return State{}, errStateEdited
 	}
 	if bytes.HasPrefix(rest, []byte(stateMarker+"\n")) {
 		s.Files = []FixtureFile{{Data: bodyOf(rest)}}
@@ -146,9 +370,21 @@ func DecodeState(data []byte) (State, error) {
 			current = &s.Files[len(s.Files)-1]
 			continue
 		}
+		if current == nil {
+			return State{}, fmt.Errorf("the state file has %q where a fixture file should start", line)
+		}
 		current.Data = append(current.Data, raw...)
 	}
 	return s, nil
+}
+
+// bodyOf is what the checksum of format 1 covers: for one file, its content
+// after the marker line; for several, the markers and the files.
+func bodyOf(rest []byte) []byte {
+	if bytes.HasPrefix(rest, []byte(stateMarker+"\n")) {
+		return rest[len(stateMarker)+1:]
+	}
+	return rest
 }
 
 // SameFiles reports whether two lists of fixture files hold the same content,

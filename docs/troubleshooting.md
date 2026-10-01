@@ -114,6 +114,15 @@ line. See [the runbook](production.md#the-state-file-was-edited-or-lost).
 **`this is not a state file bun-fixture-migrate wrote: the marker line is missing`.** `state:` points
 at a fixture file, or the file was replaced. Check the path.
 
+**`the state file holds git's conflict markers`.** Two branches each generated a migration, and the
+merge stopped in the state file, as it is meant to. See
+[the runbook](production.md#the-state-file-conflicts-in-a-merge).
+
+**`the state file is format 3, written by a newer bun-fixture-migrate than this one`.** Somebody
+generated with a newer release. Use the release the project pins. A state file written before the
+format was numbered still reads, and is rewritten in the current format the next time `generate` or
+`baseline` writes it.
+
 **`no state file at ... yet, so this diffs against git HEAD`.** Not an error: until `baseline` or the
 first `generate` writes one, the base is the committed fixture file.
 

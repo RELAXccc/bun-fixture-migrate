@@ -1,0 +1,30 @@
+# bun-fixture-migrate state file. Do not edit it by hand.
+#
+# It is the fixture file as the generated migrations leave a database.
+# "generate" diffs the fixture file against it, not against git, and rewrites
+# it with every migration it writes. "baseline" rewrites it without writing a
+# migration, for a change you migrated by hand.
+#
+# Two branches that each generate a migration both change the two lines below,
+# so their merge conflicts here, on purpose. Keep both migrations, check with
+# "bun-fixture-migrate plan" against a copy of production that they do not
+# change the same rows, then run "bun-fixture-migrate baseline" on the merged
+# fixture file.
+#
+# migration: baseline
+# sha256: 7d9c677b62f9edb8cab92a90a400df129e72772c5af0009137ba42034282138f
+# ----- fixture file: fixtures/currencies.yml -----
+- model: Currency
+  rows:
+    - _id: eur
+      id: 1
+      code: EUR
+      symbol: "E"
+# ----- fixture file: fixtures/plans.yml -----
+- model: Plan
+  rows:
+    - _id: team
+      id: 2
+      name: team
+      currency_id: '{{ $.Currency.eur.ID }}'
+      price_cents: 2000
