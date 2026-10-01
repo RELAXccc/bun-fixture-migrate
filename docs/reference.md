@@ -469,9 +469,11 @@ every row: a fixture file's ids would collide with it. The files may still carry
 references to resolve against and for a rename between two revisions of them to be told from an
 insert and a delete; a migration never writes one, nothing compares one with a database's, and id
 drift is never reported. An insert leaves the id to the database, a rename finds its row by the old
-natural key alone, and an export writes no id and names the rows by their anchors. A fresh seed
-with `dbfixture` writes the files' ids, as it always does: move the sequence after it with
-`fixtureapply.SyncSequences`.
+natural key alone, and an export writes no id and names the rows by their anchors. Against a
+database, where the files' ids say nothing, a changed key is a row only the database holds and one
+only the files hold, as for a file without ids. The id column needs a sequence, an identity or a
+default, or an insert without the id fails. A fresh seed with `dbfixture` writes the files' ids, as
+it always does: move the sequence after it with `fixtureapply.SyncSequences`.
 
 What a revert cannot do: a delete is put back from its guard, which an `insert_only` column is not
 in, so `Revert` inserts the row with the column's default there, and fails where the column is
