@@ -17,7 +17,24 @@ type Refusal struct {
 	Reason string
 }
 
-func (r Refusal) String() string { return r.Model + " " + r.Key + ": " + r.Reason }
+func (r Refusal) String() string { return r.Where() + ": " + r.Reason }
+
+// Where names the row a refusal is about: its key's label, which starts with
+// the model already ("Plan/name=team"), or the model and what else names the
+// row ("Plan id 3").
+func (r Refusal) Where() string { return rowWhere(r.Model, r.Key) }
+
+// rowWhere names a row of a model for a report without saying the model
+// twice.
+func rowWhere(model, row string) string {
+	switch {
+	case row == "":
+		return model
+	case strings.HasPrefix(row, model+"/"):
+		return row
+	}
+	return model + " " + row
+}
 
 // Result is what Compute found.
 type Result struct {
@@ -213,6 +230,21 @@ func undecided(label string, m *Model, c fixturechange.Change, prev, cur *Entry)
 			}
 		}
 	}
+	for _, e := range []*Entry{prev, cur} {
+		if e == nil {
+			continue
+		}
+		for _, col := range sortedSources(e.copied) {
+			if carried(col) {
+				src := e.copied[col]
+				return Refusal{c.Model, label, fmt.Sprintf("%s copies %s of a %s row, and dbfixture stores what that "+
+					"field holds as fmt prints it, which only its type says: a string or an integer as it is, a "+
+					"float64 of 100000000 as 1e+08, a time.Time with its zone. With the database configured (and "+
+					"without -no-lint) the tool reads the column's type and decides; or write the value here",
+					col, src.column, src.model)}, true
+			}
+		}
+	}
 	cols := undecidedColumns(m, prev, cur, func(col, _, _ string) bool { return carried(col) })
 	if len(cols) == 0 {
 		return Refusal{}, false
@@ -252,7 +284,7 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 	// more than one file — must get the same answer both times.
 	old = old.clone()
 	res := &Result{Tables: fixturechange.Tables{}, Order: order, Base: old.Source, Head: next.Source}
-	var renames, inserts, updates, deletes []fixturechange.Change
+	var renames, inserts, updates, deletes []planned
 
 	// First pass over every model: decide the identity questions before any
 	// value is compared. A rename and a renumbering both make a whole row
@@ -266,13 +298,20 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 	skipped := map[string]map[string]bool{}
 	renamed := map[string]bool{}
 	shared := sharedRefs(cfg, old, next)
+	refs := newRefIndex(cfg, old)
 	for _, model := range order {
+		// A row that keeps its key and changes the value it is named by
+		// renames nothing, but every row pointing at it named it by the old
+		// value, and will by the new one. The base state follows it here, as
+		// it follows a rename, so those rows do not differ in that alone.
+		movedRefs(cfg, model, old, next, shared, refs)
 		skip := map[string]bool{}
-		if err := identity(cfg, model, old, next, res, skip, renamed, shared, &renames); err != nil {
+		if err := identity(cfg, model, old, next, res, skip, renamed, shared, refs, &renames); err != nil {
 			return nil, err
 		}
 		skipped[model] = skip
 	}
+	ids := idsOf(next)
 	// refused is every reason the diff has to leave a change out because of
 	// what it points at, or the id it writes.
 	refused := func(c fixturechange.Change) (Refusal, bool) {
@@ -282,7 +321,7 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 		if r, ok := refusedByShared(shared, c); ok {
 			return r, true
 		}
-		return refusedBySharedID(cfg, next, c)
+		return refusedBySharedID(cfg, ids, c)
 	}
 
 	for _, model := range order {
@@ -324,7 +363,7 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 					res.Refusals = append(res.Refusals, r)
 					continue
 				}
-				inserts = append(inserts, change)
+				inserts = append(inserts, planned{change, nil, cur[0].Full(m)})
 				continue
 			}
 			change, refusal := diffRow(model, prev[0], cur[0])
@@ -347,7 +386,7 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 				res.Refusals = append(res.Refusals, r)
 				continue
 			}
-			updates = append(updates, *change)
+			updates = append(updates, planned{*change, prev[0].Full(m), cur[0].Full(m)})
 		}
 
 		for _, k := range oldOrder {
@@ -380,14 +419,16 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 				res.Refusals = append(res.Refusals, r)
 				continue
 			}
-			deletes = append(deletes, change)
+			deletes = append(deletes, planned{change, prev[0].Full(m), nil})
 		}
 	}
 
 	for i, j := 0, len(deletes)-1; i < j; i, j = i+1, j-1 {
 		deletes[i], deletes[j] = deletes[j], deletes[i]
 	}
-	res.Changes = orderChanges(cfg, uniqueColumns(cfg, old, next), renames, deletes, updates, inserts)
+	var notes []Refusal
+	res.Changes, notes = orderChanges(cfg, uniqueIndexes(cfg, old, next), renames, deletes, updates, inserts)
+	res.Warnings = append(res.Warnings, notes...)
 	res.Tables = tablesFor(cfg, res.Changes)
 	for _, list := range [][]Refusal{res.Refusals, res.Warnings} {
 		sort.SliceStable(list, func(i, j int) bool {
@@ -412,7 +453,7 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 // involved are left out of the value diff either way, because their keys no
 // longer line up.
 func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
-	skip map[string]bool, renamed map[string]bool, shared map[string][]string, renames *[]fixturechange.Change) error {
+	skip map[string]bool, renamed map[string]bool, shared map[string][]string, refs *refIndex, renames *[]planned) error {
 
 	m := cfg.Models[model]
 	// An id two rows of one snapshot share names neither of them: it is a
@@ -445,14 +486,9 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 		}
 	}
 
-	for _, prev := range old.Entries[model] {
-		if prev.ID == "" || sharedID[prev.ID] {
-			continue
-		}
-		cur, ok := newByID[prev.ID]
-		if !ok || cur.KeyStr == prev.KeyStr {
-			continue
-		}
+	// rename settles a row whose key changed: prev in the base state, cur in
+	// the new one. where names the row in a refusal.
+	rename := func(prev, cur *Entry, where string) error {
 		if keyString(model, cur.Key) == keyString(model, prev.Key) {
 			// Only the spelling of a key value changed, 0012 to 012: the
 			// same key in a numeric column and a rename in a text one.
@@ -460,13 +496,13 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 			if r, ok := respelled(model, m, prev, cur); ok {
 				res.Refusals = append(res.Refusals, r)
 			}
-			continue
+			return nil
 		}
 		// A rename into a name another row still holds cannot be written in
 		// any order this tool can work out: two rows swapping names need one
 		// of them parked somewhere first.
 		occupied := false
-		if other, ok := oldByKey[cur.KeyStr]; ok && other.ID != prev.ID {
+		if other, ok := oldByKey[cur.KeyStr]; ok && other != prev && (other.ID != prev.ID || prev.ID == "") {
 			occupied = true
 		}
 		if cfg.Policy.Renames == RenameUpdate && !occupied {
@@ -482,16 +518,21 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 						renamed[model+"\x00"+v] = true
 					}
 				}
-				continue
+				return nil
 			}
-			*renames = append(*renames, change)
+			before := prev.Full(m)
+			after := copyValues(before)
+			for col, v := range change.New {
+				after[col] = v
+			}
+			*renames = append(*renames, planned{change, before, after})
 			// Everything that points at this row named it by its old value.
 			// The id behind that name does not change, so no dependent row
 			// needs a statement of its own; what it needs is for the base
 			// state to stop calling the row by a name that will not exist by
 			// the time the rest of the migration runs.
 			if from, to := prev.refValue(m), cur.refValue(m); from != to && from != "" && to != "" {
-				rewriteRefs(cfg, old, model, from, to)
+				refs.rewrite(model, from, to)
 			}
 			// The rename covers the key columns. The base row now carries the
 			// new key, so the ordinary diff lines the two up and writes
@@ -499,10 +540,11 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 			for col := range cur.Key {
 				if v, ok := cur.Cells[col]; ok {
 					prev.Cells[col] = v
+					refs.add(model, prev, col)
 				}
 			}
-			prev.Key, prev.KeyStr = cur.Key, cur.KeyStr
-			continue
+			prev.Key, prev.KeyStr, prev.folded = cur.Key, cur.KeyStr, cur.folded
+			return nil
 		}
 		skip[prev.KeyStr] = true
 		skip[cur.KeyStr] = true
@@ -512,16 +554,43 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 			}
 		}
 		if occupied && cfg.Policy.Renames == RenameUpdate {
-			res.Refusals = append(res.Refusals, Refusal{model, m.ID + " " + prev.ID, fmt.Sprintf(
+			res.Refusals = append(res.Refusals, Refusal{model, where, fmt.Sprintf(
 				"renamed from %s to %s, but another row still holds %s in the base state. Two rows cannot swap "+
 					"names in one step: park one of them under a third name first, in a migration of its own",
 				prev.label(model), cur.label(model), cur.label(model))})
-			continue
+			return nil
 		}
-		res.Refusals = append(res.Refusals, Refusal{model, m.ID + " " + prev.ID, fmt.Sprintf(
+		res.Refusals = append(res.Refusals, Refusal{model, where, fmt.Sprintf(
 			"renamed from %s to %s. An insert plus a delete is not a rename: rows elsewhere point at this one "+
 				"and so does whatever knows the old name outside the database. Hand-write the migration, or set "+
 				"policy.renames to update and run this again", prev.label(model), cur.label(model))})
+		return nil
+	}
+	for _, prev := range old.Entries[model] {
+		if prev.ID == "" || sharedID[prev.ID] {
+			continue
+		}
+		cur, ok := newByID[prev.ID]
+		if !ok || cur.KeyStr == prev.KeyStr {
+			continue
+		}
+		if err := rename(prev, cur, m.ID+" "+prev.ID); err != nil {
+			return err
+		}
+	}
+	// A key that only changed into another spelling of the same value to its
+	// type, go to Go in a citext column, names the same row: the database
+	// finds it by either. Without an id on both sides to say so, the rows
+	// are paired by the key as the type compares it (Entry.folded), and the
+	// new spelling is a rename, which policy.renames decides.
+	for _, p := range foldPairs(model, old, next, skip, sharedID) {
+		where := p.cur.label(model)
+		if p.prev.ID != "" {
+			where = m.ID + " " + p.prev.ID
+		}
+		if err := rename(p.prev, p.cur, where); err != nil {
+			return err
+		}
 	}
 
 	if cfg.Policy.IDDrift == ModeIgnore {
@@ -569,30 +638,171 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 	return nil
 }
 
-// rewriteRefs renames a row inside a snapshot: every reference to it, and
-// every natural key made out of one, starts calling it by its new name.
-func rewriteRefs(cfg *Config, snap *Snapshot, model, from, to string) {
-	for _, other := range snap.Order {
-		m := cfg.Models[other]
-		if m == nil {
-			continue
-		}
-		for _, e := range snap.Entries[other] {
-			touched := false
-			for col, v := range e.Cells {
-				if v.Ref != nil && v.Ref.Model == model && v.Ref.Key == from {
-					e.Cells[col] = fixturechange.RefTo(model, to)
-					touched = true
-				}
-			}
-			if !touched {
-				continue
-			}
-			if key, err := keyOf(cfg, m, other, e.Full(m)); err == nil {
-				e.setKey(other, key)
+// refIndex finds the entries of a snapshot that point at a row, by the row's
+// model and ref value, so that renaming the row inside the snapshot touches
+// only the entries that name it: a rename in a table of 20,000 rows used to
+// look at every row of every model.
+type refIndex struct {
+	cfg  *Config
+	snap *Snapshot
+	uses map[string][]refUse // model + "\x00" + ref value -> the entries naming it
+}
+
+// refUse is a column of an entry that points at a row.
+type refUse struct {
+	model string
+	e     *Entry
+	col   string
+}
+
+func newRefIndex(cfg *Config, snap *Snapshot) *refIndex {
+	x := &refIndex{cfg: cfg, snap: snap, uses: map[string][]refUse{}}
+	for _, model := range snap.Order {
+		for _, e := range snap.Entries[model] {
+			for _, col := range sortedColumns(e.Cells) {
+				x.add(model, e, col)
 			}
 		}
 	}
+	return x
+}
+
+// add indexes a column of an entry, when it holds a reference: one the
+// entry was given after the index was built, by a rename of its key.
+func (x *refIndex) add(model string, e *Entry, col string) {
+	if ref := e.Cells[col].Ref; ref != nil {
+		k := ref.Model + "\x00" + ref.Key
+		x.uses[k] = append(x.uses[k], refUse{model, e, col})
+	}
+}
+
+// rewrite renames a row inside the snapshot: every reference to it, and
+// every natural key made out of one, starts calling it by its new name.
+func (x *refIndex) rewrite(model, from, to string) {
+	k := model + "\x00" + from
+	uses := x.uses[k]
+	delete(x.uses, k)
+	var touched []refUse
+	seen := map[*Entry]bool{}
+	for _, u := range uses {
+		v := u.e.Cells[u.col]
+		if v.Ref == nil || v.Ref.Model != model || v.Ref.Key != from {
+			continue
+		}
+		u.e.Cells[u.col] = fixturechange.RefTo(model, to)
+		x.uses[model+"\x00"+to] = append(x.uses[model+"\x00"+to], u)
+		if !seen[u.e] {
+			seen[u.e] = true
+			touched = append(touched, u)
+		}
+	}
+	for _, u := range touched {
+		m := x.cfg.Models[u.model]
+		if m == nil {
+			continue
+		}
+		if key, err := keyOf(x.cfg, m, u.model, u.e.Full(m)); err == nil {
+			u.e.setKey(u.model, key)
+		}
+	}
+}
+
+// movedRefs follows, in the base state, the rows of a model that keep their
+// natural key and change the value a reference names them by: a country
+// keyed by its code whose name, the ref column, changes from Germany to
+// Deutschland. The row is the same, and so is every row pointing at it, by
+// id; but the base state names it Germany and the new state Deutschland, so
+// without this every such row would differ in that alone, and the change
+// set would have it wait for the country's update and the country wait for
+// it. A value more than one row holds, or one another row still holds, is
+// left alone: there the name says nothing about which row is meant.
+func movedRefs(cfg *Config, model string, old, next *Snapshot, shared map[string][]string, refs *refIndex) {
+	m := cfg.Models[model]
+	if m == nil || m.Ref == m.ID {
+		return
+	}
+	oldGroups, oldOrder := byKey(old.Entries[model])
+	newGroups, _ := byKey(next.Entries[model])
+	holders := map[string]int{}
+	for _, e := range old.Entries[model] {
+		if v := e.refValue(m); v != "" {
+			holders[v]++
+		}
+	}
+	type move struct{ from, to string }
+	var moves []move
+	for _, k := range oldOrder {
+		prev, cur := oldGroups[k], newGroups[k]
+		if len(prev) != 1 || len(cur) != 1 {
+			continue
+		}
+		p, c := prev[0], cur[0]
+		if p.ID != "" && c.ID != "" && p.ID != c.ID {
+			continue
+		}
+		from, to := p.refValue(m), c.refValue(m)
+		if from == "" || to == "" || from == to || holders[from] != 1 || holders[to] != 0 ||
+			len(shared[model+"\x00"+from]) > 0 || len(shared[model+"\x00"+to]) > 0 {
+			continue
+		}
+		if _, undecided := p.AsWritten[m.Ref]; undecided {
+			continue
+		}
+		if _, undecided := c.AsWritten[m.Ref]; undecided {
+			continue
+		}
+		moves = append(moves, move{from, to})
+	}
+	for _, mv := range moves {
+		refs.rewrite(model, mv.from, mv.to)
+	}
+}
+
+// foldPair is a row of the base state and a row of the new one whose keys
+// differ as text and are one value to the key's type.
+type foldPair struct{ prev, cur *Entry }
+
+// foldPairs pairs the rows of a model that are in one state only, by their
+// keys as the key's types compare them, where exactly one row of each state
+// holds such a key and no id says they are two rows.
+func foldPairs(model string, old, next *Snapshot, skip, sharedID map[string]bool) []foldPair {
+	inOld, inNew := map[string]bool{}, map[string]bool{}
+	for _, e := range old.Entries[model] {
+		inOld[e.KeyStr] = true
+	}
+	for _, e := range next.Entries[model] {
+		inNew[e.KeyStr] = true
+	}
+	group := func(entries []*Entry, other map[string]bool) (map[string][]*Entry, []string) {
+		out := map[string][]*Entry{}
+		var order []string
+		for _, e := range entries {
+			fold := e.foldKey(model)
+			if fold == "" || skip[e.KeyStr] || other[e.KeyStr] || sharedID[e.ID] {
+				continue
+			}
+			if _, seen := out[fold]; !seen {
+				order = append(order, fold)
+			}
+			out[fold] = append(out[fold], e)
+		}
+		return out, order
+	}
+	olds, order := group(old.Entries[model], inNew)
+	news, _ := group(next.Entries[model], inOld)
+	var out []foldPair
+	for _, fold := range order {
+		prev, cur := olds[fold], news[fold]
+		if len(prev) != 1 || len(cur) != 1 {
+			continue
+		}
+		if prev[0].ID != "" && cur[0].ID != "" {
+			// Two ids say whether these are one row; identity has listened.
+			continue
+		}
+		out = append(out, foldPair{prev[0], cur[0]})
+	}
+	return out
 }
 
 // refValue is the value a reference to this row carries: its ref column, or
@@ -611,8 +821,12 @@ func (e *Entry) refValue(m *Model) string {
 // renameChange writes a rename as what it is: an update of the key columns,
 // guarded by the id as well as by the old key, so it cannot land on a row that
 // merely happens to carry the old name.
+//
+// A row without an id, which only a key respelled in a type that holds both
+// spellings equal is taken for a rename of, is guarded by its old key alone:
+// that finds it under either spelling, and only it.
 func renameChange(m *Model, model string, prev, cur *Entry) (fixturechange.Change, error) {
-	if prev.ID == "" {
+	if prev.ID == "" && prev.foldKey(model) == "" {
 		return fixturechange.Change{}, fmt.Errorf("%s %s: a rename needs the row's %s", model, prev.label(model), m.ID)
 	}
 	oldVals, newVals := fixturechange.Values{}, fixturechange.Values{}
@@ -692,8 +906,10 @@ func modelOrder(cfg *Config, old, next *Snapshot) ([]string, error) {
 // topological sorts the nodes 0..n-1 of a graph so every node comes after the
 // nodes it waits for: waiting[i] is how many it waits for, next[i] the nodes
 // waiting for i. Of the nodes whose wait is over, the one of lowest rank goes
-// next. In a circle nothing's wait is ever over, and then the lowest-ranked
-// node left goes anyway, so the result is always every node once.
+// next. In a circle nothing's wait is ever over; then the lowest-ranked node
+// of a circle nothing outside it holds up goes anyway, and a node merely
+// waiting behind a circle keeps waiting for it. The result is always every
+// node once.
 func topological(waiting []int, next [][]int, rank func(int) int) []int {
 	waiting = append([]int(nil), waiting...)
 	ready := &rankedHeap{rank: rank}
@@ -706,12 +922,7 @@ func topological(waiting []int, next [][]int, rank func(int) int) []int {
 	out := make([]int, 0, len(waiting))
 	for len(out) < len(waiting) {
 		if ready.Len() == 0 {
-			stuck := -1
-			for i := range waiting {
-				if !done[i] && (stuck < 0 || rank(i) < rank(stuck)) {
-					stuck = i
-				}
-			}
+			stuck := stuckNode(done, next, rank)
 			waiting[stuck] = 0
 			heap.Push(ready, stuck)
 		}
@@ -728,6 +939,51 @@ func topological(waiting []int, next [][]int, rank func(int) int) []int {
 		}
 	}
 	return out
+}
+
+// stuckNode picks the node to break a circle at, when every node left waits
+// for another: the lowest-ranked of the circles that no node outside them
+// holds up. A node outside a circle that waits for one of its nodes is never
+// it, since breaking the circle first lets that node wait as it should.
+func stuckNode(done []bool, next [][]int, rank func(int) int) int {
+	n := len(done)
+	// The graph of the nodes left, numbered from 0.
+	var left []int
+	position := make([]int, n)
+	for i := range done {
+		position[i] = -1
+		if !done[i] {
+			position[i] = len(left)
+			left = append(left, i)
+		}
+	}
+	sub := make([][]int, len(left))
+	for p, i := range left {
+		for _, j := range next[i] {
+			if q := position[j]; q >= 0 {
+				sub[p] = append(sub[p], q)
+			}
+		}
+	}
+	comp := components(len(left), sub)
+	heldUp := map[int]bool{}
+	for p := range sub {
+		for _, q := range sub[p] {
+			if comp[p] != comp[q] {
+				heldUp[comp[q]] = true
+			}
+		}
+	}
+	stuck := -1
+	for p, i := range left {
+		if heldUp[comp[p]] {
+			continue
+		}
+		if stuck < 0 || rank(i) < rank(stuck) || (rank(i) == rank(stuck) && i < stuck) {
+			stuck = i
+		}
+	}
+	return stuck
 }
 
 // rankedHeap is a min-heap of nodes by rank, and by number between equal ranks.
@@ -752,11 +1008,27 @@ func (h *rankedHeap) Pop() any {
 	return x
 }
 
+// planned is a change with the whole row it changes, before and after, the
+// id included: a unique index over several columns orders changes by the
+// values it holds together, of which an update carries only the ones it
+// changes.
+type planned struct {
+	fixturechange.Change
+	before, after fixturechange.Values
+}
+
+// uniques are the unique indexes that order changes, per model, as column
+// lists, and the models whose indexes are guessed for want of the catalog.
+type uniques struct {
+	indexes map[string][][]string
+	guessed map[string]bool
+}
+
 // orderChanges puts a change set in an order the database accepts.
 //
 // The base order is renames, then deletes, then updates, then inserts, and
 // last the updates that point at a row inserted in the same set. A delete or
-// an update can free what an insert takes: a value of a unique column, or the
+// an update can free what an insert takes: a value of a unique index, or the
 // open end of a price that an exclusion constraint or a partial unique index
 // allows only once, so the old price has to be closed before the new one is
 // opened. Inserts follow the model order and the file's row order, deletes the
@@ -769,16 +1041,21 @@ func (h *rankedHeap) Pop() any {
 //   - a change removing a row, or the name a row is found by, waits for
 //     every change that still names it in its key or its old values: the
 //     child deleted or moved elsewhere goes first;
-//   - a change taking a value of a unique column (unique, see
-//     uniqueColumns) that another change of the same model gives up waits
-//     for it, so a unique value can move from one row to another in one set.
-//     A column whose values would have to wait for each other in a circle,
-//     two rows trading values, which no order allows, waits for nothing.
+//   - a change taking the values of a unique index (see uniqueIndexes) that
+//     another change of the same model gives up waits for it, so a value can
+//     move from one row to another in one set: a single column's value, or
+//     the values an index over several columns holds together, the position
+//     of an item in its list. An index whose values would have to wait for
+//     each other in a circle, two rows trading values, which no order allows,
+//     waits for nothing, and so does one whose waits would close a circle
+//     with the waits already taken, which are kept.
 //
 // Of the changes whose wait is over, the one first in the base order goes
-// next, so the base order stands wherever nothing forces another.
-func orderChanges(cfg *Config, unique map[string]map[string]bool,
-	renames, deletes, updates, inserts []fixturechange.Change) []fixturechange.Change {
+// next, so the base order stands wherever nothing forces another. The
+// indexes the catalog lists are taken first. Indexes guessed without it are
+// taken after them, and two guesses that would order changes in opposite
+// ways both give way, which the second result says.
+func orderChanges(cfg *Config, uq uniques, renames, deletes, updates, inserts []planned) ([]fixturechange.Change, []Refusal) {
 	refOf := func(model string, values fixturechange.Values) (string, bool) {
 		v, ok := values[cfg.Models[model].Ref]
 		if !ok || v.Ref != nil || v.IsNull {
@@ -804,7 +1081,7 @@ func orderChanges(cfg *Config, unique map[string]map[string]bool,
 			inserted[ref] = true
 		}
 	}
-	var early, late []fixturechange.Change
+	var early, late []planned
 	for _, c := range updates {
 		later := false
 		for _, ref := range refsIn(c.New) {
@@ -816,8 +1093,8 @@ func orderChanges(cfg *Config, unique map[string]map[string]bool,
 			early = append(early, c)
 		}
 	}
-	var changes []fixturechange.Change
-	for _, part := range [][]fixturechange.Change{renames, deletes, early, inserts, late} {
+	var changes []planned
+	for _, part := range [][]planned{renames, deletes, early, inserts, late} {
 		changes = append(changes, part...)
 	}
 	n := len(changes)
@@ -843,7 +1120,6 @@ func orderChanges(cfg *Config, unique map[string]map[string]bool,
 			}
 		}
 	}
-	type edge struct{ from, to int }
 	var edges []edge
 	for j, c := range changes {
 		for _, ref := range refsIn(c.Key, c.Old, c.New) {
@@ -862,109 +1138,158 @@ func orderChanges(cfg *Config, unique map[string]map[string]bool,
 		}
 	}
 
-	// The values each change gives up and takes, per model and column. A
-	// value is a node of its own between the changes freeing and taking it,
-	// which keeps the edges to one per change and value.
-	type column struct{ model, col string }
-	type moves struct{ freed, taken map[string][]int }
-	byColumn := map[column]*moves{}
-	note := func(c fixturechange.Change, col string, v fixturechange.Value, i int, free bool) {
-		if v.IsNull || !unique[c.Model][col] {
-			return
-		}
-		k := column{c.Model, col}
-		if byColumn[k] == nil {
-			byColumn[k] = &moves{freed: map[string][]int{}, taken: map[string][]int{}}
-		}
-		if free {
-			byColumn[k].freed[valueKey(v)] = append(byColumn[k].freed[valueKey(v)], i)
-		} else {
-			byColumn[k].taken[valueKey(v)] = append(byColumn[k].taken[valueKey(v)], i)
-		}
-	}
+	// The values each change gives up and takes, per unique index. A value
+	// is a node of its own between the changes freeing and taking it, which
+	// keeps the edges to one per change and value.
+	byModel := map[string][]int{}
 	for i, c := range changes {
-		switch c.Kind {
-		case fixturechange.Insert:
-			for col, v := range c.New {
-				note(c, col, v, i, false)
-			}
-		case fixturechange.Update:
-			for col, v := range c.New {
-				note(c, col, c.Old[col], i, true)
-				note(c, col, v, i, false)
-			}
-		case fixturechange.Delete:
-			for col, v := range c.Old {
-				note(c, col, v, i, true)
+		byModel[c.Model] = append(byModel[c.Model], i)
+	}
+	type index struct {
+		model string
+		cols  []string
+	}
+	var known, guessed []index
+	for _, model := range sortedKeysOfIndexes(uq.indexes) {
+		if len(byModel[model]) == 0 {
+			continue
+		}
+		for _, cols := range uq.indexes[model] {
+			if uq.guessed[model] {
+				guessed = append(guessed, index{model, cols})
+			} else {
+				known = append(known, index{model, cols})
 			}
 		}
 	}
-	columns := make([]column, 0, len(byColumn))
-	for k := range byColumn {
-		columns = append(columns, k)
-	}
-	sort.Slice(columns, func(i, j int) bool {
-		if columns[i].model != columns[j].model {
-			return columns[i].model < columns[j].model
-		}
-		return columns[i].col < columns[j].col
-	})
 	nodes := n
-	graph := func(edges []edge) ([]int, [][]int) {
-		waiting, next := make([]int, nodes), make([][]int, nodes)
-		for _, e := range edges {
-			waiting[e.to]++
-			next[e.from] = append(next[e.from], e.to)
-		}
-		return waiting, next
-	}
-	circular := func(edges []edge) bool {
-		waiting, next := graph(edges)
-		var ready []int
-		for i, w := range waiting {
-			if w == 0 {
-				ready = append(ready, i)
-			}
-		}
-		seen := 0
-		for len(ready) > 0 {
-			i := ready[len(ready)-1]
-			ready = ready[:len(ready)-1]
-			seen++
-			for _, j := range next[i] {
-				if waiting[j]--; waiting[j] == 0 {
-					ready = append(ready, j)
+	edgesOf := func(ix index) []edge {
+		freed, taken := map[string][]int{}, map[string][]int{}
+		for _, i := range byModel[ix.model] {
+			c := changes[i]
+			switch c.Kind {
+			case fixturechange.Insert:
+				if t, ok := tupleOf(c.after, ix.cols); ok {
+					taken[t] = append(taken[t], i)
+				}
+			case fixturechange.Delete:
+				if t, ok := tupleOf(c.before, ix.cols); ok {
+					freed[t] = append(freed[t], i)
+				}
+			case fixturechange.Update:
+				changed := false
+				for _, col := range ix.cols {
+					_, inNew := c.New[col]
+					changed = changed || inNew
+				}
+				if !changed {
+					continue
+				}
+				if t, ok := tupleOf(c.before, ix.cols); ok {
+					freed[t] = append(freed[t], i)
+				}
+				if t, ok := tupleOf(c.after, ix.cols); ok {
+					taken[t] = append(taken[t], i)
 				}
 			}
 		}
-		return seen < nodes
-	}
-	for _, k := range columns {
-		mv := byColumn[k]
 		var more []edge
-		for _, value := range sortedKeysOfInts(mv.freed) {
-			taken := mv.taken[value]
-			if len(taken) == 0 {
+		for _, value := range sortedKeysOfInts(freed) {
+			if len(taken[value]) == 0 {
 				continue
 			}
 			via := nodes
 			nodes++
-			for _, i := range mv.freed[value] {
+			from := map[int]bool{}
+			for _, i := range freed[value] {
+				from[i] = true
 				more = append(more, edge{i, via})
 			}
-			for _, j := range taken {
-				more = append(more, edge{via, j})
+			for _, j := range taken[value] {
+				if !from[j] {
+					more = append(more, edge{via, j})
+				}
 			}
 		}
+		return more
+	}
+	closes := func(base, more []edge) bool {
+		next := make([][]int, nodes)
+		for _, list := range [][]edge{base, more} {
+			for _, e := range list {
+				next[e.from] = append(next[e.from], e.to)
+			}
+		}
+		comp := components(nodes, next)
+		for _, e := range more {
+			if comp[e.from] == comp[e.to] {
+				return true
+			}
+		}
+		return false
+	}
+	join := func(lists ...[]edge) []edge {
+		var out []edge
+		for _, l := range lists {
+			out = append(out, l...)
+		}
+		return out
+	}
+	for _, ix := range known {
+		if more := edgesOf(ix); len(more) > 0 && !closes(edges, more) {
+			edges = join(edges, more)
+		}
+	}
+	// A guess that closes a circle on its own, or with what is known, gives
+	// way as a known index would. One that closes it only with other
+	// guesses contradicts them, and nothing says which of them is right.
+	base := edges
+	type taken struct {
+		ix   index
+		more []edge
+	}
+	var kept []taken
+	var notes []Refusal
+	for _, ix := range guessed {
+		more := edgesOf(ix)
 		if len(more) == 0 {
 			continue
 		}
-		if candidate := append(append([]edge(nil), edges...), more...); !circular(candidate) {
-			edges = candidate
+		if !closes(edges, more) {
+			kept = append(kept, taken{ix, more})
+			edges = join(edges, more)
+			continue
 		}
+		if closes(base, more) {
+			continue
+		}
+		var blamed []string
+		var still []taken
+		for _, k := range kept {
+			if closes(join(base, k.more), more) {
+				blamed = append(blamed, strings.Join(k.ix.cols, ", "))
+				continue
+			}
+			still = append(still, k)
+		}
+		kept = still
+		edges = base
+		for _, k := range kept {
+			edges = join(edges, k.more)
+		}
+		blamed = append(blamed, strings.Join(ix.cols, ", "))
+		notes = append(notes, Refusal{Model: ix.model, Reason: fmt.Sprintf(
+			"without the database the tool guesses which columns hold unique values, and the guesses %s would "+
+				"have its changes wait for each other in opposite orders, so none of them orders them: if the "+
+				"migration fails on a unique index, run generate with the database configured, which reads the "+
+				"indexes and orders the changes by them", strings.Join(blamed, " and "))})
 	}
 
-	waiting, next := graph(edges)
+	waiting, next := make([]int, nodes), make([][]int, nodes)
+	for _, e := range edges {
+		waiting[e.to]++
+		next[e.from] = append(next[e.from], e.to)
+	}
 	rank := func(i int) int {
 		if i >= n {
 			// A value between two changes: on its way as soon as it is free.
@@ -975,29 +1300,120 @@ func orderChanges(cfg *Config, unique map[string]map[string]bool,
 	out := make([]fixturechange.Change, 0, n)
 	for _, i := range topological(waiting, next, rank) {
 		if i < n {
-			out = append(out, changes[i])
+			out = append(out, changes[i].Change)
 		}
 	}
-	return out
+	return out, notes
 }
 
-// uniqueColumns is, per model, the columns a unique index of their own
-// covers: as the catalog says, where a snapshot was read against one, and
-// otherwise the columns that could be unique. Those are the columns, the id
-// among them, that no two rows of either snapshot hold one value in, leaving
-// NULL aside, and that are not references: in a table of a handful of rows a
-// foreign key is distinct often enough by chance, and a guess that a column
-// is unique when it is not orders changes for nothing, which can stand in the
-// way of the column that is.
-func uniqueColumns(cfg *Config, snaps ...*Snapshot) map[string]map[string]bool {
-	out := map[string]map[string]bool{}
-	for _, snap := range snaps {
-		for model, cols := range snap.unique {
-			if out[model] == nil {
-				out[model] = map[string]bool{}
+// edge is one change, or one value, waiting for another.
+type edge struct{ from, to int }
+
+// tupleOf is the values a unique index holds for a row, as one comparable
+// string, and false when a NULL in it means it collides with nothing. A
+// column the row does not carry, one no fixture row writes, stands for any
+// value, which can only make a change wait that need not.
+func tupleOf(values fixturechange.Values, cols []string) (string, bool) {
+	var b strings.Builder
+	carried := false
+	for _, col := range cols {
+		v, ok := values[col]
+		if !ok {
+			b.WriteString("\x00*")
+			continue
+		}
+		if v.IsNull {
+			return "", false
+		}
+		carried = true
+		b.WriteString("\x00" + valueKey(v))
+	}
+	return b.String(), carried
+}
+
+// components numbers the strongly connected components of a graph of n nodes,
+// Tarjan's way without recursion: two nodes share a number exactly when each
+// waits, through any number of others, for the other.
+func components(n int, next [][]int) []int {
+	index, low, comp := make([]int, n), make([]int, n), make([]int, n)
+	for i := range index {
+		index[i] = -1
+	}
+	onStack := make([]bool, n)
+	var stack []int
+	counter, count := 0, 0
+	type frame struct{ v, i int }
+	for root := 0; root < n; root++ {
+		if index[root] >= 0 {
+			continue
+		}
+		index[root], low[root] = counter, counter
+		counter++
+		stack = append(stack, root)
+		onStack[root] = true
+		call := []frame{{root, 0}}
+		for len(call) > 0 {
+			top := len(call) - 1
+			v := call[top].v
+			if call[top].i < len(next[v]) {
+				w := next[v][call[top].i]
+				call[top].i++
+				switch {
+				case index[w] < 0:
+					index[w], low[w] = counter, counter
+					counter++
+					stack = append(stack, w)
+					onStack[w] = true
+					call = append(call, frame{w, 0})
+				case onStack[w] && index[w] < low[v]:
+					low[v] = index[w]
+				}
+				continue
 			}
-			for col := range cols {
-				out[model][col] = true
+			if low[v] == index[v] {
+				for {
+					w := stack[len(stack)-1]
+					stack = stack[:len(stack)-1]
+					onStack[w] = false
+					comp[w] = count
+					if w == v {
+						break
+					}
+				}
+				count++
+			}
+			call = call[:top]
+			if top > 0 {
+				if u := call[top-1].v; low[v] < low[u] {
+					low[u] = low[v]
+				}
+			}
+		}
+	}
+	return comp
+}
+
+// uniqueIndexes is, per model, the unique indexes that order changes: as the
+// catalog lists them, where a snapshot was read against one, every column of
+// each, and otherwise guessed. A guess is a column of its own, the id among
+// them, that no two rows of either snapshot hold one value in, leaving NULL
+// aside, and that is not a reference: in a table of a handful of rows a
+// foreign key is distinct often enough by chance.
+func uniqueIndexes(cfg *Config, snaps ...*Snapshot) uniques {
+	out := uniques{indexes: map[string][][]string{}, guessed: map[string]bool{}}
+	have := map[string]bool{}
+	for _, snap := range snaps {
+		for _, model := range sortedKeysOfIndexes(snap.unique) {
+			for _, cols := range snap.unique[model] {
+				k := model + "\x00" + strings.Join(cols, "\x00")
+				if have[k] {
+					continue
+				}
+				have[k] = true
+				out.indexes[model] = append(out.indexes[model], cols)
+			}
+			if out.indexes[model] == nil {
+				out.indexes[model] = [][]string{}
 			}
 		}
 	}
@@ -1005,7 +1421,7 @@ func uniqueColumns(cfg *Config, snaps ...*Snapshot) map[string]map[string]bool {
 	seen := map[string]bool{}
 	for _, snap := range snaps {
 		for _, model := range snap.Order {
-			if out[model] != nil {
+			if _, known := out.indexes[model]; known {
 				continue
 			}
 			m := cfg.Models[model]
@@ -1030,20 +1446,28 @@ func uniqueColumns(cfg *Config, snaps ...*Snapshot) map[string]map[string]bool {
 			}
 		}
 	}
-	guessed := map[string]map[string]bool{}
+	keys := make([]string, 0, len(seen))
 	for k := range seen {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
 		model, col, _ := strings.Cut(k, "\x00")
 		if _, isRef := cfg.Models[model].References[col]; isRef || shared[model][col] {
 			continue
 		}
-		if guessed[model] == nil {
-			guessed[model] = map[string]bool{}
-		}
-		guessed[model][col] = true
+		out.guessed[model] = true
+		out.indexes[model] = append(out.indexes[model], []string{col})
 	}
-	for model, cols := range guessed {
-		out[model] = cols
+	return out
+}
+
+func sortedKeysOfIndexes(m map[string][][]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
 	}
+	sort.Strings(out)
 	return out
 }
 
@@ -1144,19 +1568,35 @@ func refusedByShared(shared map[string][]string, c fixturechange.Change) (Refusa
 	return Refusal{}, false
 }
 
+// idsOf indexes the entries of a snapshot by model and id, once per
+// comparison: refusedBySharedID asks it of every insert.
+func idsOf(snap *Snapshot) map[string]map[string][]*Entry {
+	out := map[string]map[string][]*Entry{}
+	for _, model := range snap.Order {
+		byID := map[string][]*Entry{}
+		for _, e := range snap.Entries[model] {
+			if e.ID != "" {
+				byID[e.ID] = append(byID[e.ID], e)
+			}
+		}
+		out[model] = byID
+	}
+	return out
+}
+
 // refusedBySharedID reports an insert writing an id another row of the new
 // snapshot has too, which two branches each adding "the next id" leave
 // behind. Neither row can be inserted under it, and dbfixture cannot load the
-// file at all.
-func refusedBySharedID(cfg *Config, next *Snapshot, c fixturechange.Change) (Refusal, bool) {
+// file at all. ids is idsOf the new snapshot.
+func refusedBySharedID(cfg *Config, ids map[string]map[string][]*Entry, c fixturechange.Change) (Refusal, bool) {
 	m := cfg.Models[c.Model]
 	id, ok := c.New[m.ID]
 	if c.Kind != fixturechange.Insert || !ok || id.Ref != nil || id.IsNull {
 		return Refusal{}, false
 	}
 	var others []string
-	for _, e := range next.Entries[c.Model] {
-		if e.ID == id.Lit && keyString(c.Model, e.Key) != keyString(c.Model, c.Key) {
+	for _, e := range ids[c.Model][id.Lit] {
+		if keyString(c.Model, e.Key) != keyString(c.Model, c.Key) {
 			others = append(others, e.label(c.Model))
 		}
 	}

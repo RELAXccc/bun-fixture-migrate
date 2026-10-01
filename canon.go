@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -60,6 +61,7 @@ const castBatch = 500
 // The casts run in savepoints, so a value that fails leaves db's transaction
 // usable, and nothing is written.
 func Canonicalize(ctx context.Context, db bun.IDB, cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table) error {
+	settleCopies(cfg, snap, tables)
 	refCanon := map[string]map[string]string{} // model -> ref value as written -> canonical
 	for _, model := range snap.Order {
 		// A model nobody configured has no table to cast against, and
@@ -112,6 +114,19 @@ func Canonicalize(ctx context.Context, db bun.IDB, cfg *Config, snap *Snapshot, 
 					// The column's type has decided which text the database
 					// holds.
 					delete(e.AsWritten, col)
+					delete(e.asJSON, col)
+				}
+				if float, ok := e.asFloat[col]; ok && known {
+					delete(e.asFloat, col)
+					if decide.Type == "numeric" && decide.Category != "A" {
+						snap.Findings = append(snap.Findings, Finding{
+							Kind: FindingAmbiguousValue, Model: model, Row: e.label(model),
+							Detail: fmt.Sprintf("%s is %s, which a float64 field stores as %s and an integer, a string "+
+								"or a decimal field as it is, and only the Go model knows which this numeric column "+
+								"has: quote it if the field is no float64, which then cannot load it, or write %s if "+
+								"it is", col, text, float, float),
+						})
+					}
 				}
 				if msg, bad := invalid[text]; bad {
 					snap.Findings = append(snap.Findings, Finding{
@@ -187,23 +202,168 @@ func Canonicalize(ctx context.Context, db bun.IDB, cfg *Config, snap *Snapshot, 
 		snap.reportDuplicateIDs(cfg, model)
 	}
 	lintJSONNulls(cfg, snap, tables)
+	if err := noteFolds(ctx, db, cfg, snap, tables); err != nil {
+		return err
+	}
 	return reportEqualKeys(ctx, db, cfg, snap, tables)
+}
+
+// foldingType reports a type whose equality holds values equal that differ
+// as text, in a way lower-casing settles: citext, which compares lower(a)
+// with lower(b).
+func foldingType(c dbschema.Column) bool {
+	return c.Type == "citext" && c.Category != "A"
+}
+
+// noteFolds gives every entry whose natural key has a citext column that
+// column's value as citext compares it, lower-cased by PostgreSQL, which
+// is what citext does: Entry.foldKey then pairs a row of one snapshot with
+// a row of another whose key only changed case.
+func noteFolds(ctx context.Context, db bun.IDB, cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table) error {
+	for _, model := range snap.Order {
+		m := cfg.Models[model]
+		if m == nil {
+			continue
+		}
+		table := tables[cfg.QualifiedTable(m)]
+		if table == nil {
+			continue
+		}
+		for _, col := range m.keyColumns() {
+			column, ok := table.Column(col)
+			if !ok || !foldingType(column) {
+				continue
+			}
+			var values []string
+			seen := map[string]bool{}
+			for _, e := range snap.Entries[model] {
+				if v, ok := e.Key[col]; ok && !v.IsNull && v.Ref == nil && !seen[v.Lit] {
+					seen[v.Lit] = true
+					values = append(values, v.Lit)
+				}
+			}
+			lower := map[string]string{}
+			for start := 0; start < len(values); start += castBatch {
+				batch := values[start:min(start+castBatch, len(values))]
+				rowsSQL := strings.TrimSuffix(strings.Repeat("(?::text),", len(batch)), ",")
+				args := make([]any, len(batch))
+				for i, v := range batch {
+					args[i] = v
+				}
+				err := db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+					rows, err := tx.QueryContext(ctx, "SELECT t.v, lower(t.v) FROM (VALUES "+rowsSQL+") AS t(v)", args...)
+					if err != nil {
+						return err
+					}
+					defer rows.Close()
+					for rows.Next() {
+						var v, l string
+						if err := rows.Scan(&v, &l); err != nil {
+							return err
+						}
+						lower[v] = l
+					}
+					if err := rows.Err(); err != nil {
+						return err
+					}
+					return rows.Close()
+				})
+				if err != nil {
+					return fmt.Errorf("%s.%s: %w", model, col, err)
+				}
+			}
+			for _, e := range snap.Entries[model] {
+				v, ok := e.Key[col]
+				if !ok || v.IsNull || v.Ref != nil {
+					continue
+				}
+				if e.folded == nil {
+					e.folded = map[string]string{}
+				}
+				e.folded[col] = lower[v.Lit]
+			}
+		}
+	}
+	return nil
 }
 
 // sourceOf is the text a cast of a column of an entry starts from: the value
 // as written when the deciding column (decidingColumn) is one a Go string
 // field writes and the file wrote the value differently from what it resolves
-// to (1.10, 017, True), because that is what dbfixture stores there; the
-// resolved value otherwise.
+// to (1.10, 017, True), because that is what dbfixture stores there; the JSON
+// an any or map field makes of it in a json or jsonb column, and the
+// time.Time yaml.v3 makes of a timestamp in a timestamptz one (Cell.JSONText);
+// the resolved value otherwise.
 func sourceOf(e *Entry, m *Model, col string, decide dbschema.Column) (string, bool) {
 	text, ok := literalOf(e, m, col)
 	if !ok {
 		return "", false
 	}
+	if j, ok := e.asJSON[col]; ok && (isJSON(decide) || instants(decide)) {
+		return j, true
+	}
 	if written, ok := e.AsWritten[col]; ok && decide.StringField() {
 		return written, true
 	}
 	return text, true
+}
+
+// instants reports a timestamptz column, or an array of them: a time.Time
+// field writes the instant yaml.v3 makes of a timestamp, and a date alone is
+// midnight UTC to it, not midnight wherever the seeding session is.
+func instants(c dbschema.Column) bool {
+	return c.Type == "timestamptz" || (c.Category == "A" && c.ElemType == "timestamptz")
+}
+
+// settleCopies decides, for every template copying a field of another row,
+// what dbfixture stores: what the field holds as fmt prints it. A field of a
+// string type prints as it is, the value a string field holds, and an
+// integer as the integer; a field of any other type prints otherwise than
+// any value the file can write, a float64 of 100000000 as 1e+08, a time.Time
+// as 2026-01-01 10:00:00 +0000 UTC, and is an invalid value. A copy whose
+// field's column is not in tables is left undecided.
+func settleCopies(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table) {
+	for _, model := range snap.Order {
+		for _, e := range snap.Entries[model] {
+			for _, col := range sortedSources(e.copied) {
+				decide, known := decidingColumn(cfg, tables, e, col, dbschema.Column{})
+				if !known {
+					continue
+				}
+				delete(e.copied, col)
+				if decide.StringField() || integerType(decide) {
+					continue
+				}
+				src := e.from[col]
+				snap.Findings = append(snap.Findings, Finding{
+					Kind: FindingInvalidValue, Model: model, Row: e.label(model),
+					Detail: fmt.Sprintf("%s copies %s of a %s row, a %s column, and dbfixture stores what that field "+
+						"holds as fmt prints it, which for a field of such a type is not a value a file can write: "+
+						"a float64 of 100000000 is 1e+08, a time.Time 2026-01-01 10:00:00 +0000 UTC. Write the "+
+						"value here", col, src.column, src.model, decide.FullType),
+				})
+			}
+		}
+	}
+}
+
+// integerType reports a column of whole numbers, which a Go integer field
+// writes, and fmt prints as the number.
+func integerType(c dbschema.Column) bool {
+	switch c.Type {
+	case "int2", "int4", "int8":
+		return c.Category != "A"
+	}
+	return false
+}
+
+func sortedSources(m map[string]source) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // decidingColumn is the column whose type says which reading of an entry's
@@ -287,6 +447,13 @@ func castValues(ctx context.Context, db bun.IDB, column dbschema.Column,
 		if !valueError(err) {
 			return nil, nil, err
 		}
+		// An error the cast raises for NULL too is about the statement --
+		// a type or a function a CHECK names that cannot be found -- and
+		// not about any value of the file.
+		if err := castNull(ctx, db, column); err != nil {
+			return nil, nil, fmt.Errorf("a value of %s cannot be checked against its type, whatever it is: %w",
+				column.FullType, err)
+		}
 		// One of them is not a value of the type. Find which, one by one.
 		for _, v := range batch {
 			if err := castInto(ctx, db, column, []string{v}, inputs, canon, raw, invalid); err != nil {
@@ -321,7 +488,11 @@ func castValues(ctx context.Context, db bun.IDB, column dbschema.Column,
 func castInput(c dbschema.Column, v string) (string, string) {
 	switch {
 	case c.Category == "A" && jsonArray(v):
-		lit, err := arrayLiteral(v, c.ElemType == "json" || c.ElemType == "jsonb")
+		if !isJSONElem(c) && nestedArray(v) {
+			return "", "which is a sequence of sequences, an array of more than one dimension, and " +
+				multidimensionalReason + ": keep the column out of the file and put it in ignore"
+		}
+		lit, err := arrayLiteral(v, isJSONElem(c))
 		if err != nil {
 			return "", "which is not an array the column's type can hold: " + err.Error()
 		}
@@ -347,6 +518,22 @@ func castInput(c dbschema.Column, v string) (string, string) {
 		}
 	}
 	return v, ""
+}
+
+// castNull runs the cast castInto runs, the column's CHECK constraints
+// included, for a NULL, which every type and every constraint takes: an error
+// is the statement's.
+func castNull(ctx context.Context, db bun.IDB, column dbschema.Column) error {
+	cast := "t.v::" + castType(column)
+	selects := []string{readExpr(column, cast), tooLong(column, "t.v")}
+	for _, check := range column.Checks {
+		selects = append(selects, "(SELECT NOT COALESCE("+check.Expr+", true) FROM (SELECT "+cast+" AS "+
+			sqlIdent(column.Name)+") AS c__)")
+	}
+	return db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		_, err := tx.ExecContext(ctx, "SELECT "+strings.Join(selects, ", ")+" FROM (VALUES (NULL::text)) AS t(v)")
+		return err
+	})
 }
 
 func castInto(ctx context.Context, db bun.IDB, column dbschema.Column, values []string, inputs map[string]string,
@@ -621,6 +808,12 @@ func byteaOf(v string) (string, string) {
 // isJSON reports a json or jsonb column.
 func isJSON(c dbschema.Column) bool {
 	return c.Type == "json" || c.Type == "jsonb"
+}
+
+// isJSONElem reports an array of json or jsonb, whose nested arrays are
+// elements, not dimensions.
+func isJSONElem(c dbschema.Column) bool {
+	return c.Category == "A" && (c.ElemType == "json" || c.ElemType == "jsonb")
 }
 
 // dateTime reports a column of dates or times, or an array of them: the
@@ -942,7 +1135,7 @@ func lintJSONNulls(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Tabl
 					continue
 				}
 				snap.Findings = append(snap.Findings, Finding{
-					Kind: FindingNullDefault, Model: model, Row: e.KeyStr,
+					Kind: FindingNullDefault, Model: model, Row: e.label(model),
 					Detail: fmt.Sprintf("%s is null, which in a %s column is the JSON null when the model's field is "+
 						"a map, a slice or an any, and NULL when it is a pointer or nullzero, and only the model "+
 						"knows which: set policy.null_default to warn if it writes NULL here; for the JSON null, "+
@@ -1009,7 +1202,7 @@ func reportEqualKeys(ctx context.Context, db bun.IDB, cfg *Config, snap *Snapsho
 					continue // reportDuplicates has said so
 				}
 				snap.Findings = append(snap.Findings, Finding{
-					Kind: FindingDuplicateKey, Model: model, Row: group[0].KeyStr,
+					Kind: FindingDuplicateKey, Model: model, Row: group[0].label(model),
 					Detail: fmt.Sprintf("the natural keys %s are one value to the key's type in PostgreSQL, so "+
 						"no lookup by it can tell these %s (%s) apart, and a unique index would keep dbfixture "+
 						"from loading them all: make them differ as the type compares them",
@@ -1070,7 +1263,7 @@ func equalKeys(ctx context.Context, db bun.IDB, table *dbschema.Table, cols []st
 		}
 	}
 	query := "SELECT array_to_string(array_agg(t.i ORDER BY t.i), ',') FROM (VALUES " + rowsSQL + ") AS t(" +
-		strings.Join(names, ", ") + ") GROUP BY " + strings.Join(groupBy, ", ") + " HAVING count(*) > 1"
+		strings.Join(names, ", ") + ") GROUP BY " + strings.Join(groupBy, ", ") + " HAVING count(*) > 1 ORDER BY min(t.i)"
 	err := db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		rows, err := tx.QueryContext(ctx, query, args...)
 		if err != nil {

@@ -545,3 +545,52 @@ func TestLintNullDefaultsReportsANullTheColumnCannotHold(t *testing.T) {
 		t.Fatalf("expected one invalid value, got %q", got)
 	}
 }
+
+// A finding in the header quotes a value, and a value can hold a line break:
+// it starts a comment line of its own, so the export still parses.
+func TestExportHeaderKeepsALineBreakInsideTheComment(t *testing.T) {
+	cfg := testConfig(t)
+	state := snap(t, cfg, base, "the database")
+	for _, model := range state.Order {
+		for _, e := range state.Entries[model] {
+			e.Anchor = anchorOf(e.Key)
+		}
+	}
+	header := []string{"zero against a default: Plan/name=a\n- model: X\r\nrows: [1]\x01  end"}
+	data, err := Export(cfg, state, testTables(), header)
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	want := "# zero against a default: Plan/name=a\n# - model: X\n# rows: [1]\\x01 \n# end\n"
+	if !strings.HasPrefix(string(data), want) {
+		t.Fatalf("got\n%s", data)
+	}
+}
+
+// A column the table does not have, or generates, is said once, as a
+// finding, and taken out of the snapshot: the comparison with the database
+// does not say it again as a column written on one side only.
+func TestLintColumnsTakesWhatItReportsOutOfTheComparison(t *testing.T) {
+	cfg := testConfig(t)
+	tables := testTables()
+	tables["public.plans"].Columns = append(tables["public.plans"].Columns,
+		dbschema.Column{Name: "total", Position: 9, Type: "int8", Generated: true})
+	head := snap(t, cfg, strings.Replace(base, "      seats: 10\n", "      seats: 10\n      colour: red\n      total: 3\n", 1), "fixture.yml")
+	LintColumns(cfg, head, tables)
+	var found []string
+	for _, f := range head.Findings {
+		found = append(found, f.Row)
+	}
+	if strings.Join(found, ",") != "colour,total" {
+		t.Fatalf("findings %+v", head.Findings)
+	}
+	for _, col := range head.Columns["Plan"] {
+		if col == "colour" || col == "total" {
+			t.Fatalf("still compared: %v", head.Columns["Plan"])
+		}
+	}
+	res, err := Compute(cfg, snap(t, cfg, base, "the database"), head)
+	if err != nil || len(res.Refusals) != 0 || len(res.Changes) != 0 {
+		t.Fatalf("%v %+v / %+v", err, res.Changes, res.Refusals)
+	}
+}

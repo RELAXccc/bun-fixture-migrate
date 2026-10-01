@@ -1,6 +1,9 @@
 package fixturemigrate
 
 import (
+	"bytes"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
@@ -42,17 +45,30 @@ func TestYAMLJSONIsWhatAMapMarshalsTo(t *testing.T) {
 	}
 }
 
-// jsonb keeps the scale of a number; both sides of a comparison are written
-// without it.
-func TestCanonicalJSON(t *testing.T) {
+// jsonb keeps the scale of a number, and its own order of keys and spacing;
+// both sides of a comparison, and every migration, are written in one
+// spelling instead, the one a fixture file's mapping reads as without the
+// database. An export writes jsonb's own.
+func TestNormalJSON(t *testing.T) {
 	for in, want := range map[string]string{
-		`{"a": 1.0, "b": 1.50, "c": [1.0, -0.0, 1e3], "d": "1.0"}`: `{"a": 1, "b": 1.5, "c": [1, 0, 1000], "d": "1.0"}`,
-		`["a\"1.0", 2.50]`:               `["a\"1.0", 2.5]`,
+		`{"a": 1.0, "b": 1.50, "c": [1.0, -0.0, 1e3], "d": "1.0", "aa": {"z": 1, "y": 2}}`: `{"a":1,"aa":{"y":2,"z":1},"b":1.5,"c":[1,0,1000],"d":"1.0"}`,
+		`["a\"1.0", 2.50, "<&>"]`:        `["a\"1.0",2.5,"<&>"]`,
 		`"str"`:                          `"str"`,
 		`not json 1.0`:                   `not json 1.0`,
+		`[0:1]={7,8}`:                    `[0:1]={7,8}`,
 		`123456789012345680000000000000`: `123456789012345680000000000000`,
+		`1.2345678901234568e+29`:         `123456789012345680000000000000`,
 	} {
-		if got := canonicalJSON(in); got != want {
+		if got := normalJSON(in); got != want {
+			t.Errorf("%s: %s, want %s", in, got, want)
+		}
+	}
+	for in, want := range map[string]string{
+		`{"at":"x","k":1,"aa":[1,{"b":true,"a":null}]}`: `{"k": 1, "aa": [1, {"a": null, "b": true}], "at": "x"}`,
+		`[]`: `[]`,
+		`{}`: `{}`,
+	} {
+		if got := jsonbText(in); got != want {
 			t.Errorf("%s: %s, want %s", in, got, want)
 		}
 	}
@@ -72,13 +88,115 @@ func TestColumnTextOfStructuredColumns(t *testing.T) {
 		col      dbschema.Column
 		in, want string
 	}{
-		{dbschema.Column{Type: "jsonb"}, `{"a": 1.0}`, `{"a": 1}`},
-		{dbschema.Column{Type: "_numeric", Category: "A"}, `[1.50, null]`, `[1.5, null]`},
+		{dbschema.Column{Type: "jsonb"}, `{"b": 2, "a": 1.0}`, `{"a":1,"b":2}`},
+		{dbschema.Column{Type: "_numeric", Category: "A"}, `[1.50, null]`, `[1.5,null]`},
 		{dbschema.Column{Type: "int4", Domain: "qty"}, `05`, `5`},
 		{dbschema.Column{Type: "text"}, `1.0`, `1.0`},
 	} {
 		if got := columnText(tc.col, tc.in); got != tc.want {
 			t.Errorf("%+v %q: %q, want %q", tc.col, tc.in, got, tc.want)
 		}
+	}
+}
+
+// At the top of a json or jsonb column a value is what encoding/json makes of
+// what yaml.v3 puts into an any field, as it is inside a mapping: the reading
+// a cell keeps for such a column, where it differs from the array column's.
+func TestTheJSONReadingIsWhatAnAnyFieldMarshalsTo(t *testing.T) {
+	marshal := func(t *testing.T, in string) string {
+		var v any
+		if err := yaml.Unmarshal([]byte(in), &v); err != nil {
+			t.Fatal(err)
+		}
+		var b bytes.Buffer
+		enc := json.NewEncoder(&b)
+		enc.SetEscapeHTML(false)
+		if err := enc.Encode(v); err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSuffix(b.String(), "\n")
+	}
+	for _, in := range []string{
+		`[2026-01-01T10:00:00+02:00, 2026-01-01, 2026-01-01 10:00:00.5, 0.1234567890123456789, 017, x, "y", true]`,
+		`[[2026-01-01], {a: [1.5, 2026-01-02]}]`,
+		`{a: [2026-01-01T10:00:00-05:00], b: <b>}`,
+	} {
+		var n yaml.Node
+		if err := yaml.Unmarshal([]byte(in), &n); err != nil {
+			t.Fatal(err)
+		}
+		got, err := yamlAnyJSON(&n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := marshal(t, in); got != want {
+			t.Errorf("%s:\n got %s\nwant %s", in, got, want)
+		}
+	}
+	for in, want := range map[string]string{
+		"2026-01-01T10:00:00+02:00": "2026-01-01T10:00:00+02:00",
+		"2026-01-01":                "2026-01-01T00:00:00Z",
+		"2026-01-01 10:00:00":       "",
+		"2026-01-01T10:00:00Z":      "",
+		"0.1234567890123456789":     "0.12345678901234568",
+		"1.50":                      "",
+		"017":                       "",
+		`"2026-01-01"`:              "",
+	} {
+		doc, err := ParseDoc([]byte("- model: M\n  rows:\n    - {v: " + in + "}\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := doc[0].Rows[0]["v"].JSONText; got != want {
+			t.Errorf("%s: JSONText %q, want %q", in, got, want)
+		}
+		if want != "" && strings.Trim(marshal(t, in), `"`) != want {
+			t.Errorf("%s: an any field marshals to %s", in, marshal(t, in))
+		}
+	}
+	// A sequence whose any reading is the array column's has none.
+	doc, err := ParseDoc([]byte("- model: M\n  rows:\n    - {v: [1, a, {k: 2026-01-01}]}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := doc[0].Rows[0]["v"].JSONText; got != "" {
+		t.Errorf("JSONText %q", got)
+	}
+}
+
+// A merge key inside a mapping is merged the way yaml.v3 merges it into the
+// map[string]any dbfixture decodes a jsonb column into.
+func TestAMergeKeyIsMergedAsYAMLMergesIt(t *testing.T) {
+	for _, in := range []string{
+		`{m: &m {k: 1, j: 2}, n: {<<: *m, j: 3}}`,
+		`{a: &a {x: 1}, b: &b {x: 2, y: 2}, n: {<<: [*a, *b], z: 3}}`,
+		`{n: {<<: {a: 1, <<: {a: 0, z: 9}}, b: 2}}`,
+		`{1: own, <<: {1: merged, 2: two}}`,
+		`{"1": own, <<: {1: merged}}`,
+		`{n: {<<: {k: ~}, j: [1, {<<: {q: 1}}]}}`,
+	} {
+		var v map[string]any
+		if err := yaml.Unmarshal([]byte(in), &v); err != nil {
+			t.Fatal(err)
+		}
+		want, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var n yaml.Node
+		if err := yaml.Unmarshal([]byte(in), &n); err != nil {
+			t.Fatal(err)
+		}
+		got, err := yamlJSON(&n)
+		if err != nil || got != string(want) {
+			t.Errorf("%s:\n got %s %v\nwant %s", in, got, err, want)
+		}
+	}
+	var n yaml.Node
+	if err := yaml.Unmarshal([]byte(`{<<: [1, 2]}`), &n); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := yamlJSON(&n); err == nil || !strings.Contains(err.Error(), "not a mapping") {
+		t.Errorf("a merge of something else than mappings: %v", err)
 	}
 }

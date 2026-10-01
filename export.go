@@ -10,6 +10,7 @@ import (
 	"strings"
 	"text/template/parse"
 	"time"
+	"unicode/utf8"
 
 	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
@@ -112,11 +113,13 @@ func exportModels(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table
 
 	var b strings.Builder
 	for _, line := range header {
-		if line == "" {
-			b.WriteString("#\n")
-			continue
+		for _, part := range commentLines(line) {
+			if part == "" {
+				b.WriteString("#\n")
+				continue
+			}
+			b.WriteString("# " + part + "\n")
 		}
-		b.WriteString("# " + line + "\n")
 	}
 	if len(header) > 0 {
 		b.WriteString("\n")
@@ -216,6 +219,32 @@ func exportModels(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table
 	return out, nil
 }
 
+// commentLines is a header line as the lines of a YAML comment: a line break
+// in it, which a finding quoting a value can hold, starts a comment line of
+// its own instead of ending the comment, and a character YAML refuses even
+// in a comment is written as an escape.
+func commentLines(line string) []string {
+	var out []string
+	var b strings.Builder
+	for i := 0; i < len(line); {
+		r, size := utf8.DecodeRuneInString(line[i:])
+		i += size
+		switch {
+		case r == '\r' && strings.HasPrefix(line[i:], "\n"):
+		case r == '\n' || r == '\r' || r == 0x85 || r == 0x2028 || r == 0x2029:
+			out = append(out, b.String())
+			b.Reset()
+		case r == utf8.RuneError && size == 1:
+			fmt.Fprintf(&b, `\x%02x`, line[i-1])
+		case r == '\t' || yamlPrintable(r):
+			b.WriteRune(r)
+		default:
+			writeYAMLEscape(&b, r)
+		}
+	}
+	return append(out, b.String())
+}
+
 // writtenRow is one row of an export, as it was meant to read back.
 type writtenRow struct {
 	model string
@@ -286,6 +315,8 @@ func (w writtenCell) check(cell Cell) error {
 		}
 	case cell.IsNull:
 		return fmt.Errorf("reads back as null, not %q", w.value.Lit)
+	case cell.Structured && w.column.Category == "A" && !isJSONElem(w.column) && nestedArray(cell.Text):
+		return fmt.Errorf("is a sequence of sequences, and %s", multidimensionalReason)
 	default:
 		got, want := exportedReading(w.column, cell), databaseReading(w.column, w.value.Lit)
 		if got != want {
@@ -352,42 +383,6 @@ func databaseReading(c dbschema.Column, text string) string {
 		}
 	}
 	return text
-}
-
-// normalJSON is JSON text with its keys sorted and its numbers canonical, or
-// the text itself when it is not JSON.
-func normalJSON(text string) string {
-	dec := json.NewDecoder(strings.NewReader(text))
-	dec.UseNumber()
-	var v any
-	if err := dec.Decode(&v); err != nil {
-		return text
-	}
-	var canon func(v any) any
-	canon = func(v any) any {
-		switch v := v.(type) {
-		case json.Number:
-			if s, ok := canonicalDecimal(v.String()); ok {
-				return json.Number(s)
-			}
-		case map[string]any:
-			for k, e := range v {
-				v[k] = canon(e)
-			}
-		case []any:
-			for i, e := range v {
-				v[i] = canon(e)
-			}
-		}
-		return v
-	}
-	var b strings.Builder
-	enc := json.NewEncoder(&b)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(canon(v)); err != nil {
-		return text
-	}
-	return strings.TrimSuffix(b.String(), "\n")
 }
 
 // loadOrder is the order dbfixture can load a model's rows in. It resolves a
@@ -517,8 +512,57 @@ func exportValue(cfg *Config, model, col string, v fixturechange.Value, column d
 		}
 		return fmt.Sprintf("'{{ $.%s.%s.%s }}'", v.Ref.Model, anchor, camel(target.ID)), "", nil
 	}
+	if column.Category == "A" && cfg.arrayNulls(cfg.Models[model]) != ArrayNullsKeep && jsonNullElement(v.Lit) {
+		return "", "", fmt.Errorf("%s.%s holds %s, an array with a NULL element, which a YAML sequence writes as "+
+			"null and a []string or []int64 field leaves out, so the file would read as something else and not "+
+			"load as this: set array_nulls: keep on the model if its array fields keep a null, as a []*string "+
+			"does, or put %s in ignore", model, col, jsonbText(v.Lit), col)
+	}
 	return exportLiteral(model, col, v.Lit, column)
 }
+
+// jsonNullElement reports a JSON array holding a null, or holding an array
+// that does, as an array column holds a NULL element.
+func jsonNullElement(text string) bool {
+	var v any
+	if err := json.Unmarshal([]byte(text), &v); err != nil {
+		return false
+	}
+	var holds func(v any) bool
+	holds = func(v any) bool {
+		elems, ok := v.([]any)
+		if !ok {
+			return false
+		}
+		for _, e := range elems {
+			if e == nil || holds(e) {
+				return true
+			}
+		}
+		return false
+	}
+	return holds(v)
+}
+
+// nestedArray reports a JSON array that holds an array, which is how an
+// array of more than one dimension is read.
+func nestedArray(text string) bool {
+	var elems []any
+	if err := json.Unmarshal([]byte(text), &elems); err != nil {
+		return false
+	}
+	for _, e := range elems {
+		if _, ok := e.([]any); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// multidimensionalReason is why an array of more than one dimension is no
+// value of a fixture file, which can only write it as a sequence of
+// sequences: bun v1.2.18 writes a nested slice as text PostgreSQL refuses.
+const multidimensionalReason = "bun cannot write a nested slice into an array column, so dbfixture fails to load it"
 
 // exportLiteral writes a value the way the column's type reads back as the
 // same value through the Go field a bun model has for that type -- an int64,
@@ -539,11 +583,15 @@ func exportLiteral(model, col, lit string, column dbschema.Column) (string, stri
 			return refuse("an array whose lower bound is not 1, which no YAML sequence loads as: " +
 				"renumber it from 1 in the database, or ignore the column")
 		}
+		if !isJSONElem(column) && nestedArray(lit) {
+			return refuse("an array of more than one dimension, which a fixture file can only write as a sequence " +
+				"of sequences, and " + multidimensionalReason + ": put the column in ignore")
+		}
 		if column.ElemCategory == "N" && strings.Contains(lit, `"`) {
 			return refuse("an array of numbers with NaN or Infinity in it, which a YAML sequence " +
 				"cannot spell so that this tool reads it back")
 		}
-		return yamlSafeJSON(lit), "", nil
+		return yamlSafeJSON(jsonbText(lit)), "", nil
 	}
 	switch column.Type {
 	case "int2", "int4", "int8", "oid":
@@ -636,7 +684,7 @@ func quotedTemplate(s string) (string, bool) {
 // field; a number, true and false are themselves.
 func exportJSON(model, col, lit string) (string, string, error) {
 	refuse := func(why string) (string, string, error) {
-		return "", "", fmt.Errorf("%s.%s holds the JSON %s, %s", model, col, lit, why)
+		return "", "", fmt.Errorf("%s.%s holds the JSON %s, %s", model, col, jsonbText(lit), why)
 	}
 	dec := json.NewDecoder(strings.NewReader(lit))
 	dec.UseNumber()
@@ -661,7 +709,7 @@ func exportJSON(model, col, lit string) (string, string, error) {
 		}
 		return exportString(v), "", nil
 	case map[string]any, []any:
-		return yamlSafeJSON(lit), "", nil
+		return yamlSafeJSON(jsonbText(lit)), "", nil
 	}
 	return lit, "", nil
 }

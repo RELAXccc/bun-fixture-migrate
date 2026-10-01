@@ -47,6 +47,31 @@ type Entry struct {
 	// readings: the ref column of the row a reference names, or the field a
 	// template copies. Any other column decides for itself.
 	from map[string]source
+	// asFloat holds, for a fixture row, the columns holding an unquoted
+	// number a float64 field holds as another number, with that one; see
+	// floatReading. In a numeric column only the model's Go type says which
+	// the database holds, and Canonicalize reports it.
+	asFloat map[string]string
+	// folded holds, for a key column whose type holds values equal that
+	// differ as text (citext), the column's value as the type compares it,
+	// as PostgreSQL lower-cases it. Set where the catalog was read; see
+	// foldKey.
+	folded map[string]string
+	// copied holds, for a fixture row, the columns a template copies from a
+	// field of another row other than its id, with that field. dbfixture
+	// stores what the field holds as fmt prints it, which only the field's
+	// Go type decides: a string or an integer as it is, a float64 of
+	// 100000000 as 1e+08, a time.Time with its zone's name. Canonicalize
+	// settles a copy of a string or an integer column and reports any
+	// other; a change carrying one it has not settled is refused.
+	copied map[string]source
+	// asJSON holds, for a fixture row, the columns whose value a json or
+	// jsonb column holds as something else than Cells says, with that JSON;
+	// see Cell.JSONText. Canonicalize takes it for such a column, and for a
+	// timestamptz one, which holds the same instant or, for a date alone,
+	// the midnight UTC a time.Time field makes of it. Without the database
+	// it is not used.
+	asJSON map[string]string
 	// unsure holds, for a fixture row, the columns whose value means one
 	// thing to one Go field type and another to another (Cell.Unsure), with
 	// the reason. No column type settles them, so a change carrying one is
@@ -88,25 +113,22 @@ type Snapshot struct {
 	// not zero. They are reported, never worked around.
 	Findings []Finding
 
-	// unique holds, per model, the columns a unique index of their own
-	// covers, once the catalog has been read for the snapshot (by
+	// unique holds, per model, the columns of each unique index of its
+	// table, once the catalog has been read for the snapshot (by
 	// DatabaseSnapshot or Canonicalize); nil while nobody has looked.
-	unique map[string]map[string]bool
+	unique map[string][][]string
 }
 
-// noteUniques records which columns of a model's table have a unique index of
-// their own.
+// noteUniques records the unique indexes of a model's table.
 func (s *Snapshot) noteUniques(model string, table *dbschema.Table) {
 	if s.unique == nil {
-		s.unique = map[string]map[string]bool{}
+		s.unique = map[string][][]string{}
 	}
-	cols := map[string]bool{}
+	indexes := make([][]string, 0, len(table.Uniques))
 	for _, index := range table.Uniques {
-		if len(index) == 1 {
-			cols[index[0]] = true
-		}
+		indexes = append(indexes, append([]string(nil), index...))
 	}
-	s.unique[model] = cols
+	s.unique[model] = indexes
 }
 
 // clone copies a snapshot deeply enough that rewriting an entry in it cannot
@@ -131,6 +153,30 @@ func (s *Snapshot) clone() *Snapshot {
 				c.from = make(map[string]source, len(e.from))
 				for col, src := range e.from {
 					c.from[col] = src
+				}
+			}
+			if e.asFloat != nil {
+				c.asFloat = make(map[string]string, len(e.asFloat))
+				for col, text := range e.asFloat {
+					c.asFloat[col] = text
+				}
+			}
+			if e.folded != nil {
+				c.folded = make(map[string]string, len(e.folded))
+				for col, text := range e.folded {
+					c.folded[col] = text
+				}
+			}
+			if e.copied != nil {
+				c.copied = make(map[string]source, len(e.copied))
+				for col, src := range e.copied {
+					c.copied[col] = src
+				}
+			}
+			if e.asJSON != nil {
+				c.asJSON = make(map[string]string, len(e.asJSON))
+				for col, text := range e.asJSON {
+					c.asJSON[col] = text
 				}
 			}
 			if e.unsure != nil {
@@ -194,13 +240,10 @@ const (
 	FindingDuplicateID FindingKind = "duplicate id"
 )
 
-func (f Finding) String() string {
-	where := f.Model
-	if f.Row != "" {
-		where += " " + f.Row
-	}
-	return where + ": " + f.Detail
-}
+func (f Finding) String() string { return f.Where() + ": " + f.Detail }
+
+// Where names the row a finding is about, as Refusal.Where does.
+func (f Finding) Where() string { return rowWhere(f.Model, f.Row) }
 
 // byKey indexes the entries of a model by their natural key, in reading order.
 func byKey(entries []*Entry) (map[string][]*Entry, []string) {
@@ -266,6 +309,23 @@ func keyLabel(model string, key fixturechange.Values) string {
 		parts = append(parts, c+"="+key[c].String())
 	}
 	return model + "/" + strings.Join(parts, "/")
+}
+
+// foldKey is the natural key as its types compare it, as keyString writes
+// it, where a key column's type holds values equal that differ as text: Go
+// and GO in a citext column fold to one. "" for a key with no such column,
+// or before the catalog was read.
+func (e *Entry) foldKey(model string) string {
+	if len(e.folded) == 0 {
+		return ""
+	}
+	key := copyValues(e.Key)
+	for col, text := range e.folded {
+		if v, ok := key[col]; ok && !v.IsNull && v.Ref == nil {
+			key[col] = fixturechange.Lit(text)
+		}
+	}
+	return keyString(model, key)
 }
 
 // label is the entry's natural key as keyLabel writes it.

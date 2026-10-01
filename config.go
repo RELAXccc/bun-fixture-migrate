@@ -402,6 +402,20 @@ func (c *Config) Prepare() error {
 				return fmt.Errorf("model %q: column %q references unknown model %q", name, col, target)
 			}
 		}
+		// The id is the row's own value to the tool, compared and written as
+		// it stands; a reference is looked up by the name of the row it
+		// names. A primary key that is also a reference, a plan's limits
+		// keyed by the plan, would be read as the template text naming the
+		// plan.
+		if target, ok := m.References[m.ID]; ok {
+			hint := "leave id out, so the model is read without an id, and keep " + m.ID + " in key and references"
+			if m.ID == "id" {
+				hint = "name another column that is unique as id, or take " + m.ID + " out of references and " +
+					"write the ids themselves"
+			}
+			return fmt.Errorf("model %q: its id, %s, is also a reference to %s, and the tool reads an id as the "+
+				"row's own value, never as a reference to look up: %s", name, m.ID, target, hint)
+		}
 		if m.Deletes == "" {
 			m.Deletes = c.Policy.Deletes
 		}
@@ -605,6 +619,18 @@ func (c *Config) DependencyOrder() ([]string, error) {
 // skip reports whether a column takes no part in the comparison.
 func (m *Model) skip(col string) bool {
 	return col == anchorColumn || col == m.ID || m.ignored[col] || m.derived[col]
+}
+
+// inKeyAnyOf reports a column of a key_any_of group.
+func (m *Model) inKeyAnyOf(col string) bool {
+	for _, group := range m.KeyAnyOf {
+		for _, c := range group {
+			if c == col {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // keyColumns is every column that can end up in a natural key.

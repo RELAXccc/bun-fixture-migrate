@@ -26,7 +26,7 @@ func TestCastInput(t *testing.T) {
 		{ints, "-0.5", "", "holds as 0"},
 		{ints, "1e3", "1e3", ""},
 		{arr, `[1,2]`, `{"1","2"}`, ""},
-		{arr, `[[1,2],[3,null]]`, `{{"1","2"},{"3",NULL}}`, ""},
+		{arr, `[[1,2],[3,null]]`, "", "a sequence of sequences, an array of more than one dimension, and bun cannot"},
 		{arr, `{1,2}`, `{1,2}`, ""},
 		{arr, `[0:1]={7,8}`, `[0:1]={7,8}`, ""},
 		{dbschema.Column{Type: "_text", Category: "A", ElemType: "text"}, `["a \"b\"","c\\d",true]`,

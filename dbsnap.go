@@ -22,7 +22,12 @@ type SnapshotOptions struct {
 	// mentions is not master data and a difference in it is not drift.
 	Columns map[string][]string
 	// Order overrides the model order. Nil means the dependency order worked
-	// out from the configured references.
+	// out from the configured references. A comparison passes the fixture
+	// files' order, and every configured model the files hold no block of
+	// is read after those, every column of it, as a model whose block holds
+	// no row is: a fresh seed of the files holds no row of it, which is what
+	// a comparison has to hold the database against, and what generate
+	// makes of a block that left the files.
 	Order []string
 }
 
@@ -66,6 +71,14 @@ func DatabaseSnapshot(ctx context.Context, db bun.IDB, cfg *Config, tables map[s
 		var err error
 		if order, err = cfg.DependencyOrder(); err != nil {
 			return nil, err
+		}
+	} else {
+		given := set(order)
+		order = append([]string(nil), order...)
+		for _, model := range cfg.ModelNames() {
+			if !given[model] {
+				order = append(order, model)
+			}
 		}
 	}
 	snap := &Snapshot{Source: "the database", Order: order,
@@ -153,6 +166,9 @@ func DatabaseSnapshot(ctx context.Context, db bun.IDB, cfg *Config, tables map[s
 		snap.reportDuplicates(model)
 	}
 	reportDuplicateRefs(cfg, snap)
+	if err := noteFolds(ctx, db, cfg, snap, tables); err != nil {
+		return nil, err
+	}
 	if err := reportEqualKeys(ctx, db, cfg, snap, tables); err != nil {
 		return nil, err
 	}
@@ -393,7 +409,9 @@ func keyOf(cfg *Config, m *Model, model string, values fixturechange.Values) (fi
 		out[col] = v
 	}
 	for _, group := range m.KeyAnyOf {
-		chosen, value := group[0], fixturechange.Lit("")
+		// A group none of whose columns is there is NULL, as a fixture row
+		// leaving them all out is.
+		chosen, value := group[0], fixturechange.Null()
 		if v, ok := values[group[0]]; ok {
 			value = v
 		}

@@ -10,7 +10,7 @@ steps:
   - generate: {name: trial days and french, at: "20260309100000"}
     exit: 2
     output:
-      - "zero against a default: Plan Plan/code=free: trial_days is 0, but the column defaults to 14"
+      - "zero against a default: Plan/code=free: trial_days is 0, but the column defaults to 14"
       - "nothing written"
   - overlay: then
   - generate: {name: trial days and french, at: "20260309100000"}
