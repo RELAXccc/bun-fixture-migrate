@@ -416,12 +416,18 @@ func TestDSNWinsOverTheConfiguration(t *testing.T) {
 			}
 		}
 	}
+	// baseline asks the database whether a difference is only spelling.
+	writeFixture(t, cfg, newFixture)
+	code, _, stderr := call(t, "baseline", "-config", cfg, "-dsn", "env:BFM_TEST_FLAG_DSN")
+	if code != 1 || !strings.Contains(stderr, "connect to postgres://app:xxxxx@127.0.0.1:3") {
+		t.Errorf("baseline -dsn: exit %d\n%s", code, stderr)
+	}
 	// A project without a database in its configuration gets one.
 	none, _ := project(t, oldFixture, oldFixture)
 	if code, _, stderr := call(t, "baseline", "-config", none); code != 0 {
 		t.Fatal(stderr)
 	}
-	code, _, stderr := call(t, "status", "-config", none, "-require-applied", "-dsn", "postgres://app@127.0.0.1:4/z")
+	code, _, stderr = call(t, "status", "-config", none, "-require-applied", "-dsn", "postgres://app@127.0.0.1:4/z")
 	if code != 1 || !strings.Contains(stderr, "127.0.0.1:4") {
 		t.Errorf("status -require-applied -dsn: exit %d\n%s", code, stderr)
 	}

@@ -67,11 +67,12 @@ Run "bun-fixture-migrate <command> -h" for the flags of one command.`
 // is not where the command runs: a monorepo, a CI job, a container.
 const configEnv = "BUN_FIXTURE_MIGRATE_CONFIG"
 
-// connects are the commands that can connect to a database, which take -dsn.
-// baseline never does, and scaffold has a -dsn of its own because it runs
-// before there is a configuration.
+// connects are the commands that can connect to a database, which take -dsn:
+// baseline does to ask whether a difference is only in how values are
+// written. scaffold has a -dsn of its own, because it runs before there is a
+// configuration.
 var connects = map[string]bool{
-	"export": true, "check": true, "generate": true, "status": true, "plan": true, "sync": true,
+	"export": true, "check": true, "generate": true, "baseline": true, "status": true, "plan": true, "sync": true,
 }
 
 func main() {

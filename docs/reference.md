@@ -16,8 +16,8 @@ configuration file: the one `-config` names, else the one `$BUN_FIXTURE_MIGRATE_
 `fixture-migrate.yml` in the current directory. Paths in it are relative to it. Every command takes
 `-h`.
 
-Every command that connects, `export`, `check`, `generate`, `status`, `plan` and `sync`, takes
-`-dsn`: the database to use instead of the configuration's `database`, as a URL or as `env:NAME` to
+Every command that connects, `export`, `check`, `generate`, `baseline`, `status`, `plan` and `sync`,
+takes `-dsn`: the database to use instead of the configuration's `database`, as a URL or as `env:NAME` to
 read one from the environment, which keeps the password out of the process list. Neither the
 command nor its errors repeat a password.
 
@@ -154,6 +154,7 @@ and a finding in the fixture files that the policy makes an error.
 | `-old <file>` | record this file as the fixture file, under the fixture file's path; with one fixture file only |
 | `-force` | replace a differing state, and clear what was left out: a migration you wrote covers the difference |
 | `-offline` | do not ask the database whether a difference is only in how values are written |
+| `-dsn` | the database to ask, instead of the configuration's |
 
 ### status
 
