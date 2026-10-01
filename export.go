@@ -181,6 +181,12 @@ func exportModels(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table
 					continue
 				}
 				column, _ := table.Column(col)
+				if jsonNullByDefault(m, column, v) {
+					// No YAML spelling is the JSON null to both this tool and
+					// a map field; a row that leaves the column out is, by the
+					// model's defaults and by a nil map.
+					continue
+				}
 				text, note, err := exportValue(cfg, model, col, v, column, anchors)
 				if err != nil {
 					return nil, err
@@ -554,8 +560,8 @@ func exportJSON(model, col, lit string) (string, string, error) {
 	switch v := v.(type) {
 	case nil:
 		return refuse("null, which a fixture file can only write as ~, and a ~ is NULL to this tool: " +
-			"store NULL instead, or leave the column out of these rows and give the model " +
-			"defaults: {" + col + ": 'null'}")
+			"store NULL instead, or give the model defaults: {" + col + ": 'null'}, and the export leaves " +
+			"the column out of these rows, which a map, slice or any field loads as the JSON null")
 	case string:
 		if json.Valid([]byte(v)) {
 			return refuse("a string that is itself JSON: a YAML string is that JSON to this tool and to a " +
@@ -566,6 +572,14 @@ func exportJSON(model, col, lit string) (string, string, error) {
 		return yamlSafeJSON(lit), "", nil
 	}
 	return lit, "", nil
+}
+
+// jsonNullByDefault reports a JSON null in a json or jsonb column of a model
+// whose defaults say a row without the column holds the JSON null.
+func jsonNullByDefault(m *Model, c dbschema.Column, v fixturechange.Value) bool {
+	def, ok := m.Defaults[c.Name]
+	return ok && isJSON(c) && !v.IsNull && v.Ref == nil && strings.TrimSpace(v.Lit) == "null" &&
+		strings.TrimSpace(def) == "null"
 }
 
 // beyondFloat64 is the first number in a decoded JSON value that does not

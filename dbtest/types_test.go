@@ -625,6 +625,19 @@ func TestTypesJSONThroughAMap(t *testing.T) {
 			t.Errorf("%s: expected the export to be refused with %q, got %v", c.set, c.want, err)
 		}
 	}
+	// With defaults: {doc: 'null'} a row without doc holds the JSON null, so
+	// the export leaves the JSON null out, and it all loads back as it was.
+	l.seed(v1)
+	run(t, l.db, `INSERT INTO ty_json VALUES (2, 'b', 'null', '{}', '1')`)
+	l.cfg.Models["TyJSON"].Defaults = map[string]string{"doc": "null"}
+	if export := l.roundTrip(); strings.Count(export, "doc:") != 1 {
+		t.Fatalf("the JSON null is left to the default:\n%s", export)
+	}
+	if got := scan[string](t, l.db, "SELECT jsonb_typeof(doc) FROM ty_json WHERE name = 'b'"); got != "null" {
+		t.Fatalf("a seed of the export holds %s", got)
+	}
+	l.cfg.Models["TyJSON"].Defaults = nil
+
 	// Under null_default: warn, NULL is written as ~ with the hazard named.
 	l.cfg.Policy.NullDefault = fixturemigrate.ModeWarn
 	l.seed(v1)

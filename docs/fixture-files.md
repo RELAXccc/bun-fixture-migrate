@@ -154,8 +154,9 @@ and held against the database before anything is written, and a difference fails
 - `bytea` as the sequence of its bytes, `[72, 105]`, which is what a `[]byte` field loads.
 - `json` and `jsonb` documents as flow mappings and sequences, numbers canonical. A number with more
   digits than a `float64` holds, a top-level string that is itself JSON, and the JSON null are
-  refused: no spelling reads back as itself. SQL NULL is `~`, refused unless `policy.null_default`
-  is `warn`, because a map field loads `~` as the JSON null.
+  refused: no spelling reads back as itself. A model with `defaults: {settings: 'null'}` gets its JSON
+  nulls left out of the rows instead, which is what a map field leaves there. SQL NULL is `~`,
+  refused unless `policy.null_default` is `warn`, because a map field loads `~` as the JSON null.
 - Arrays as sequences, a multidimensional one as nested sequences. An array whose lower bound is not
   1, `[0:1]={7,8}`, is refused.
 - Text double-quoted, everything YAML would refuse or fold escaped: control characters, DEL, the C1
