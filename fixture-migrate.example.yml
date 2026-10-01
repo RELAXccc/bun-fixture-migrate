@@ -50,6 +50,15 @@ seed_guard_table: plans
 # spelling: 500ms, 10s, 1min. Waiting for another replica running the same
 # migrations is not cut short by it.
 lock_timeout: 10s
+# A table every generated migration writes one row into each time it runs, in
+# the transaction that made its changes: which changes it applied, which it
+# found made already, which it skipped and why. A rollback then undoes only
+# what the migration did in that database, instead of writing back old values
+# the database never held, and status shows per database what a deploy
+# skipped. The first migration creates it, which takes CREATE on its schema.
+# Optionally schema-qualified; written into every migration. Leave it out to
+# record nothing.
+audit_table: bun_fixture_audit
 # Where the commands that read a database connect, unless -dsn names another:
 # export, check, status, plan and sync, and generate and baseline to check
 # values against the columns. "env:NAME" reads the DSN from an environment
@@ -61,7 +70,9 @@ schema: public
 
 # The choices that depend on how you run your databases rather than on what is
 # correct. Everything not here is fixed, because the alternative would be a
-# setting that lets this tool corrupt a database.
+# setting that lets this tool corrupt a database. A model can override
+# id_drift, missing_row, changed_row and duplicate_key with keys of the same
+# names, and deletes and array_nulls.
 policy:
   # The id in the fixture file is not the id the database gave the row: the
   # file's id belongs to another row, or the row lives under a different id.
@@ -171,6 +182,12 @@ models:
     # The column another model's reference to this one names it by. Default
     # "name".
     ref: code
+    # The policy block's changed_row, for this model alone: nothing but the
+    # fixture file writes currencies, so a currency that differs from what a
+    # migration expects is a fault, not an admin's edit to keep. Likewise
+    # missing_row, id_drift and duplicate_key; each is written into the
+    # migration for this model's changes.
+    changed_row: error
 
   Plan:
     table: plans

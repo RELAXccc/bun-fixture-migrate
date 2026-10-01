@@ -16,8 +16,8 @@ configuration file: the one `-config` names, else the one `$BUN_FIXTURE_MIGRATE_
 `fixture-migrate.yml` in the current directory. Paths in it are relative to it. Every command takes
 `-h`.
 
-Every command that connects, `export`, `check`, `generate`, `baseline`, `status`, `plan` and `sync`,
-takes `-dsn`: the database to use instead of the configuration's `database`, as a URL or as `env:NAME` to
+Every command that connects, `export`, `check`, `generate`, `baseline`, `status`, `plan`, `sync` and
+`apply`, takes `-dsn`: the database to use instead of the configuration's `database`, as a URL or as `env:NAME` to
 read one from the environment, which keeps the password out of the process list. Neither the
 command nor its errors repeat a password.
 
@@ -31,6 +31,7 @@ command nor its errors repeat a password.
 | `status` | reads unless `-offline` or none is configured | nothing |
 | `plan` | writes, and rolls back | nothing |
 | `sync` | writes with `-yes` | the database |
+| `apply` | writes, and rolls back without `-yes` | the database, with `-yes` |
 | `version` | none | nothing |
 
 "Reads" is a `REPEATABLE READ, READ ONLY` transaction: PostgreSQL refuses any write in it, and every
@@ -207,6 +208,13 @@ Exit 3 when:
 Exit 1 when there is no state file and git cannot read the fixture files as of `HEAD` (it is not
 installed, or this is not a repository): nothing then says what the files change.
 
+With a database and an `audit_table`, status also reads the newest row of each fixture migration in
+the audit table and says what that run did in this database: applied or reverted, when and as which
+role, how many changes it applied, found unchanged and skipped, each skipped change with its
+problem, and whether the migration file was edited after it ran here, which it tells by the change
+set's SHA-256. A table that does not exist yet is said to be so, and is no failure; one the role may
+not read is an error (exit 1). A migration edited after it ran is a note, not a failure.
+
 | Flag | |
 | --- | --- |
 | `-offline` | do not connect, even with a database configured |
@@ -262,14 +270,50 @@ constraints PostgreSQL defers to `COMMIT`.
 
 Exit 2 when a finding the policy makes an error, or a difference `generate` would refuse, stops it.
 
+### apply
+
+Runs one generated fixture migration against the database outside bun's migrator: the escape hatch of
+[migrating by hand](production.md#running-a-migration-by-hand). Without `-yes` it is `plan -file`
+for that file: the same simulation in a transaction that is rolled back, the same report and the same
+exit codes, and with `-revert` the change set's `Revert` in place of its `Apply`. With `-yes` it runs
+the change set and commits, in one transaction under the change set's advisory lock, with the
+change set's own policy, lock timeout and audit table, as the migrator would.
+
+`-record` writes bun's record of the migration into `migrations_table` in the same transaction, so
+the changes and the record are committed together or not at all: the digits of the file name as
+`name`, the newest `group_id` plus one as `group_id`, and the time, which is what bun v1.2.18's
+`Migrate` writes. bun's migrator then reports the migration applied and does not run it. With
+`-revert`, `-record` deletes the record instead, and the migrator runs the migration again on the
+next migrate. Refused (exit 2), with nothing changed: `-record` of a migration recorded already, and
+`-revert -record` of one that is not; both are looked at again once the change set holds its lock.
+`-record` needs the migrations table, which the migrator's `Init` creates (exit 1 without it).
+
+Without `-record`, the migrations table is left as it is, and apply says what that means: a
+migration it applied is still pending for the migrator, which runs it and finds every change made;
+one it reverted is still recorded, and the migrator does not run it again.
+
+| Flag | |
+| --- | --- |
+| `-file <path>` | the generated migration, a `.go` file; required |
+| `-yes` | make the changes and commit; without it, roll back and report |
+| `-revert` | run the change set's `Revert` instead of its `Apply` |
+| `-record` | record the migration in the migrations table, or with `-revert` delete its record, in the same transaction |
+| `-lock-timeout <d>` | without `-yes`: give up on a row lock after this long, default `5s`, as `plan` does |
+| `-json` | the report as JSON: without `-yes` as [plan](#plan-output)'s, with it as [apply](#apply-output) |
+
+Without `-yes`, the exit codes are `plan`'s. With it: 0 when the change set was committed, skipped
+changes included; 3 when a change could not be made, as the migration would fail in the deploy;
+1 when apply could not do its job, such as a lock waited for too long, a lost connection, or a
+privilege the role lacks; 2 when the record refuses it. Whenever it is not 0, nothing was changed.
+
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
 | 0 | done; for `check`, `status` and `plan`: nothing found. A finding the policy makes a warning is reported and is not a failure |
 | 1 | the command could not do its job: a bad flag, no connection, an unreadable file, output that could not be written, a plan that could not finish, nothing for `status` to compare the fixture files with |
-| 2 | refused: a difference that needs a hand-written migration, a finding the policy makes an error, a state `baseline` will not replace, a fixture migration the state file does not include (`generate`, `baseline`), a file `export` will not write |
-| 3 | found something: drift (`check`), a change no migration makes, a change left out, a state file that does not read, a migration not applied or out of order, a leftover lock (`status`), a migration that would fail or skip (`plan`), a problem in the migrations directory or the state file's history of it (`status`, `plan`) |
+| 2 | refused: a difference that needs a hand-written migration, a finding the policy makes an error, a state `baseline` will not replace, a fixture migration the state file does not include (`generate`, `baseline`), a file `export` will not write, a migration `apply -record` finds recorded already, or not recorded for `-revert` |
+| 3 | found something: drift (`check`), a change no migration makes, a change left out, a state file that does not read, a migration not applied or out of order, a leftover lock (`status`), a migration that would fail or skip (`plan`), a problem in the migrations directory or the state file's history of it (`status`, `plan`), a migration that would fail or failed (`apply`) |
 
 A pipeline can tell "the database drifted" (3) from "the check could not run" (1). Whatever the
 code, unless it is 0, the last line on standard error says why, starting with `bun-fixture-migrate:`.
@@ -293,6 +337,7 @@ what changing it does. Unknown keys are an error.
 | `state` | `<out>/fixture_state.yml` | the state file |
 | `seed_guard_table` | | a table never empty in a seeded database; while it is empty a fixture migration does nothing. Written into the migration in `schema` when it names none and `schema` is not `public`. Without one, `generate` warns: on a database that was never seeded, the migration runs before the seed and fails |
 | `lock_timeout` | | how long a generated migration waits for a row lock another session holds before it fails and rolls back, in PostgreSQL's spelling (`500ms`, `10s`, `1min`); written into the migration. Empty waits as long as the other session holds it |
+| `audit_table` | | a table every generated migration records each of its runs in, in the transaction that made its changes; see [the audit table](#the-audit-table). Optionally schema-qualified, else in `schema` as a model's table is; written into the migration. Empty records nothing |
 | `database` | | a DSN, or `env:NAME` to read one from the environment |
 | `schema` | `public` | the schema of tables named without one. A generated migration names such a table with this schema unless it is `public`, because the application's `search_path` may not include it |
 | `policy` | | see below |
@@ -317,6 +362,7 @@ listed stops every command.
 | `ignore` | | columns that take no part |
 | `deletes` | `policy.deletes` | `allow`, `refuse` or `cascade` |
 | `array_nulls` | `policy.array_nulls` | `refuse` or `keep`, for the model's array columns |
+| `changed_row`, `missing_row`, `id_drift`, `duplicate_key` | the policy block's | the [policy](#policy) for this model's rows alone: translations an admin UI edits at `changed_row: warn`, prices at `error`. Written into the migration, in the model's table, only when set |
 | `where` | | an SQL predicate limiting which rows are master data; your SQL, used as written. A generated migration carries it: every statement, natural-key lookup and reference for the model sees only those rows, and a row it writes must hold it. A `;` or a parenthesis it does not open is refused |
 
 ### policy
@@ -333,13 +379,20 @@ listed stops every command.
 | `deletes` | allow, refuse, cascade | allow | a row that left the file. `allow` fails while other rows point at it; `cascade` lets the foreign keys' ON DELETE act |
 | `array_nulls` | refuse, keep | refuse | a null inside a sequence in an array column: `refuse` reports it and refuses a change carrying it, because a `[]string` field drops it and a `[]*string` one keeps it; `keep` says the models' array fields keep it. A model can override it |
 
-`id_drift`, `missing_row` and `changed_row` are copied into every generated migration, so changing
-them later does not change what an existing migration does. A model overrides `deletes` and
-`array_nulls` with keys of the same names.
+`id_drift`, `missing_row`, `changed_row` and `duplicate_key` are copied into every generated
+migration, so changing them later does not change what an existing migration does. A model overrides
+them, and `deletes` and `array_nulls`, with keys of the same names; a model's own `id_drift` and
+`duplicate_key` also decide what `generate`, `check` and the other commands make of that model's
+renumbered rows and shared keys, and its run-time policies are written into the migration as the
+`Policy` of its table, holding only what the model sets:
+
+```go
+"Translation": {Name: "translations", ID: "id", Key: "key", Policy: &fixturechange.Policy{ChangedRow: "warn"}},
+```
 
 ## JSON output
 
-`check`, `status`, `plan` and `sync` take `-json`. Values are strings as the database spells them,
+`check`, `status`, `plan`, `sync` and `apply` take `-json`. Values are strings as the database spells them,
 NULL is `null`, and a reference is `{"model": "Currency", "key": "USD"}`, so neither can be mistaken
 for a string. Lists are `[]` rather than `null` when empty, except the fields this page marks as
 left out when empty. Fields may be added; none will change meaning.
@@ -392,11 +445,16 @@ field's type could settle, such as a null inside a sequence), `unknown column`.
   "directory": "migrations",
   "migrations": [
     {"id": "20260930165255_fixture_plan_prices", "name": "20260930165255", "fixture": true, "changes": 3,
-     "applied": {"group": 2, "at": "2026-09-30T17:00:00Z"}, "out_of_order": false}
+     "applied": {"group": 2, "at": "2026-09-30T17:00:00Z"}, "out_of_order": false,
+     "audit": {"direction": "up", "at": "2026-09-30T17:00:00Z", "by": "deploy", "applied": 2, "unchanged": 0,
+               "skipped": 1, "unseeded": false, "edited": false,
+               "skipped_changes": [{"index": 1, "model": "Plan", "key": "name=team", "kind": "update",
+                                    "problem": "changed row"}]}}
   ],
   "not_in_state": [],
   "database": {"table": "bun_migrations", "table_exists": true, "not_in_directory": [],
-               "newest_applied": "20260930165255", "locks_table": "bun_migration_locks", "locked": false},
+               "newest_applied": "20260930165255", "locks_table": "bun_migration_locks", "locked": false,
+               "audit": {"table": "bun_fixture_audit", "exists": true}},
   "problems": [],
   "notes": []
 }
@@ -412,7 +470,8 @@ field's type could settle, such as a null inside a sequence), `unknown column`.
 | `findings` | as in [check](#check-output), the ones the policy does not ignore |
 | `migrations` | `applied` is `null` for a pending migration and for all of them without a database; `out_of_order` is a pending one that sorts before `newest_applied` |
 | `not_in_state` | fixture migrations of the directory the state's history does not include; `problems` says why, and says when the one the state includes last is gone |
-| `database` | `null` when none was asked. `locked` is a row in `locks_table` naming `table`: a migrator running now, or one that died and left it |
+| `database` | `null` when none was asked. `locked` is a row in `locks_table` naming `table`: a migrator running now, or one that died and left it. `audit` is the `audit_table` read and whether it `exists`, left out when none is configured |
+| `migrations[].audit` | what the newest row of the audit table says the migration's last run did here, left out when there is none: `direction` `up` for an Apply, `down` for a Revert; `at` and `by` (the role); `applied`, `unchanged` and `skipped` count its changes, and `skipped_changes` lists the skipped ones with their `problem`; `unseeded` is a run the empty seed guard table made a no-op; `edited` is a migration file whose change set is not the one that ran |
 
 ### plan output
 
@@ -454,6 +513,21 @@ transaction was open.
 `findings` are as in [check](#check-output), with a `level` each, and so are `refusals` and
 `warnings`: what stopped the sync, and what the policy let it carry on past.
 
+### apply output
+
+`apply -json` without `-yes` writes [plan](#plan-output)'s report. With `-yes`:
+
+```json
+{"id": "20260930165255_fixture_plan_prices", "direction": "up", "committed": true, "record": "recorded",
+ "group_id": 3, "changes": [ ... ], "notes": []}
+```
+
+`direction` is `up`, or `down` with `-revert`; `committed` is whether the changes are in the
+database; `record` is `recorded` or `unrecorded` for what `-record` did, left out without it, and so
+is `group_id` unless a record was written; `error` says why it failed, left out when it did not.
+`changes` are [outcomes](#outcomes); `notes` what the run means for bun's record of the migration and,
+for a revert, which changes it undoes.
+
 ### Outcomes
 
 `plan` and `sync` report each change as `fixtureapply.Outcome`:
@@ -463,7 +537,7 @@ transaction was open.
 | `set` | the change set's name |
 | `index` | the change's position in the set; `-1` for an outcome about the whole set |
 | `model`, `kind`, `key` | which change: `insert`, `update` or `delete`, and the natural key as `col=value,...` |
-| `status` | `applied`, `unchanged` (the database held it already), `skipped` (the policy passed it over), `failed`, `unseeded` (the seed guard table is empty), `sequence` (a sequence moved past explicit ids) |
+| `status` | `applied`, `unchanged` (the database held it already, or, in a revert with an audit table, the migration did not make it here), `skipped` (the policy passed it over), `failed`, `unseeded` (the seed guard table is empty), `sequence` (a sequence moved past explicit ids) |
 | `rows` | rows an applied change touched |
 | `problem` | why it could not be made: `missing row`, `changed row`, `id drift`, `referenced` (a delete other rows point at), `duplicate key` (more than one row holds the natural key), `lock timeout`, `error` |
 | `message` | the sentence a person reads |
@@ -484,7 +558,7 @@ does, and is tested under `pgdriver` and `pgx`.
 | --- | --- |
 | `Up(set, opts...)`, `Down(set, opts...)` | the up and down functions a generated file registers with `MustRegister`; they run `Apply` and `Revert`, and `Up` knows the migration's name from the file it is called in |
 | `Apply(ctx, db, set, opts...)` | run a change set in one transaction; see [what a migration does](../README.md#what-a-generated-migration-does) |
-| `Revert(ctx, db, set, opts...)` | the same set backwards, every change inverted; it assumes `Apply` made every change on this database ([rolling back](production.md#rolling-back)) |
+| `Revert(ctx, db, set, opts...)` | the same set backwards, every change inverted: with an `AuditTable`, only the changes `Apply` made in this database, and otherwise every one ([rolling back](production.md#rolling-back)) |
 | `Validate(set)` | check a set without a database |
 | `SyncSequences(ctx, db, tables...)` | move the sequences of serial and identity columns past the values present, forward only; after a `dbfixture` seed |
 | `WithLogger(fn)` | where the per-row lines go; default `log.Printf` |
@@ -492,6 +566,9 @@ does, and is tested under `pgdriver` and `pgx`.
 | `WithReport(fn)` | receive every `Outcome` as it happens |
 | `WithMigrationName(name)` | the migration name, when `Apply` is called by hand from outside the file bun registered |
 | `WithDryRun()` | for a caller that rolls back: sequences are reported, not moved |
+| `SetSHA256(set)` | the SHA-256 of a canonical encoding of the set, as the audit table records it |
+| `ReadAudit(ctx, db, table)` | the newest row of the audit table for every set it holds, by name; false when the table does not exist |
+| `ApplyRecords(ctx, db, set)` | the rows a `Revert` of the set follows: its `up` rows after its last `down` row, newest first |
 
 A change that fails the set comes back as a `*fixtureapply.ChangeError`, which `errors.As` finds in
 the error bun's migrator returns: its `Outcome` says which change and why, and it unwraps to the
@@ -508,6 +585,38 @@ migration.
 they apply, `Refusals` that need a hand-written migration, and `Warnings` the policy lets a migration
 carry on past (a renumbered row under `id_drift: warn`). Only refusals stop a migration from being
 written.
+
+### The audit table
+
+With `audit_table` set, a generated migration carries it as `fixturechange.Set.AuditTable`, and every
+`Apply` and `Revert` of the set that succeeds writes one row into it, last in the transaction that
+made its changes and under the advisory lock the set holds. A run that fails rolls back and writes
+nothing. The table is created the first time, with comments saying what it is; that takes `CREATE`
+on its schema, and a role without it gets a sentence saying so, and nothing is changed. A table
+created by another role needs `SELECT` and `INSERT` granted to the role that migrates.
+
+| Column | Type | |
+| --- | --- | --- |
+| `id` | `bigint`, an identity | the order the runs committed in: the advisory lock lets one set write at a time |
+| `set_name` | `text` | the set's `Name`, the migration's file name |
+| `direction` | `text` | `up` for `Apply`, `down` for `Revert` |
+| `set_sha256` | `text` | `SetSHA256` of the set as it ran, 64 hex digits |
+| `applied_at` | `timestamptz` | when the run wrote its row, just before it committed |
+| `applied_by` | `text` | the role it ran as, `current_user` |
+| `outcomes` | `jsonb` | an array, one object per outcome: `index` (`-1` for one about the whole set), `model`, `key`, `kind`, `status`, `problem` |
+
+`Revert` reads the `up` rows of the set after its last `down` row, and inverts only the changes one
+of them records as `applied`. A change the migration found made already, or skipped, is left alone,
+reported `unchanged` with a message saying why. Not only the newest row: a revert that failed under
+bun's default migrator leaves the migration pending with its changes made, and the `Apply` of the next
+migrate finds them all `unchanged`; the run before it made them. A set edited since it ran is matched
+to the run by each change's model, key and kind, and a change the run did not have is not reverted.
+Without such a row, because the table is new or the set ran before it had one, `Revert` inverts every
+change, as it does without an audit table, and logs that it does.
+
+The hash is of every field of the set, with every map's keys in order and every field at its zero
+value left out, so a field a later version adds does not change the hash of a set that does not use
+it. `status` compares it with the migration file.
 
 ### Generated files over time
 
