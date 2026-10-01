@@ -3,6 +3,7 @@ package fixtureapply
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -144,9 +145,11 @@ func unrecord(ctx context.Context, db bun.IDB, set fixturechange.Set, o options,
 	if n, err := res.RowsAffected(); err != nil || n == 0 {
 		return failure
 	}
-	o.logf("%s: bun had recorded migration %s as applied before running it; the record was removed, "+
-		"so it runs again once this is fixed", set.Name, o.migration)
-	return fmt.Errorf("%w\n\nbun had recorded migration %s as applied before running it, as its migrator does "+
-		"unless built WithMarkAppliedOnSuccess(true); that record was removed, so the migration runs again once "+
-		"this is fixed", failure, o.migration)
+	o.log(ctx, slog.LevelWarn, "bun's record of the failed migration was removed",
+		Outcome{Set: set.Name, Index: -1, Message: "migration " + o.migration + " runs again once this is fixed"},
+		fmt.Sprintf("%s: bun had recorded migration %s as applied before running it; the record was removed, "+
+			"so it runs again once this is fixed", set.Name, o.migration))
+	return &recordRemoved{failure: failure, note: fmt.Sprintf("bun had recorded migration %s as applied before "+
+		"running it, as its migrator does unless built WithMarkAppliedOnSuccess(true); that record was removed, so "+
+		"the migration runs again once this is fixed", o.migration)}
 }

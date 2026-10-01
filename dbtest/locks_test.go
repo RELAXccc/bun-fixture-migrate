@@ -6,6 +6,7 @@ package dbtest_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -154,6 +155,10 @@ func TestALockedRowFailsTheChangeSetAfterTheLockTimeout(t *testing.T) {
 	}
 	if len(outcomes) != 1 || outcomes[0].Problem != fixtureapply.ProblemLockTimeout {
 		t.Fatalf("outcomes %+v", outcomes)
+	}
+	var ce *fixtureapply.ChangeError
+	if !errors.As(err, &ce) || ce.Outcome.Problem != fixtureapply.ProblemLockTimeout || errors.Unwrap(ce) == nil {
+		t.Fatalf("the lock timeout has to be a *ChangeError around PostgreSQL's error: %v", err)
 	}
 
 	// Once the admin is done, the same change set goes through.

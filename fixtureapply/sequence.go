@@ -3,6 +3,7 @@ package fixtureapply
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 
@@ -106,8 +107,9 @@ func (r *runner) syncSequences(ctx context.Context, o options) error {
 		if o.dryRun {
 			msg := fmt.Sprintf("explicit ids were written into %s; the migration moves its sequence past them "+
 				"if it is behind, which a dry run leaves alone", t.Name)
-			o.logf("%s: %s", r.set.Name, msg)
-			o.report(Outcome{Set: r.set.Name, Index: -1, Model: m, Status: StatusSequence, Message: msg})
+			out := Outcome{Set: r.set.Name, Index: -1, Model: m, Status: StatusSequence, Message: msg}
+			o.log(ctx, slog.LevelInfo, "fixture sequence left alone in a dry run", out, r.set.Name+": "+msg)
+			o.report(out)
 			continue
 		}
 		moved, err := moveSequence(ctx, r.tx, table, t.ID)
@@ -116,8 +118,9 @@ func (r *runner) syncSequences(ctx context.Context, o options) error {
 		}
 		if moved || r.advanced[m] {
 			msg := fmt.Sprintf("moved the sequence of %s past the explicit ids written", t.Name)
-			o.logf("%s: %s", r.set.Name, msg)
-			o.report(Outcome{Set: r.set.Name, Index: -1, Model: m, Status: StatusSequence, Message: msg})
+			out := Outcome{Set: r.set.Name, Index: -1, Model: m, Status: StatusSequence, Message: msg}
+			o.log(ctx, slog.LevelInfo, "fixture sequence moved", out, r.set.Name+": "+msg)
+			o.report(out)
 		}
 	}
 	return nil

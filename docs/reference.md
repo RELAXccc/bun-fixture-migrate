@@ -294,7 +294,7 @@ ran. `after` names pending migrations that were not simulated and run before thi
 | `model`, `kind`, `key` | which change: `insert`, `update` or `delete`, and the natural key as `col=value,...` |
 | `status` | `applied`, `unchanged` (the database held it already), `skipped` (the policy passed it over), `failed`, `unseeded` (the seed guard table is empty), `sequence` (a sequence moved past explicit ids) |
 | `rows` | rows an applied change touched |
-| `problem` | why it could not be made: `missing row`, `changed row`, `id drift`, `referenced` (a delete other rows point at), `error` |
+| `problem` | why it could not be made: `missing row`, `changed row`, `id drift`, `referenced` (a delete other rows point at), `duplicate key` (more than one row holds the natural key), `lock timeout`, `error` |
 | `message` | the sentence a person reads |
 
 ## The Go packages
@@ -317,9 +317,16 @@ does, and is tested under `pgdriver` and `pgx`.
 | `Validate(set)` | check a set without a database |
 | `SyncSequences(ctx, db, tables...)` | move the sequences of serial and identity columns past the values present, forward only; after a `dbfixture` seed |
 | `WithLogger(fn)` | where the per-row lines go; default `log.Printf` |
+| `WithSlog(logger)` | write the per-row report to a `*slog.Logger` instead, one record per change with the outcome's fields as attributes; a skipped change is a warning |
 | `WithReport(fn)` | receive every `Outcome` as it happens |
 | `WithMigrationName(name)` | the migration name, when `Apply` is called by hand from outside the file bun registered |
 | `WithDryRun()` | for a caller that rolls back: sequences are reported, not moved |
+
+A change that fails the set comes back as a `*fixtureapply.ChangeError`, which `errors.As` finds in
+the error bun's migrator returns: its `Outcome` says which change and why, and it unwraps to the
+statement's own error, such as PostgreSQL's, or to nothing when the policy made a problem with the
+row fatal. When `Apply` took back bun's record of the failed migration, `errors.Is(err,
+fixtureapply.ErrRecordRemoved)` holds: the migration is pending again.
 
 `Apply` takes a `bun.IDB`. Given a `*bun.DB` it opens its own transaction; given a `bun.Tx` it runs
 in a savepoint inside it, which is how a migration that also does other work keeps it all in one

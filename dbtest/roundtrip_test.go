@@ -8,8 +8,12 @@ package dbtest_test
 //	BUN_FIXTURE_MIGRATE_POSTGRES=postgres://postgres:pg@127.0.0.1:55433/postgres?sslmode=disable go test ./...
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -1049,5 +1053,79 @@ func TestAnIDHeldByAnotherRowIsNamedByItsKey(t *testing.T) {
 	_, err := applyReporting(t, db, set)
 	if err == nil || !strings.Contains(err.Error(), "already held by the row id = 1 (code=api,plan_id=1)") {
 		t.Fatalf("the row holding the id has to be named, got %v", err)
+	}
+}
+
+// A caller that runs Apply itself, or reads the error bun's migrator returns,
+// can tell which change failed and why without reading the sentence.
+func TestAFailedChangeIsAChangeError(t *testing.T) {
+	db := testDB(t)
+	seed(t, db)
+	ctx := context.Background()
+	run(t, db, "DELETE FROM features", "DELETE FROM plans WHERE name = 'team'")
+	err := fixtureapply.Apply(ctx, db, changeSet(), quiet())
+	var ce *fixtureapply.ChangeError
+	if !errors.As(fmt.Errorf("migrate: up: %w", err), &ce) {
+		t.Fatalf("want a *ChangeError, got %T %v", err, err)
+	}
+	if ce.Outcome.Index != 2 || ce.Outcome.Problem != fixtureapply.ProblemMissingRow ||
+		ce.Outcome.Status != fixtureapply.StatusFailed || errors.Unwrap(ce) != nil {
+		t.Fatalf("outcome %+v, unwraps to %v", ce.Outcome, errors.Unwrap(ce))
+	}
+	if !strings.HasPrefix(err.Error(), "20260921120000_fixture_round_trip: Plan name=team update: no row of plans") {
+		t.Fatalf("the message reads as it did: %v", err)
+	}
+
+	// A statement that failed outright unwraps to its own error.
+	seed2 := testDB(t)
+	seed(t, seed2)
+	set := changeSet()
+	set.Changes = []fixturechange.Change{{Model: "Plan", Kind: fixturechange.Update,
+		Key: fixturechange.Values{"name": fixturechange.Lit("team")},
+		Old: fixturechange.Values{"price_cents": fixturechange.Lit("2000")},
+		New: fixturechange.Values{"price_cents": fixturechange.Lit("not a number")}}}
+	err = fixtureapply.Apply(ctx, seed2, set, quiet())
+	if !errors.As(err, &ce) || ce.Outcome.Problem != fixtureapply.ProblemError || errors.Unwrap(ce) == nil {
+		t.Fatalf("want a statement's error inside a *ChangeError, got %v", err)
+	}
+	var state interface{ SQLState() string }
+	var field interface{ Field(byte) string }
+	if !errors.As(err, &state) && !errors.As(err, &field) {
+		t.Fatalf("PostgreSQL's own error has to be reachable: %T", errors.Unwrap(ce))
+	}
+}
+
+// WithSlog writes the per-row report as records, with the outcome's fields as
+// attributes and a skipped change as a warning.
+func TestTheReportGoesToSlog(t *testing.T) {
+	db := testDB(t)
+	seed(t, db)
+	run(t, db, "UPDATE plans SET price_cents = 3333 WHERE name = 'team'")
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	if err := fixtureapply.Apply(context.Background(), db, changeSet(), fixtureapply.WithSlog(logger)); err != nil {
+		t.Fatal(err)
+	}
+	var records []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		var r map[string]any
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			t.Fatalf("%v: %s", err, line)
+		}
+		records = append(records, r)
+	}
+	if len(records) != 5 {
+		t.Fatalf("want one record per change and one for the sequence, got\n%s", buf.String())
+	}
+	if r := records[0]; r["level"] != "INFO" || r["msg"] != "fixture change applied" || r["model"] != "Plan" ||
+		r["key"] != "name=pro" || r["status"] != "applied" || r["rows"] != float64(1) || r["index"] != float64(0) {
+		t.Fatalf("applied: %v", r)
+	}
+	if r := records[2]; r["level"] != "WARN" || r["status"] != "skipped" || r["problem"] != "changed row" ||
+		!strings.Contains(r["message"].(string), "no longer holds the values") {
+		t.Fatalf("skipped: %v", r)
+	}
+	if r := records[4]; r["status"] != "sequence" || r["model"] != "Plan" {
+		t.Fatalf("sequence: %v", r)
 	}
 }

@@ -34,6 +34,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 
@@ -134,8 +135,10 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 		}
 		if !seeded {
 			msg := set.SeedGuardTable + " is empty, nothing to do (the fixture loader seeds this database)"
-			o.logf("%s: %s", set.Name, msg)
-			o.report(Outcome{Set: set.Name, Index: -1, Status: StatusUnseeded, Message: msg})
+			out := Outcome{Set: set.Name, Index: -1, Status: StatusUnseeded, Message: msg}
+			o.log(ctx, slog.LevelInfo, "fixture change set not run, the database is not seeded", out,
+				set.Name+": "+msg)
+			o.report(out)
 			return restore(ctx)
 		}
 	}
@@ -169,26 +172,28 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 				out.Problem, out.Message = ProblemLockTimeout, err.Error()
 			}
 			o.report(out)
-			return fmt.Errorf("%s: %w", where, err)
+			return &ChangeError{Outcome: out, err: err}
 		}
 		out.Rows, out.Message = res.rows, res.message
 		switch {
 		case res.problem == "" && res.message != "":
 			out.Status = StatusApplied
-			o.logf("%s: applied (%s). %s", where, rowCount(res.rows), res.message)
+			o.log(ctx, slog.LevelWarn, "fixture change applied", out,
+				fmt.Sprintf("%s: applied (%s). %s", where, rowCount(res.rows), res.message))
 		case res.problem == "":
 			out.Status = StatusApplied
-			o.logf("%s: applied (%s)", where, rowCount(res.rows))
+			o.log(ctx, slog.LevelInfo, "fixture change applied", out,
+				fmt.Sprintf("%s: applied (%s)", where, rowCount(res.rows)))
 		case res.problem == problemBenign:
 			out.Status = StatusUnchanged
-			o.logf("%s: %s", where, res.message)
+			o.log(ctx, slog.LevelInfo, "fixture change already made", out, where+": "+res.message)
 		case modeFor(set.Policy, res.problem) == fixturechange.ModeError:
 			out.Status, out.Problem = StatusFailed, res.problem.exported()
 			o.report(out)
-			return fmt.Errorf("%s: %s", where, res.message)
+			return &ChangeError{Outcome: out}
 		default:
 			out.Status, out.Problem = StatusSkipped, res.problem.exported()
-			o.logf("%s: SKIPPED. %s", where, res.message)
+			o.log(ctx, slog.LevelWarn, "fixture change skipped", out, where+": SKIPPED. "+res.message)
 		}
 		o.report(out)
 	}

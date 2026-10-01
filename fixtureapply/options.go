@@ -1,7 +1,11 @@
 package fixtureapply
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"log"
+	"log/slog"
 
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 )
@@ -11,6 +15,7 @@ type Option func(*options)
 
 type options struct {
 	logf      func(format string, args ...any)
+	slog      *slog.Logger
 	report    func(Outcome)
 	migration string
 	dryRun    bool
@@ -21,6 +26,41 @@ type options struct {
 // it only if something else is watching the migration.
 func WithLogger(logf func(format string, args ...any)) Option {
 	return func(o *options) { o.logf = logf }
+}
+
+// WithSlog sends the per-row report to a structured logger instead of the
+// function WithLogger names, which it takes the place of: one record per
+// change, and one for each thing that happens to the whole set, with the
+// fields of the Outcome as attributes. A change that was skipped, and the
+// removal of bun's record of a failed migration, are warnings; the rest is
+// information. A change that fails the set is not logged, as it is not as
+// text: it is the error Apply returns.
+func WithSlog(logger *slog.Logger) Option {
+	return func(o *options) { o.slog = logger }
+}
+
+// log writes one line of the per-row report: a record with out's fields and
+// msg through WithSlog's logger when there is one, and otherwise text through
+// WithLogger's function.
+func (o options) log(ctx context.Context, level slog.Level, msg string, out Outcome, text string) {
+	if o.slog == nil {
+		o.logf("%s", text)
+		return
+	}
+	attrs := []slog.Attr{slog.String("set", out.Set)}
+	if out.Index >= 0 {
+		attrs = append(attrs, slog.Int("index", out.Index))
+	}
+	for _, a := range []struct{ key, value string }{{"model", out.Model}, {"kind", string(out.Kind)},
+		{"key", out.Key}, {"status", string(out.Status)}, {"problem", string(out.Problem)}, {"message", out.Message}} {
+		if a.value != "" {
+			attrs = append(attrs, slog.String(a.key, a.value))
+		}
+	}
+	if out.Rows > 0 {
+		attrs = append(attrs, slog.Int64("rows", out.Rows))
+	}
+	o.slog.LogAttrs(ctx, level, msg, attrs...)
 }
 
 // WithReport hands every change's outcome to fn as it happens, in the order
@@ -128,3 +168,41 @@ type Outcome struct {
 	// Message is the explanation a person reads.
 	Message string `json:"message,omitempty"`
 }
+
+// ChangeError is the error Apply and Revert return when a change fails the
+// set, whether its statement failed or the policy makes its problem an error.
+// errors.As finds it in what bun's migrator returns, with the change's
+// Outcome as WithReport received it.
+type ChangeError struct {
+	Outcome Outcome
+	// err is the error of the change's statement; nil when the policy made
+	// a problem with the row fatal.
+	err error
+}
+
+func (e *ChangeError) Error() string {
+	where := fmt.Sprintf("%s: %s %s %s", e.Outcome.Set, e.Outcome.Model, e.Outcome.Key, e.Outcome.Kind)
+	if e.err != nil {
+		return where + ": " + e.err.Error()
+	}
+	return where + ": " + e.Outcome.Message
+}
+
+// Unwrap is the error of the change's statement, such as PostgreSQL's, and
+// nil for a problem with the row that the policy made fatal.
+func (e *ChangeError) Unwrap() error { return e.err }
+
+// ErrRecordRemoved is in the error of a failed Apply whose record bun's
+// migrator had made before running it, and which Apply took back: the
+// migration is pending again, and the next migrate runs it. errors.Is finds
+// it.
+var ErrRecordRemoved = errors.New("bun's record of the migration was removed, so it runs again")
+
+// recordRemoved is a failure whose record Apply took back.
+type recordRemoved struct {
+	failure error
+	note    string
+}
+
+func (e *recordRemoved) Error() string   { return e.failure.Error() + "\n\n" + e.note }
+func (e *recordRemoved) Unwrap() []error { return []error{e.failure, ErrRecordRemoved} }

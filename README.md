@@ -148,7 +148,9 @@ configuration later does not change what an old migration does. At run time `fix
   failed;
 - moves the sequence past an explicit id before it writes it, so an insert by the application
   meanwhile cannot draw that id;
-- logs one line per row, or hands every row's outcome to `fixtureapply.WithReport`.
+- logs one line per row, or writes it to a `log/slog` logger with `fixtureapply.WithSlog`, or hands
+  every row's outcome to `fixtureapply.WithReport`; a change that fails the migration is a
+  `*fixtureapply.ChangeError` that `errors.As` finds.
 
 `Revert` is the same set backwards, every change inverted and guarded the same way. A rename finds
 its row under the name it gave it, so it reverts, and a second run finds it already made. It assumes

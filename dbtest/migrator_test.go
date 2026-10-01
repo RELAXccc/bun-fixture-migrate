@@ -13,6 +13,7 @@ package dbtest_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -272,6 +273,10 @@ func TestOnlyTheMigratorsFreshRecordIsTakenBack(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "that record was removed") {
 		t.Fatalf("expected the failure and the note, got %v", err)
 	}
+	var ce *fixtureapply.ChangeError
+	if !errors.Is(err, fixtureapply.ErrRecordRemoved) || !errors.As(err, &ce) || ce.Outcome.Problem != fixtureapply.ProblemMissingRow {
+		t.Fatalf("the failure and the removal have to be visible to errors.Is and errors.As: %v", err)
+	}
 	if count() != 0 {
 		t.Fatal("the fresh record should be gone")
 	}
@@ -294,7 +299,8 @@ func TestOnlyTheMigratorsFreshRecordIsTakenBack(t *testing.T) {
 			func() bun.IDB { return db }},
 	} {
 		reset(c.rows...)
-		if err := apply(c.idb()); err == nil || strings.Contains(err.Error(), "record was removed") {
+		if err := apply(c.idb()); err == nil || strings.Contains(err.Error(), "record was removed") ||
+			errors.Is(err, fixtureapply.ErrRecordRemoved) {
 			t.Fatalf("%s: %v", c.why, err)
 		}
 		if count() != 1 {
