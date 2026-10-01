@@ -100,6 +100,12 @@ A refusal is a difference `generate` will not write as it stands (exit 2).
 | `its id changed from 3 to 4` | a row changed its id, under `policy.id_drift: error`; with `warn` it is a warning and the rest of the row is migrated |
 | `column "x" is written on one side and left out on the other` | no `defaults` entry says what leaving it out means |
 | `version is written 1.10, which a column written from a Go string holds as written ...` | a value whose meaning depends on the column type, in a change computed without a database |
+| `currency_id points at the Currency whose code is written 0012, ...` | the same for a reference: the ref value of the row it names reads two ways, and only that ref column's type says which the database holds |
+| `code is written 0012 before and 012 after` | a key or a value only respelled: no change in a numeric column, a rename in a text one |
+| `parent_id points at Category "Accessories", which 2 rows hold` | a reference by a ref value more than one row holds; make the ref column unique |
+| `its id, 4, is the id of Plan/name=max too` | two rows of the file share an id, usually after merging two branches that each added the next one |
+| `it leaves out note, which other rows of Plan write` | an inserted row leaves out a column with no `defaults` entry; write it, or add one |
+| `tags: it is a sequence holding a null` | a null inside a YAML sequence, which a `[]string` field drops and a `[]*string` keeps |
 
 For the last one, configure `database` so `generate` can read the column types (and leave out
 `-no-lint`), or write the value unambiguously: quoted for a text column, resolved for any other

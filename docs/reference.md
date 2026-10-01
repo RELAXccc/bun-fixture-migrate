@@ -343,6 +343,11 @@ in a savepoint inside it, which is how a migration that also does other work kee
 transaction. Only on the migrator's `*bun.DB` does a failure take back bun's record of the
 migration.
 
+`fixturemigrate.Compute(cfg, old, next)` diffs two snapshots into a `*Result`: `Changes` in the order
+they apply, `Refusals` that need a hand-written migration, and `Warnings` the policy lets a migration
+carry on past (a renumbered row under `id_drift: warn`). Only refusals stop a migration from being
+written.
+
 `fixturemigrate.Sync(ctx, db, cfg, files, SyncOptions{DryRun, Logf})` is the `sync` command,
 returning a `*SyncResult` with the diff, the findings and the outcomes; `ErrSyncRefused` wraps a
 refusal. See [tests and development servers](usage.md#tests-and-development-servers).
