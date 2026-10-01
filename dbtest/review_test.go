@@ -450,3 +450,70 @@ func TestReviewGuessedUniquesGiveWayToTheCatalog(t *testing.T) {
 	}
 	l.fidelity(v1, v2)
 }
+
+type RvLang struct {
+	bun.BaseModel `bun:"table:rv_langs"`
+	ID            int64  `bun:"id,pk,autoincrement"`
+	Code          string `bun:"code,notnull"`
+}
+
+type RvBook struct {
+	bun.BaseModel `bun:"table:rv_books"`
+	ID            int64  `bun:"id,pk,autoincrement"`
+	Title         string `bun:"title,notnull"`
+	LangID        int64  `bun:"lang_id,notnull"`
+}
+
+// A citext key whose case changes, in a file without ids, names the same row:
+// the database finds it by either spelling. It is a rename now, under
+// policy.renames, which keeps the row's id and the rows pointing at it.
+// Before, it was a delete and an insert, which a row pointing at it failed.
+func TestReviewACaseChangeOfACitextKeyIsARename(t *testing.T) {
+	db := connect(t)
+	if _, err := db.ExecContext(context.Background(), "CREATE EXTENSION IF NOT EXISTS citext"); err != nil {
+		t.Skipf("citext: %v", err)
+	}
+	l := newLab(t, map[string]*fixturemigrate.Model{
+		"RvLang": {Table: "rv_langs", Ref: "code", Key: []string{"code"}, Serial: true},
+		"RvBook": {Table: "rv_books", Key: []string{"title"}, Serial: true, References: map[string]string{"lang_id": "RvLang"}},
+	}, "rv_langs",
+		[]string{"DROP TABLE IF EXISTS rv_books", "DROP TABLE IF EXISTS rv_langs",
+			"CREATE TABLE rv_langs (id bigserial PRIMARY KEY, code citext NOT NULL UNIQUE)",
+			"CREATE TABLE rv_books (id bigserial PRIMARY KEY, title text NOT NULL UNIQUE, lang_id bigint NOT NULL REFERENCES rv_langs)"},
+		`SELECT string_agg(concat_ws('|', b.title, l.id, l.code), E'\n' ORDER BY b.title) FROM rv_books b JOIN rv_langs l ON l.id = b.lang_id`,
+		(*RvLang)(nil), (*RvBook)(nil))
+	v1 := "- model: RvLang\n  rows:\n    - {_id: go, code: go}\n- model: RvBook\n  rows:\n    - {title: gopl, lang_id: '{{ $.RvLang.go.ID }}'}\n"
+	v2 := strings.Replace(v1, "code: go}", "code: Go}", 1)
+
+	l.seed(v1)
+	head := l.read(v2)
+	readOnlyDo(t, l.db, func(tx bun.Tx, tables map[string]*dbschema.Table) {
+		database, err := fixturemigrate.DatabaseSnapshot(context.Background(), tx, l.cfg, tables,
+			fixturemigrate.SnapshotOptions{Columns: head.Columns, Order: head.Order})
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := fixturemigrate.Check(l.cfg, database, head)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if report := strings.Join(res.Lines(), "\n"); len(res.Changes) != 0 ||
+			!strings.Contains(report, "renamed from RvLang/code=go to RvLang/code=Go") {
+			t.Fatalf("expected a refused rename:\n%s", report)
+		}
+	})
+
+	l.cfg.Policy.Renames = fixturemigrate.RenameUpdate
+	id := scan[string](t, l.db, "SELECT id::text FROM rv_langs")
+	l.fidelity(v1, v2)
+	if got := scan[string](t, l.db, "SELECT id::text FROM rv_langs"); got != id {
+		t.Fatalf("the row got id %s, it had %s", got, id)
+	}
+	// A migration generated from the two files, which hold no ids, keeps
+	// the row too.
+	l.seed(v1)
+	l.migrate(v1, v2)
+	if got := l.current(); got != "gopl|"+id+"|Go" {
+		t.Fatalf("migrated %s", got)
+	}
+}

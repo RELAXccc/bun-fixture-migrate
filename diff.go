@@ -486,14 +486,9 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 		}
 	}
 
-	for _, prev := range old.Entries[model] {
-		if prev.ID == "" || sharedID[prev.ID] {
-			continue
-		}
-		cur, ok := newByID[prev.ID]
-		if !ok || cur.KeyStr == prev.KeyStr {
-			continue
-		}
+	// rename settles a row whose key changed: prev in the base state, cur in
+	// the new one. where names the row in a refusal.
+	rename := func(prev, cur *Entry, where string) error {
 		if keyString(model, cur.Key) == keyString(model, prev.Key) {
 			// Only the spelling of a key value changed, 0012 to 012: the
 			// same key in a numeric column and a rename in a text one.
@@ -501,13 +496,13 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 			if r, ok := respelled(model, m, prev, cur); ok {
 				res.Refusals = append(res.Refusals, r)
 			}
-			continue
+			return nil
 		}
 		// A rename into a name another row still holds cannot be written in
 		// any order this tool can work out: two rows swapping names need one
 		// of them parked somewhere first.
 		occupied := false
-		if other, ok := oldByKey[cur.KeyStr]; ok && other.ID != prev.ID {
+		if other, ok := oldByKey[cur.KeyStr]; ok && other != prev && (other.ID != prev.ID || prev.ID == "") {
 			occupied = true
 		}
 		if cfg.Policy.Renames == RenameUpdate && !occupied {
@@ -523,7 +518,7 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 						renamed[model+"\x00"+v] = true
 					}
 				}
-				continue
+				return nil
 			}
 			before := prev.Full(m)
 			after := copyValues(before)
@@ -547,8 +542,8 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 					prev.Cells[col] = v
 				}
 			}
-			prev.Key, prev.KeyStr = cur.Key, cur.KeyStr
-			continue
+			prev.Key, prev.KeyStr, prev.folded = cur.Key, cur.KeyStr, cur.folded
+			return nil
 		}
 		skip[prev.KeyStr] = true
 		skip[cur.KeyStr] = true
@@ -558,16 +553,43 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 			}
 		}
 		if occupied && cfg.Policy.Renames == RenameUpdate {
-			res.Refusals = append(res.Refusals, Refusal{model, m.ID + " " + prev.ID, fmt.Sprintf(
+			res.Refusals = append(res.Refusals, Refusal{model, where, fmt.Sprintf(
 				"renamed from %s to %s, but another row still holds %s in the base state. Two rows cannot swap "+
 					"names in one step: park one of them under a third name first, in a migration of its own",
 				prev.label(model), cur.label(model), cur.label(model))})
-			continue
+			return nil
 		}
-		res.Refusals = append(res.Refusals, Refusal{model, m.ID + " " + prev.ID, fmt.Sprintf(
+		res.Refusals = append(res.Refusals, Refusal{model, where, fmt.Sprintf(
 			"renamed from %s to %s. An insert plus a delete is not a rename: rows elsewhere point at this one "+
 				"and so does whatever knows the old name outside the database. Hand-write the migration, or set "+
 				"policy.renames to update and run this again", prev.label(model), cur.label(model))})
+		return nil
+	}
+	for _, prev := range old.Entries[model] {
+		if prev.ID == "" || sharedID[prev.ID] {
+			continue
+		}
+		cur, ok := newByID[prev.ID]
+		if !ok || cur.KeyStr == prev.KeyStr {
+			continue
+		}
+		if err := rename(prev, cur, m.ID+" "+prev.ID); err != nil {
+			return err
+		}
+	}
+	// A key that only changed into another spelling of the same value to its
+	// type, go to Go in a citext column, names the same row: the database
+	// finds it by either. Without an id on both sides to say so, the rows
+	// are paired by the key as the type compares it (Entry.folded), and the
+	// new spelling is a rename, which policy.renames decides.
+	for _, p := range foldPairs(model, old, next, skip, sharedID) {
+		where := p.cur.label(model)
+		if p.prev.ID != "" {
+			where = m.ID + " " + p.prev.ID
+		}
+		if err := rename(p.prev, p.cur, where); err != nil {
+			return err
+		}
 	}
 
 	if cfg.Policy.IDDrift == ModeIgnore {
@@ -729,6 +751,53 @@ func movedRefs(cfg *Config, model string, old, next *Snapshot, shared map[string
 	}
 }
 
+// foldPair is a row of the base state and a row of the new one whose keys
+// differ as text and are one value to the key's type.
+type foldPair struct{ prev, cur *Entry }
+
+// foldPairs pairs the rows of a model that are in one state only, by their
+// keys as the key's types compare them, where exactly one row of each state
+// holds such a key and no id says they are two rows.
+func foldPairs(model string, old, next *Snapshot, skip, sharedID map[string]bool) []foldPair {
+	inOld, inNew := map[string]bool{}, map[string]bool{}
+	for _, e := range old.Entries[model] {
+		inOld[e.KeyStr] = true
+	}
+	for _, e := range next.Entries[model] {
+		inNew[e.KeyStr] = true
+	}
+	group := func(entries []*Entry, other map[string]bool) (map[string][]*Entry, []string) {
+		out := map[string][]*Entry{}
+		var order []string
+		for _, e := range entries {
+			fold := e.foldKey(model)
+			if fold == "" || skip[e.KeyStr] || other[e.KeyStr] || sharedID[e.ID] {
+				continue
+			}
+			if _, seen := out[fold]; !seen {
+				order = append(order, fold)
+			}
+			out[fold] = append(out[fold], e)
+		}
+		return out, order
+	}
+	olds, order := group(old.Entries[model], inNew)
+	news, _ := group(next.Entries[model], inOld)
+	var out []foldPair
+	for _, fold := range order {
+		prev, cur := olds[fold], news[fold]
+		if len(prev) != 1 || len(cur) != 1 {
+			continue
+		}
+		if prev[0].ID != "" && cur[0].ID != "" {
+			// Two ids say whether these are one row; identity has listened.
+			continue
+		}
+		out = append(out, foldPair{prev[0], cur[0]})
+	}
+	return out
+}
+
 // refValue is the value a reference to this row carries: its ref column, or
 // its id when the ref column is the id, and "" when it has none.
 func (e *Entry) refValue(m *Model) string {
@@ -745,8 +814,12 @@ func (e *Entry) refValue(m *Model) string {
 // renameChange writes a rename as what it is: an update of the key columns,
 // guarded by the id as well as by the old key, so it cannot land on a row that
 // merely happens to carry the old name.
+//
+// A row without an id, which only a key respelled in a type that holds both
+// spellings equal is taken for a rename of, is guarded by its old key alone:
+// that finds it under either spelling, and only it.
 func renameChange(m *Model, model string, prev, cur *Entry) (fixturechange.Change, error) {
-	if prev.ID == "" {
+	if prev.ID == "" && prev.foldKey(model) == "" {
 		return fixturechange.Change{}, fmt.Errorf("%s %s: a rename needs the row's %s", model, prev.label(model), m.ID)
 	}
 	oldVals, newVals := fixturechange.Values{}, fixturechange.Values{}

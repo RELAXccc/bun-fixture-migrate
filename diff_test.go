@@ -1334,3 +1334,32 @@ func TestComputeScales(t *testing.T) {
 		}
 	}
 }
+
+// Two keys one value to their type, Go and go in a citext column, name one
+// row: without ids to pair them, their folded keys do, and the new spelling
+// is a rename. A key of another type is never folded.
+func TestAKeyRespelledInItsTypeIsARename(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{"Lang": {Table: "langs", Ref: "code", Key: []string{"code"}}}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	old := snap(t, cfg, "- model: Lang\n  rows:\n    - {id: 7, code: go}\n", "the database")
+	next := snap(t, cfg, "- model: Lang\n  rows:\n    - {code: Go}\n", "fixture.yml")
+	if res, err := Compute(cfg, old, next); err != nil || kindsOf(res) != "delete Lang/code=go; insert Lang/code=Go" {
+		t.Fatalf("unfolded keys are two rows: %v %s", err, kindsOf(res))
+	}
+	old.Entries["Lang"][0].folded = map[string]string{"code": "go"}
+	next.Entries["Lang"][0].folded = map[string]string{"code": "go"}
+	res, err := Compute(cfg, old, next)
+	if err != nil || len(res.Changes) != 0 || len(res.Refusals) != 1 ||
+		res.Refusals[0].String() != "Lang id 7: renamed from Lang/code=go to Lang/code=Go. An insert plus a delete is "+
+			"not a rename: rows elsewhere point at this one and so does whatever knows the old name outside the "+
+			"database. Hand-write the migration, or set policy.renames to update and run this again" {
+		t.Fatalf("%v %+v / %+v", err, res.Changes, res.Refusals)
+	}
+	cfg.Policy.Renames = RenameUpdate
+	res, err = Compute(cfg, old, next)
+	if err != nil || len(res.Changes) != 1 || res.Changes[0].ID != "7" || res.Changes[0].New["code"].Lit != "Go" {
+		t.Fatalf("%v %+v / %+v", err, res.Changes, res.Refusals)
+	}
+}

@@ -47,6 +47,11 @@ type Entry struct {
 	// readings: the ref column of the row a reference names, or the field a
 	// template copies. Any other column decides for itself.
 	from map[string]source
+	// folded holds, for a key column whose type holds values equal that
+	// differ as text (citext), the column's value as the type compares it,
+	// as PostgreSQL lower-cases it. Set where the catalog was read; see
+	// foldKey.
+	folded map[string]string
 	// copied holds, for a fixture row, the columns a template copies from a
 	// field of another row other than its id, with that field. dbfixture
 	// stores what the field holds as fmt prints it, which only the field's
@@ -143,6 +148,12 @@ func (s *Snapshot) clone() *Snapshot {
 				c.from = make(map[string]source, len(e.from))
 				for col, src := range e.from {
 					c.from[col] = src
+				}
+			}
+			if e.folded != nil {
+				c.folded = make(map[string]string, len(e.folded))
+				for col, text := range e.folded {
+					c.folded[col] = text
 				}
 			}
 			if e.copied != nil {
@@ -287,6 +298,23 @@ func keyLabel(model string, key fixturechange.Values) string {
 		parts = append(parts, c+"="+key[c].String())
 	}
 	return model + "/" + strings.Join(parts, "/")
+}
+
+// foldKey is the natural key as its types compare it, as keyString writes
+// it, where a key column's type holds values equal that differ as text: Go
+// and GO in a citext column fold to one. "" for a key with no such column,
+// or before the catalog was read.
+func (e *Entry) foldKey(model string) string {
+	if len(e.folded) == 0 {
+		return ""
+	}
+	key := copyValues(e.Key)
+	for col, text := range e.folded {
+		if v, ok := key[col]; ok && !v.IsNull && v.Ref == nil {
+			key[col] = fixturechange.Lit(text)
+		}
+	}
+	return keyString(model, key)
 }
 
 // label is the entry's natural key as keyLabel writes it.

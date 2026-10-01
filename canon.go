@@ -190,7 +190,89 @@ func Canonicalize(ctx context.Context, db bun.IDB, cfg *Config, snap *Snapshot, 
 		snap.reportDuplicateIDs(cfg, model)
 	}
 	lintJSONNulls(cfg, snap, tables)
+	if err := noteFolds(ctx, db, cfg, snap, tables); err != nil {
+		return err
+	}
 	return reportEqualKeys(ctx, db, cfg, snap, tables)
+}
+
+// foldingType reports a type whose equality holds values equal that differ
+// as text, in a way lower-casing settles: citext, which compares lower(a)
+// with lower(b).
+func foldingType(c dbschema.Column) bool {
+	return c.Type == "citext" && c.Category != "A"
+}
+
+// noteFolds gives every entry whose natural key has a citext column that
+// column's value as citext compares it, lower-cased by PostgreSQL, which
+// is what citext does: Entry.foldKey then pairs a row of one snapshot with
+// a row of another whose key only changed case.
+func noteFolds(ctx context.Context, db bun.IDB, cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table) error {
+	for _, model := range snap.Order {
+		m := cfg.Models[model]
+		if m == nil {
+			continue
+		}
+		table := tables[cfg.QualifiedTable(m)]
+		if table == nil {
+			continue
+		}
+		for _, col := range m.keyColumns() {
+			column, ok := table.Column(col)
+			if !ok || !foldingType(column) {
+				continue
+			}
+			var values []string
+			seen := map[string]bool{}
+			for _, e := range snap.Entries[model] {
+				if v, ok := e.Key[col]; ok && !v.IsNull && v.Ref == nil && !seen[v.Lit] {
+					seen[v.Lit] = true
+					values = append(values, v.Lit)
+				}
+			}
+			lower := map[string]string{}
+			for start := 0; start < len(values); start += castBatch {
+				batch := values[start:min(start+castBatch, len(values))]
+				rowsSQL := strings.TrimSuffix(strings.Repeat("(?::text),", len(batch)), ",")
+				args := make([]any, len(batch))
+				for i, v := range batch {
+					args[i] = v
+				}
+				err := db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+					rows, err := tx.QueryContext(ctx, "SELECT t.v, lower(t.v) FROM (VALUES "+rowsSQL+") AS t(v)", args...)
+					if err != nil {
+						return err
+					}
+					defer rows.Close()
+					for rows.Next() {
+						var v, l string
+						if err := rows.Scan(&v, &l); err != nil {
+							return err
+						}
+						lower[v] = l
+					}
+					if err := rows.Err(); err != nil {
+						return err
+					}
+					return rows.Close()
+				})
+				if err != nil {
+					return fmt.Errorf("%s.%s: %w", model, col, err)
+				}
+			}
+			for _, e := range snap.Entries[model] {
+				v, ok := e.Key[col]
+				if !ok || v.IsNull || v.Ref != nil {
+					continue
+				}
+				if e.folded == nil {
+					e.folded = map[string]string{}
+				}
+				e.folded[col] = lower[v.Lit]
+			}
+		}
+	}
+	return nil
 }
 
 // sourceOf is the text a cast of a column of an entry starts from: the value

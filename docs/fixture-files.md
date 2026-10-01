@@ -170,7 +170,9 @@ a cast does:
   key and a trigger are not evaluated: `plan` runs the migration and reports what they refuse, and
   without it the deploy fails.
 - Two natural keys that differ as text but are one value to the key's type, `Go` and `GO` in a
-  `citext` column, are a `duplicate key`.
+  `citext` column, are a `duplicate key`. A key that changes only that way between two states, `go` in
+  the database and `Go` in the file, is one row under a new spelling, which a fresh seed stores: a
+  rename, under `policy.renames`, even when the file has no ids to say so.
 
 ### What export writes
 
