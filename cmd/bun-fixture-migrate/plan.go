@@ -792,12 +792,13 @@ func keyNotes(ctx context.Context, tx bun.Tx, set fixturechange.Set) []string {
 	sort.Strings(models)
 	var notes []string
 	err := fixturemigrate.ReadOnly(ctx, tx, func(tx bun.Tx) error {
+		schemas := map[string]map[string]*dbschema.Table{}
 		for _, model := range models {
 			t, ok := set.Tables[model]
 			if !ok {
 				continue
 			}
-			table, err := tableOf(ctx, tx, t.Name)
+			table, err := tableOf(ctx, tx, t.Name, schemas)
 			if err != nil || table == nil {
 				// A table the database lacks fails the change itself, or a
 				// migration the plan did not run creates it.
@@ -825,8 +826,10 @@ func keyNotes(ctx context.Context, tx bun.Tx, set fixturechange.Set) []string {
 
 // tableOf reads a table of a change set as the catalog has it, named as the
 // set names it, through the search path when it names no schema; nil when
-// there is no such table.
-func tableOf(ctx context.Context, tx bun.Tx, name string) (*dbschema.Table, error) {
+// there is no such table. schemas keeps the schemas read so far.
+func tableOf(ctx context.Context, tx bun.Tx, name string,
+	schemas map[string]map[string]*dbschema.Table) (*dbschema.Table, error) {
+
 	var schema, relname string
 	err := tx.QueryRowContext(ctx, `SELECT n.nspname, c.relname FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = to_regclass(?)`, quoteName(name)).Scan(&schema, &relname)
@@ -836,9 +839,12 @@ JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = to_regclass(?)`, quo
 	if err != nil {
 		return nil, err
 	}
-	tables, err := dbschema.Load(ctx, tx, schema)
-	if err != nil {
-		return nil, err
+	tables, ok := schemas[schema]
+	if !ok {
+		if tables, err = dbschema.Load(ctx, tx, schema); err != nil {
+			return nil, err
+		}
+		schemas[schema] = tables
 	}
 	return tables[schema+"."+relname], nil
 }
