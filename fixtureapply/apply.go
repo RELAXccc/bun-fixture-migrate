@@ -231,7 +231,7 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 
 	r := &runner{tx: tx, set: set, revert: revert, dryRun: o.dryRun, refs: map[string]string{},
 		resync: map[string]bool{}, advanced: map[string]bool{}, types: map[string]map[string]colType{},
-		sequences: map[string]string{}}
+		sequences: map[string]string{}, seqSelect: map[string]bool{}}
 	order := make([]int, len(set.Changes))
 	for i := range order {
 		order[i] = i
@@ -513,7 +513,8 @@ SELECT DISTINCT rel::text FROM (
 // into makes itself known the same way, when the trigger's row does not pass
 // it.
 func privilege(err error) error {
-	if pgerr.State(err) != pgerr.InsufficientPrivilege {
+	var said *grantError
+	if pgerr.State(err) != pgerr.InsufficientPrivilege || errors.As(err, &said) {
 		return err
 	}
 	return fmt.Errorf("%w. The role running the migration lacks a privilege, or a row-level security policy "+
@@ -726,8 +727,10 @@ type runner struct {
 	// types holds, per model, the types of its table's columns, read once.
 	types map[string]map[string]colType
 	// sequences holds, per model, the sequence of its id column, "" for
-	// none, read once.
+	// none, read once, and seqSelect, per sequence, whether the role may
+	// read it as a table.
 	sequences map[string]string
+	seqSelect map[string]bool
 }
 
 func tableHasRows(ctx context.Context, tx bun.IDB, table string) (bool, error) {

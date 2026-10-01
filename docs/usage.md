@@ -109,9 +109,14 @@ Four details matter:
   does not see an explicit id go by, so the application's first insert collides with id 1.
   `fixtureapply.SyncSequences` moves each serial and identity column's sequence past the largest
   value, and never backwards: a sequence restarted at 1000 and not called since stays at 1000 when
-  the ids are below it. Generated migrations do the same for every explicit id they write. Both read
-  the sequence itself, which takes `SELECT` on it besides the `UPDATE` that `setval` takes; the
-  tables' owner has both.
+  the ids are below it. Generated migrations do the same for every explicit id they write. Moving a
+  sequence takes `UPDATE` on it, which `setval` needs, and seeing where it stands takes `SELECT`, or
+  `USAGE`; the tables' owner has them all. A role with `USAGE` and `UPDATE` and no `SELECT` reads
+  where the sequence stands through `pg_sequence_last_value` and its start value, which cannot see
+  where a `RESTART WITH` left a sequence not called since: such a sequence, restarted past the ids,
+  is taken to be at its start value and moved back to just past them. Grant `SELECT` where sequences
+  are restarted ahead of the master data's ids. A role lacking what it needs is told the `GRANT`,
+  and nothing is changed.
 
 ## Which migrator settings
 
