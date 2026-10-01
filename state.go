@@ -525,16 +525,36 @@ func WriteState(path string, s State) error {
 // new one, never half of either: a temporary file in the same directory,
 // synced, then renamed over the target. An interrupted export must not leave
 // half a fixture file behind for the next seed to load.
+//
+// The directory is created when it is not there yet, as a project adopting
+// the tool has neither its fixtures nor its migrations directory. An error
+// names the file being written, never the temporary one, which the person
+// reading it has never heard of.
 func WriteFileAtomic(path string, data []byte, perm os.FileMode) (err error) {
+	fail := func(err error) error {
+		var pathErr *os.PathError
+		var linkErr *os.LinkError
+		switch {
+		case errors.As(err, &linkErr):
+			err = linkErr.Err
+		case errors.As(err, &pathErr):
+			err = pathErr.Err
+		}
+		return fmt.Errorf("write %s: %w", path, err)
+	}
 	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fail(err)
+	}
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	defer func() {
 		if err != nil {
 			tmp.Close()
 			os.Remove(tmp.Name())
+			err = fail(err)
 		}
 	}()
 	if _, err = tmp.Write(data); err != nil {

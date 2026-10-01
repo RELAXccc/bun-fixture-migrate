@@ -67,6 +67,43 @@ func TestReadAndWriteState(t *testing.T) {
 	}
 }
 
+// A project adopting the tool has neither its fixtures directory nor its
+// migrations directory yet: the first export and the first baseline make
+// them. An error names the file being written, not the temporary one.
+func TestWriteFileAtomicMakesTheDirectory(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "fixtures", "master", "fixture.yml")
+	if err := WriteFileAtomic(path, []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "x\n" {
+		t.Fatalf("%q %v", data, err)
+	}
+	if entries, _ := os.ReadDir(filepath.Dir(path)); len(entries) != 1 {
+		t.Fatalf("expected only the file, got %v", entries)
+	}
+	// A file where a directory has to be.
+	blocked := filepath.Join(root, "plain")
+	if err := os.WriteFile(blocked, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(blocked, "fixture.yml")
+	err := WriteFileAtomic(target, []byte("x\n"), 0o644)
+	if err == nil || !strings.HasPrefix(err.Error(), "write "+target+": ") || strings.Contains(err.Error(), ".tmp") {
+		t.Fatalf("got %v", err)
+	}
+	// A directory where the file has to be: the rename fails, and the
+	// temporary file goes.
+	dirTarget := filepath.Join(root, "fixtures", "master")
+	err = WriteFileAtomic(dirTarget, []byte("x\n"), 0o644)
+	if err == nil || !strings.HasPrefix(err.Error(), "write "+dirTarget+": ") || strings.Contains(err.Error(), ".tmp") {
+		t.Fatalf("got %v", err)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(root, "fixtures")); len(entries) != 1 {
+		t.Fatalf("a temporary file was left behind: %v", entries)
+	}
+}
+
 // Several fixture files are one state, in their load order, under one
 // checksum.
 func TestAStateOfSeveralFiles(t *testing.T) {
