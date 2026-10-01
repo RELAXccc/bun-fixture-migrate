@@ -139,6 +139,8 @@ Each ends up in the output with the model, the row and a reason; `generate` writ
   not happen.
 - **A generated column** in the file, and **an explicit id** in a `GENERATED ALWAYS AS IDENTITY`
   column: PostgreSQL refuses to write either.
+- **A null in a NOT NULL column without a default**, an `invalid value`: bun writes a plain field's
+  zero there instead, and a pointer field, like a migration, fails the insert.
 - **A value only the column's type can settle**, such as `1.10` or `017`, in a change computed
   without a database; see [values](#values).
 

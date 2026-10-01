@@ -524,3 +524,19 @@ func TestExportRefusesRowsThatPointAtEachOtherInACircle(t *testing.T) {
 		t.Fatalf("expected the two rows of the circle to be named, got %v", err)
 	}
 }
+
+// A null into a NOT NULL column without a default is never stored as written:
+// bun writes a plain field's zero, and a pointer field fails the insert.
+func TestLintNullDefaultsReportsANullTheColumnCannotHold(t *testing.T) {
+	cfg := testConfig(t)
+	state := snap(t, cfg, base, "fixture.yml")
+	state.Entries["Plan"][1].Cells["currency_id"] = fixturechange.Null()
+	LintNullDefaults(cfg, state, testTables())
+	var got []string
+	for _, f := range state.Findings {
+		got = append(got, string(f.Kind)+": "+f.Row+": "+f.Detail)
+	}
+	if len(got) != 1 || !strings.HasPrefix(got[0], "invalid value: Plan/name=team: currency_id is null, but the column is NOT NULL and has no default") {
+		t.Fatalf("expected one invalid value, got %q", got)
+	}
+}

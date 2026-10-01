@@ -483,7 +483,8 @@ func LintZeroDefaults(cfg *Config, snap *Snapshot, tables map[string]*dbschema.T
 }
 
 // LintNullDefaults reports every explicit null in the snapshot written into a
-// column that has a default.
+// column that has a default, and, as an invalid value, every one written into
+// a NOT NULL column that has none.
 //
 // It is the same line of bun as LintZeroDefaults, read from the other end:
 // marshalsToDefault is true for a nil pointer as well as for a zero in a
@@ -514,6 +515,19 @@ func LintNullDefaults(cfg *Config, snap *Snapshot, tables map[string]*dbschema.T
 				}
 				def, ok := column.NonNullDefault()
 				if !ok {
+					// Nothing turns this NULL into a value the column can
+					// hold: dbfixture stores a plain field's zero instead,
+					// which is not what the file says, and fails the insert
+					// of a pointer field, as a migration writing it does.
+					if !column.Nullable && !column.Generated && !column.Serial() {
+						snap.Findings = append(snap.Findings, Finding{
+							Kind: FindingInvalidValue, Model: model, Row: e.label(model),
+							Detail: fmt.Sprintf(
+								"%s is null, but the column is NOT NULL and has no default: bun writes a plain "+
+									"field's zero there instead, so the database holds that and not NULL, and a "+
+									"pointer field, like a migration, fails the insert: write the value you mean", col),
+						})
+					}
 					continue
 				}
 				snap.Findings = append(snap.Findings, Finding{

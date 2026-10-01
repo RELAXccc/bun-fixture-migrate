@@ -218,3 +218,43 @@ func TestBunWritesTheDefaultForANull(t *testing.T) {
 		t.Fatalf("expected both nulls to be reported, got %+v", snap.Findings)
 	}
 }
+
+type Plain struct {
+	bun.BaseModel `bun:"table:plains"`
+
+	ID    int64  `bun:"id,pk"`
+	Name  string `bun:"name,notnull,unique"`
+	Label string `bun:"label"`
+	Count int64  `bun:"count"`
+}
+
+// A null written into a NOT NULL column without a default is stored as the
+// field's zero by a plain field, so the file and the database disagree from
+// the first seed, and a migration writing that NULL fails. It is an invalid
+// value.
+func TestANullIntoANotNullColumnIsAnInvalidValue(t *testing.T) {
+	db := connect(t)
+	db.RegisterModel((*Plain)(nil))
+	run(t, db, "DROP TABLE IF EXISTS plains",
+		"CREATE TABLE plains (id bigint PRIMARY KEY, name text UNIQUE NOT NULL, label text NOT NULL, count bigint NOT NULL)")
+	text := "- model: Plain\n  rows:\n    - {id: 1, name: a, label: ~, count: ~}\n"
+	loadFixture(t, db, text)
+	if got := scan[string](t, db, "SELECT '['||label||']'||count FROM plains"); got != "[]0" {
+		t.Fatalf("this documents what dbfixture stores; if it changed, so did the premise: %s", got)
+	}
+	cfg := &fixturemigrate.Config{Models: map[string]*fixturemigrate.Model{"Plain": {Table: "plains", Key: []string{"name"}}}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	snap := fixtureSnapshot(t, cfg, text, "fixture.yml")
+	fixturemigrate.LintNullDefaults(cfg, snap, schemaOf(t, db))
+	var cols []string
+	for _, f := range snap.Findings {
+		if f.Kind == fixturemigrate.FindingInvalidValue && strings.Contains(f.Detail, "NOT NULL and has no default") {
+			cols = append(cols, f.Detail[:strings.Index(f.Detail, " ")])
+		}
+	}
+	if strings.Join(cols, ",") != "count,label" {
+		t.Fatalf("expected both nulls to be reported, got %+v", snap.Findings)
+	}
+}
