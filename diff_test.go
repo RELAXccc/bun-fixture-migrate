@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 )
 
@@ -1095,5 +1096,47 @@ func TestOnlyAColumnThatCouldBeUniqueOrdersChanges(t *testing.T) {
 `
 	if got := kindsOf(computeWith(t, cfg, old, next)); got != "update Seat/code=f; update Seat/code=g" {
 		t.Fatalf("f gives slot 9 up, so it goes first: %s", got)
+	}
+}
+
+// With the catalog read, the unique indexes say which columns order changes
+// by the values they give up, and a column that only happens to hold distinct
+// values does not: here cur, which would have g wait for f's EUR.
+func TestTheCatalogSaysWhichColumnsAreUnique(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{"Seat": {Table: "seats", Ref: "code", Key: []string{"code"}}}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	old := snap(t, cfg, `- model: Seat
+  rows:
+    - {id: 1, code: g, slot: 5, cur: EUR}
+    - {id: 2, code: f, slot: 9, cur: USD}
+`, "old")
+	next := snap(t, cfg, `- model: Seat
+  rows:
+    - {id: 1, code: g, slot: 9, cur: GBP}
+    - {id: 2, code: f, slot: 2, cur: EUR}
+`, "new")
+	guessed := uniqueColumns(cfg, old, next)["Seat"]
+	if !guessed["cur"] || !guessed["slot"] {
+		t.Fatalf("without the catalog both could be unique: %v", guessed)
+	}
+	old.noteUniques("Seat", &dbschema.Table{Uniques: [][]string{{"id"}, {"code"}, {"slot"}, {"cur", "slot"}}})
+	known := uniqueColumns(cfg, old, next)["Seat"]
+	if !known["slot"] || !known["id"] || known["cur"] {
+		t.Fatalf("the catalog says id, code and slot: %v", known)
+	}
+	res, err := Compute(cfg, old, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := kindsOf(res); got != "update Seat/code=f; update Seat/code=g" {
+		t.Fatalf("f gives slot 9 up, so it goes first: %s", got)
+	}
+
+	// A reference is never guessed to be unique: in a few rows it is
+	// distinct by chance more often than not.
+	if cols := uniqueColumns(testConfig(t), snap(t, testConfig(t), base, "base"))["Plan"]; cols["currency_id"] {
+		t.Fatalf("a reference was guessed unique: %v", cols)
 	}
 }

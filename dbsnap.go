@@ -94,6 +94,7 @@ func DatabaseSnapshot(ctx context.Context, db bun.IDB, cfg *Config, tables map[s
 		}
 		raw[model] = rows
 		snap.Columns[model] = cols
+		snap.noteUniques(model, table)
 	}
 
 	// Second pass: what every row is called by the rows that point at it, for

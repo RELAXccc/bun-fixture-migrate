@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 )
 
@@ -86,6 +87,26 @@ type Snapshot struct {
 	// key that is not unique, a zero written into a column whose default is
 	// not zero. They are reported, never worked around.
 	Findings []Finding
+
+	// unique holds, per model, the columns a unique index of their own
+	// covers, once the catalog has been read for the snapshot (by
+	// DatabaseSnapshot or Canonicalize); nil while nobody has looked.
+	unique map[string]map[string]bool
+}
+
+// noteUniques records which columns of a model's table have a unique index of
+// their own.
+func (s *Snapshot) noteUniques(model string, table *dbschema.Table) {
+	if s.unique == nil {
+		s.unique = map[string]map[string]bool{}
+	}
+	cols := map[string]bool{}
+	for _, index := range table.Uniques {
+		if len(index) == 1 {
+			cols[index[0]] = true
+		}
+	}
+	s.unique[model] = cols
 }
 
 // clone copies a snapshot deeply enough that rewriting an entry in it cannot

@@ -387,7 +387,7 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 	for i, j := 0, len(deletes)-1; i < j; i, j = i+1, j-1 {
 		deletes[i], deletes[j] = deletes[j], deletes[i]
 	}
-	res.Changes = orderChanges(cfg, distinctColumns(cfg, old, next), renames, deletes, updates, inserts)
+	res.Changes = orderChanges(cfg, uniqueColumns(cfg, old, next), renames, deletes, updates, inserts)
 	res.Tables = tablesFor(cfg, res.Changes)
 	for _, list := range [][]Refusal{res.Refusals, res.Warnings} {
 		sort.SliceStable(list, func(i, j int) bool {
@@ -769,17 +769,15 @@ func (h *rankedHeap) Pop() any {
 //   - a change removing a row, or the name a row is found by, waits for
 //     every change that still names it in its key or its old values: the
 //     child deleted or moved elsewhere goes first;
-//   - a change taking a value of a column that another change of the same
-//     model gives up waits for it, so a unique value can move from one row to
-//     another in one set. Nothing here knows which columns are unique, only
-//     which could be (distinct): a column two rows share a value of in
-//     either state cannot be, and waits for nothing. Nor does one whose
-//     values would have to wait for each other in a circle, two rows trading
-//     values, which no unique column allows either.
+//   - a change taking a value of a unique column (unique, see
+//     uniqueColumns) that another change of the same model gives up waits
+//     for it, so a unique value can move from one row to another in one set.
+//     A column whose values would have to wait for each other in a circle,
+//     two rows trading values, which no order allows, waits for nothing.
 //
 // Of the changes whose wait is over, the one first in the base order goes
 // next, so the base order stands wherever nothing forces another.
-func orderChanges(cfg *Config, distinct map[string]map[string]bool,
+func orderChanges(cfg *Config, unique map[string]map[string]bool,
 	renames, deletes, updates, inserts []fixturechange.Change) []fixturechange.Change {
 	refOf := func(model string, values fixturechange.Values) (string, bool) {
 		v, ok := values[cfg.Models[model].Ref]
@@ -871,7 +869,7 @@ func orderChanges(cfg *Config, distinct map[string]map[string]bool,
 	type moves struct{ freed, taken map[string][]int }
 	byColumn := map[column]*moves{}
 	note := func(c fixturechange.Change, col string, v fixturechange.Value, i int, free bool) {
-		if v.IsNull || !distinct[c.Model][col] {
+		if v.IsNull || !unique[c.Model][col] {
 			return
 		}
 		k := column{c.Model, col}
@@ -983,14 +981,33 @@ func orderChanges(cfg *Config, distinct map[string]map[string]bool,
 	return out
 }
 
-// distinctColumns is, per model, the columns -- the id among them -- that no
-// two rows of either snapshot hold one value in, leaving NULL aside: the
-// only columns a unique index can be on.
-func distinctColumns(cfg *Config, snaps ...*Snapshot) map[string]map[string]bool {
+// uniqueColumns is, per model, the columns a unique index of their own
+// covers: as the catalog says, where a snapshot was read against one, and
+// otherwise the columns that could be unique. Those are the columns, the id
+// among them, that no two rows of either snapshot hold one value in, leaving
+// NULL aside, and that are not references: in a table of a handful of rows a
+// foreign key is distinct often enough by chance, and a guess that a column
+// is unique when it is not orders changes for nothing, which can stand in the
+// way of the column that is.
+func uniqueColumns(cfg *Config, snaps ...*Snapshot) map[string]map[string]bool {
+	out := map[string]map[string]bool{}
+	for _, snap := range snaps {
+		for model, cols := range snap.unique {
+			if out[model] == nil {
+				out[model] = map[string]bool{}
+			}
+			for col := range cols {
+				out[model][col] = true
+			}
+		}
+	}
 	shared := map[string]map[string]bool{}
 	seen := map[string]bool{}
 	for _, snap := range snaps {
 		for _, model := range snap.Order {
+			if out[model] != nil {
+				continue
+			}
 			m := cfg.Models[model]
 			if shared[model] == nil {
 				shared[model] = map[string]bool{}
@@ -1013,15 +1030,19 @@ func distinctColumns(cfg *Config, snaps ...*Snapshot) map[string]map[string]bool
 			}
 		}
 	}
-	out := map[string]map[string]bool{}
+	guessed := map[string]map[string]bool{}
 	for k := range seen {
 		model, col, _ := strings.Cut(k, "\x00")
-		if !shared[model][col] {
-			if out[model] == nil {
-				out[model] = map[string]bool{}
-			}
-			out[model][col] = true
+		if _, isRef := cfg.Models[model].References[col]; isRef || shared[model][col] {
+			continue
 		}
+		if guessed[model] == nil {
+			guessed[model] = map[string]bool{}
+		}
+		guessed[model][col] = true
+	}
+	for model, cols := range guessed {
+		out[model] = cols
 	}
 	return out
 }

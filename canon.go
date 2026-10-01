@@ -63,6 +63,7 @@ func Canonicalize(ctx context.Context, db bun.IDB, cfg *Config, snap *Snapshot, 
 		if table == nil {
 			continue
 		}
+		snap.noteUniques(model, table)
 		entries := snap.Entries[model]
 		cols := append([]string{m.ID}, snap.Columns[model]...)
 		for _, col := range cols {
