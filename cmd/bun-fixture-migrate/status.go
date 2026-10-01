@@ -329,7 +329,8 @@ func (s *setup) statusBase(r *statusReport) (*fixturemigrate.Snapshot, *fixturem
 // respelled by the database, as generate does, so a value written 1.10 in one
 // and 1.1 in the other of a numeric column is no change. It says so when
 // that is all there is, because status -offline cannot tell until the state
-// file has the new spelling.
+// file has the new spelling. It lints the fixture file against the columns as
+// generate does, and what that finds is the fixture file's findings.
 func (s *setup) uncoveredInDB(o streams, tx bun.Tx, r *statusReport, old, head *fixturemigrate.Snapshot) (*fixturemigrate.Result, error) {
 	offline, err := fixturemigrate.Compute(s.cfg, old, head)
 	if err != nil {
@@ -342,6 +343,11 @@ func (s *setup) uncoveredInDB(o streams, tx bun.Tx, r *statusReport, old, head *
 	if err := canonical(o, tx, s.cfg, tables, head, old); err != nil {
 		return nil, err
 	}
+	// The lint generate runs before it writes anything, so status does not
+	// send anybody to a generate that refuses.
+	fixturemigrate.LintColumns(s.cfg, head, tables)
+	fixturemigrate.LintZeroDefaults(s.cfg, head, tables)
+	fixturemigrate.LintNullDefaults(s.cfg, head, tables)
 	res, err := fixturemigrate.Compute(s.cfg, old, head)
 	if err != nil {
 		return nil, err

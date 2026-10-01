@@ -37,6 +37,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -357,16 +359,67 @@ func lint(o streams, cfg *fixturemigrate.Config, snap *fixturemigrate.Snapshot, 
 
 // databaseSnapshot reads the database, limited to the columns the fixture file
 // writes. A column no fixture row mentions is not master data, so a difference
-// in it is not drift.
+// in it is not drift. A column the table does not have is not read: the lint
+// reports it as an unknown column, which is a finding, not a query that fails.
 func databaseSnapshot(ctx context.Context, db bun.IDB, cfg *fixturemigrate.Config,
 	tables map[string]*dbschema.Table, head *fixturemigrate.Snapshot) (*fixturemigrate.Snapshot, error) {
 
+	if err := checkModels(cfg, tables); err != nil {
+		return nil, err
+	}
 	columns := map[string][]string{}
 	for model, cols := range head.Columns {
-		columns[model] = cols
+		m := cfg.Models[model]
+		table := tables[cfg.QualifiedTable(m)]
+		columns[model] = []string{}
+		for _, col := range cols {
+			if _, ok := table.Column(col); ok || table == nil {
+				columns[model] = append(columns[model], col)
+			}
+		}
 	}
 	return fixturemigrate.DatabaseSnapshot(ctx, db, cfg, tables, fixturemigrate.SnapshotOptions{
 		Columns: columns, Order: head.Order})
+}
+
+// checkModels says, before a query names one, that a column the
+// configuration makes a model's key or a reference is not in its table, which
+// PostgreSQL would otherwise say from inside a query nobody wrote. A model
+// whose table is missing is left to the snapshot, which says what it is.
+func checkModels(cfg *fixturemigrate.Config, tables map[string]*dbschema.Table) error {
+	for _, name := range cfg.ModelNames() {
+		m := cfg.Models[name]
+		table := tables[cfg.QualifiedTable(m)]
+		if table == nil {
+			continue
+		}
+		key := append([]string{}, m.Key...)
+		for _, group := range m.KeyAnyOf {
+			key = append(key, group...)
+		}
+		for _, col := range key {
+			if _, ok := table.Column(col); !ok {
+				return fmt.Errorf("model %q: its key is [%s], and %s has no column %s. Set key to the columns that "+
+					"tell two of its rows apart, those of a unique index on the table; a table with none is no master "+
+					"data this tool can migrate", name, strings.Join(key, ", "), table.Qualified(), col)
+			}
+		}
+		refs := make([]string, 0, len(m.References))
+		for col := range m.References {
+			refs = append(refs, col)
+		}
+		sort.Strings(refs)
+		for _, col := range refs {
+			if slices.Contains(m.Ignore, col) || slices.Contains(m.Derived, col) {
+				continue
+			}
+			if _, ok := table.Column(col); !ok {
+				return fmt.Errorf("model %q: references names %s, and %s has no such column; fix the name, or take "+
+					"it out of references", name, col, table.Qualified())
+			}
+		}
+	}
+	return nil
 }
 
 // export writes the fixture files from the database.
@@ -412,6 +465,9 @@ func export(o streams, args []string) error {
 	err = readOnly(o.ctx, db, func(tx bun.Tx) error {
 		tables, err := dbschema.Load(o.ctx, tx, s.cfg.Schemas()...)
 		if err != nil {
+			return err
+		}
+		if err := checkModels(s.cfg, tables); err != nil {
 			return err
 		}
 		var opts fixturemigrate.SnapshotOptions
