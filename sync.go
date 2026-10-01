@@ -108,14 +108,19 @@ func Sync(ctx context.Context, db *bun.DB, cfg *Config, files []FixtureFile, opt
 	if len(diff.Changes) == 0 {
 		return res, nil
 	}
+	// As Render fills a migration's, but for the seed guard, since Sync
+	// seeds an empty database itself, and the migrations table, which Sync
+	// records nothing in.
 	set := fixturechange.Set{
-		Name:    "sync",
-		Tables:  diff.Tables,
-		Changes: diff.Changes,
+		Name:        "sync",
+		LockTimeout: cfg.LockTimeout,
+		Tables:      diff.Tables,
+		Changes:     diff.Changes,
 		Policy: fixturechange.Policy{
-			MissingRow: fixturechange.Mode(cfg.Policy.MissingRow),
-			ChangedRow: fixturechange.Mode(cfg.Policy.ChangedRow),
-			IDDrift:    fixturechange.Mode(cfg.Policy.IDDrift),
+			MissingRow:   fixturechange.Mode(cfg.Policy.MissingRow),
+			ChangedRow:   fixturechange.Mode(cfg.Policy.ChangedRow),
+			IDDrift:      fixturechange.Mode(cfg.Policy.IDDrift),
+			DuplicateKey: fixturechange.Mode(cfg.Policy.DuplicateKey),
 		},
 	}
 	applyOpts := []fixtureapply.Option{

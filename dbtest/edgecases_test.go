@@ -496,3 +496,40 @@ func TestSyncFromGo(t *testing.T) {
 		t.Fatalf("a rename is refused: %v", err)
 	}
 }
+
+// Sync applies its changes as a generated migration does, under the
+// configuration's lock_timeout: it used to leave it out, and waited behind an
+// admin's open transaction for as long as the admin did.
+func TestSyncKeepsToTheLockTimeout(t *testing.T) {
+	db := itemDB(t)
+	cfg := itemConfig(t)
+	ctx := context.Background()
+	files := []fixturemigrate.FixtureFile{{Path: "fixture.yml", Data: []byte(itemFixture)}}
+	if _, err := fixturemigrate.Sync(ctx, db, cfg, files, fixturemigrate.SyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Rollback()
+	if _, err := admin.ExecContext(ctx, "SELECT * FROM items WHERE name = 'anvil' FOR UPDATE"); err != nil {
+		t.Fatal(err)
+	}
+	cfg.LockTimeout = "200ms"
+	changed := []fixturemigrate.FixtureFile{{Path: "fixture.yml",
+		Data: []byte(strings.Replace(itemFixture, "cost: 120", "cost: 130", 1))}}
+	waitAtMost, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, err = fixturemigrate.Sync(waitAtMost, db, cfg, changed, fixturemigrate.SyncOptions{})
+	var ce *fixtureapply.ChangeError
+	if !errors.As(err, &ce) || ce.Outcome.Problem != fixtureapply.ProblemLockTimeout {
+		t.Fatalf("want the lock timeout of 200ms, got %v", err)
+	}
+	if err := admin.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := fixturemigrate.Sync(ctx, db, cfg, changed, fixturemigrate.SyncOptions{}); err != nil || !res.Applied {
+		t.Fatalf("once the admin is done: %v", err)
+	}
+}
