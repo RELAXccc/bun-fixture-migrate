@@ -16,7 +16,9 @@ type fakeProbe struct {
 	nulls map[string]bool
 	plans map[string][]string // index name + "|" + filter -> indexes used
 	fail  map[string]bool     // expressions PostgreSQL cannot evaluate
-	asked []string
+	// nullFail are expressions PostgreSQL cannot evaluate over NULLs.
+	nullFail map[string]bool
+	asked    []string
 }
 
 func (p *fakeProbe) readsOnly(expr string, cols []string) (bool, error) {
@@ -31,7 +33,12 @@ func (p *fakeProbe) readsOnly(expr string, cols []string) (bool, error) {
 	return true, nil
 }
 
-func (p *fakeProbe) nullOver(expr string, cols []string) (bool, error) { return p.nulls[expr], nil }
+func (p *fakeProbe) nullOver(expr string, cols []string) (bool, error) {
+	if p.nullFail[expr] {
+		return false, errCannotTell{msg: "division by zero", state: "22012"}
+	}
+	return p.nulls[expr], nil
+}
 
 func (p *fakeProbe) planned(index dbschema.KeyIndex, key lintKey, filter string) ([]string, error) {
 	p.asked = append(p.asked, index.Name)
@@ -273,6 +280,20 @@ func TestAPartialIndex(t *testing.T) {
 		"where status <> 'retired'::text, and the rows this model reads, where status <> 'archived', are not all "+
 		"within it") {
 		t.Fatalf("both: %s", v.Detail)
+	}
+}
+
+// A predicate the model's rows are not all within settles the verdict,
+// whatever else could not be evaluated.
+func TestAPartialIndexFailsWhateverIsUndecided(t *testing.T) {
+	live := expr("t_live", "norm(email)")
+	live.Predicate = "(deleted_at IS NULL)"
+	p := &fakeProbe{reads: map[string][]string{"norm(email)": {"email"}},
+		nullFail: map[string]bool{"norm(email)": true}}
+	v := verdict(t, keyTable(withReads(live, "email", "deleted_at")), []string{"email"}, "", 160000, p)
+	if v.Backed || v.Unsure || !strings.HasPrefix(v.Detail, "UNIQUE (norm(email)) WHERE deleted_at IS NULL holds "+
+		"only where") {
+		t.Fatalf("%+v", v)
 	}
 }
 

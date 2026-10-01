@@ -599,6 +599,8 @@ func judgeIndex(t *dbschema.Table, index dbschema.KeyIndex, key lintKey, inKey m
 	case len(c.nulls) > 0:
 		c.partialToo = c.reason == reasonPartial
 		c.reason = reasonNullable
+	case c.reason == reasonPartial:
+		// Whatever else is undecided, the index does not back the key.
 	case undecided != "":
 		c.reason, c.why = reasonUnsure, undecided
 	}
