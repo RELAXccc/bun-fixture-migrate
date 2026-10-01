@@ -3,6 +3,7 @@ package fixtureapply
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/uptrace/bun"
@@ -76,4 +77,48 @@ func moveSequence(ctx context.Context, db bun.IDB, table, col string) (bool, err
 		return false, fmt.Errorf("move the sequence of %s past the ids written: %w", table, err)
 	}
 	return moved, rows.Close()
+}
+
+// syncSequences moves the sequence of every table that got an explicit id past
+// the highest id in it. Without this the next ordinary insert reuses an id that
+// is already taken.
+//
+// It only ever moves a sequence forward. setval is not transactional and a
+// sequence is routinely ahead of the highest id -- rows were deleted, an insert
+// rolled back, another session holds values it has not committed yet -- and
+// moving it back to the highest id would hand those values out a second time.
+// A sequence that was never called is compared with its start value.
+func (r *runner) syncSequences(ctx context.Context, o options) error {
+	models := make([]string, 0, len(r.resync))
+	for m := range r.resync {
+		models = append(models, m)
+	}
+	sort.Strings(models)
+	for _, m := range models {
+		t := r.set.Tables[m]
+		table, err := quoteIdent(t.Name)
+		if err != nil {
+			return err
+		}
+		if _, err := quoteIdent(t.ID); err != nil {
+			return err
+		}
+		if o.dryRun {
+			msg := fmt.Sprintf("explicit ids were written into %s; the migration moves its sequence past them "+
+				"if it is behind, which a dry run leaves alone", t.Name)
+			o.logf("%s: %s", r.set.Name, msg)
+			o.report(Outcome{Set: r.set.Name, Index: -1, Model: m, Status: StatusSequence, Message: msg})
+			continue
+		}
+		moved, err := moveSequence(ctx, r.tx, table, t.ID)
+		if err != nil {
+			return err
+		}
+		if moved {
+			msg := fmt.Sprintf("moved the sequence of %s past the explicit ids written", t.Name)
+			o.logf("%s: %s", r.set.Name, msg)
+			o.report(Outcome{Set: r.set.Name, Index: -1, Model: m, Status: StatusSequence, Message: msg})
+		}
+	}
+	return nil
 }
