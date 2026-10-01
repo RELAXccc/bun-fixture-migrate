@@ -259,3 +259,59 @@ func TestScaffoldKeysATableOnAPrimaryKeyThatIsAReference(t *testing.T) {
 		t.Fatalf("the scaffold has to load as a configuration: %v", err)
 	}
 }
+
+// The audit table generated migrations record their runs in is this tool's,
+// as bun's two tables are bun's, and no master data. It has no unique index
+// besides its id and no name column, so it was proposed as a model written
+// commented out, which uncommented would export the runs into the fixture
+// file. It is left out, whatever it is named, and the header proposes its
+// name for audit_table instead.
+func TestScaffoldLeavesOutTheAuditTable(t *testing.T) {
+	col := func(pos int, name, typ string) dbschema.Column {
+		return dbschema.Column{Name: name, Position: pos, Type: typ}
+	}
+	audit := func(name, outcomes string) *dbschema.Table {
+		return &dbschema.Table{Schema: "public", Name: name, PrimaryKey: []string{"id"}, Uniques: [][]string{{"id"}},
+			Columns: []dbschema.Column{col(1, "id", "int8"), col(2, "set_name", "text"), col(3, "direction", "text"),
+				col(4, "set_sha256", "text"), col(5, "applied_at", "timestamptz"), col(6, "applied_by", "text"),
+				col(7, "outcomes", outcomes)}}
+	}
+	tables := testTables()
+	tables["public.deploy_audit"] = audit("deploy_audit", "jsonb")
+	text := string(Scaffold(tables, nil, "public", ScaffoldOptions{}))
+	if strings.Contains(text, " table: deploy_audit") || strings.Contains(text, "DeployAudit") {
+		t.Errorf("the audit table is proposed as a model:\n%s", text)
+	}
+	if !strings.Contains(text, "# This database has one, deploy_audit, left out of the models below") ||
+		!strings.Contains(text, "# audit_table: deploy_audit\n") || strings.Contains(text, "\naudit_table:") {
+		t.Errorf("the header has to propose it, commented out:\n%s", text)
+	}
+	got := ScaffoldTables(tables, nil, "public", ScaffoldOptions{})
+	if strings.Join(got, ",") != "public.currencies,public.features,public.plans" {
+		t.Errorf("tables %v", got)
+	}
+	if got := ScaffoldTables(tables, []string{"deploy_audit", "plans"}, "public", ScaffoldOptions{}); strings.Join(got,
+		",") != "public.plans" {
+		t.Errorf("asked for: %v", got)
+	}
+	cfg := filepath.Join(t.TempDir(), "fixture-migrate.yml")
+	if err := os.WriteFile(cfg, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(cfg); err != nil {
+		t.Fatalf("the scaffold has to load as a configuration: %v", err)
+	}
+
+	// Without one, the header proposes the documented name.
+	if text := string(Scaffold(testTables(), nil, "public", ScaffoldOptions{})); !strings.Contains(text,
+		"# audit_table: bun_fixture_audit\n") || strings.Contains(text, "This database has one") {
+		t.Errorf("no audit table:\n%s", text)
+	}
+	// A table of the same columns that keeps something else in outcomes is
+	// somebody's data.
+	tables = testTables()
+	tables["public.runs"] = audit("runs", "text")
+	if text := string(Scaffold(tables, nil, "public", ScaffoldOptions{})); !strings.Contains(text, " table: runs") {
+		t.Errorf("a table that only looks like it:\n%s", text)
+	}
+}

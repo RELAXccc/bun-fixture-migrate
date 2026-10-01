@@ -82,7 +82,8 @@ func scanPairs(rows *sql.Rows, fn func(a, b string)) error {
 //
 // Read what comes out. It is a first draft made of guesses, not a description
 // of your intentions. Every table of the schema is proposed as a model but
-// bun's own two, and only you know which of them the application writes: a
+// bun's own two and an audit table of this tool's, and only you know which of
+// them the application writes: a
 // table of users or orders kept in a fixture file is drift after every
 // deploy. The natural key is guessed from the narrowest unique index, and a
 // table with neither a unique index besides its primary key nor a name column
@@ -142,7 +143,8 @@ func Scaffold(tables map[string]*dbschema.Table, only []string, schema string, o
 
 // ScaffoldTables is the tables Scaffold proposes as models, as "schema.table":
 // those asked for, or every table, but for partitions, whose rows are their
-// table's, and bun's migrations and locks tables.
+// table's, bun's migrations and locks tables, and an audit table generated
+// migrations record their runs in (see auditTable).
 func ScaffoldTables(tables map[string]*dbschema.Table, only []string, schema string, opts ScaffoldOptions) []string {
 	migrations, locks := opts.MigrationsTable, opts.MigrationLocksTable
 	if migrations == "" {
@@ -160,7 +162,7 @@ func ScaffoldTables(tables map[string]*dbschema.Table, only []string, schema str
 	}
 	var names []string
 	for _, n := range dbschema.Names(tables) {
-		if !opts.Partitions[n] && !bunTables[n] {
+		if !opts.Partitions[n] && !bunTables[n] && !auditTable(tables[n]) {
 			names = append(names, n)
 		}
 	}
@@ -612,14 +614,41 @@ lock_timeout: 10s
 # rollback then undoes only what the migration did in that database, and status
 # shows per database what a deploy skipped. The first run creates the table,
 # which takes CREATE on its schema.
-# audit_table: bun_fixture_audit
-# Where the commands connect, unless -dsn names another database. "env:NAME"
+`)
+	audit := "bun_fixture_audit"
+	for _, n := range dbschema.Names(tables) {
+		if t := tables[n]; auditTable(t) {
+			audit = t.Name
+			if t.Schema != schema {
+				audit = t.Qualified()
+			}
+			fmt.Fprintf(&b, "# This database has one, %s, left out of the models below: it is this\n"+
+				"# tool's, as bun's two tables are bun's.\n", audit)
+			break
+		}
+	}
+	fmt.Fprintf(&b, "# audit_table: %s\n", audit)
+	b.WriteString(`# Where the commands connect, unless -dsn names another database. "env:NAME"
 # reads the DSN from an environment variable, which is how the password stays
 # out of the repository.
 database: env:DATABASE_URL
 `)
 	fmt.Fprintf(&b, "schema: %s\n\n", schema)
 	return b.String()
+}
+
+// auditTable reports whether t has the shape of the table generated
+// migrations record their runs in when audit_table is set: the columns
+// fixtureapply creates it with, outcomes a jsonb array. It is this tool's, as
+// bun's migrations table is bun's, whatever it is named, and is no master data.
+func auditTable(t *dbschema.Table) bool {
+	for _, name := range []string{"id", "set_name", "direction", "set_sha256", "applied_at", "applied_by"} {
+		if _, ok := t.Column(name); !ok {
+			return false
+		}
+	}
+	outcomes, ok := t.Column("outcomes")
+	return ok && outcomes.Type == "jsonb"
 }
 
 const policyBlock = `# The choices that depend on how you run your databases rather than on what is

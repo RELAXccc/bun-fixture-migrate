@@ -50,7 +50,9 @@ a code say, is an ordinary column. Timestamps the database writes with a row, fr
 the triggers are named. Every guess is marked `# GUESS:`.
 
 Which tables are master data only you know. bun's migrations and locks tables are left out and named
-as `migrations_table` and `migration_locks_table`; every other table is proposed, each model with a
+as `migrations_table` and `migration_locks_table`; so is a table with the columns of the
+[audit table](#the-audit-table), whatever its name, which the header then proposes, commented out,
+as `audit_table`; every other table is proposed, each model with a
 `# GUESS:` to delete it when the application writes the table, as it does users, orders or sessions.
 Kept, such a table is exported into the fixture file and is drift after every deploy. A table with
 neither a unique index besides its primary key nor a `name` column has nothing a key can be guessed
@@ -58,7 +60,8 @@ from and is written commented out, with a sentence saying why. `seed_guard_table
 first table, in dependency order, that another model points at, and marked; it has to stay the table
 of a model the fixture files fill.
 
-Refused (exit 1): a table in `-tables` that is not in the schema, a partition or the migrator's own;
+Refused (exit 1): a table in `-tables` that is not in the schema, a partition, the migrator's own or
+the audit table;
 and a schema with no table to propose.
 
 | Flag | |
