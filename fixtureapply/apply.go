@@ -105,8 +105,13 @@ const advisoryLock int64 = 0x62666d0001
 // applied, which is the newest such row and, after a Revert that failed, the
 // ones before it. A change Apply found made already (unchanged) or passed
 // over (skipped) is left as it is, its outcome StatusUnchanged with a message
-// saying why. Without the table, or without such a row, it says so in the log
-// and reverts every change, as it does for a set without an AuditTable.
+// saying why, and so is every change of a run that found the database
+// unseeded. When the set's newest row is a 'down' row, the set is reverted
+// here already -- apply -revert by hand, then bun's Rollback, or two replicas
+// rolling back -- and nothing ran since: every change is left as it is,
+// StatusUnchanged. Without the table, or without a row of the set, it says so
+// in the log and reverts every change, as it does for a set without an
+// AuditTable.
 //
 // That is: it assumes Apply made every change of the set on this database. A
 // change Apply found already made -- the row already held the new values, or
@@ -128,6 +133,18 @@ func Revert(ctx context.Context, db bun.IDB, set fixturechange.Set, opts ...Opti
 	return db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		return run(ctx, tx, set, true, o)
 	})
+}
+
+// WaitForChangeSets takes, in tx, the advisory lock every change set runs
+// under, waiting for one that runs now, in this process or another, to
+// finish. It holds the lock until tx ends, so no change set runs in between.
+// A program that reads the audit table and acts on what it says, as apply
+// -revert -record does, takes it first, so no run comes between the two.
+func WaitForChangeSets(ctx context.Context, tx bun.Tx) error {
+	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(?)", advisoryLock); err != nil {
+		return fmt.Errorf("wait for another change set to finish: %w", err)
+	}
+	return nil
 }
 
 // inCallersTx says whether db is a transaction somebody else began, which a
@@ -185,9 +202,11 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 			return fmt.Errorf("set lock_timeout to %s: %w", lockTimeout, err)
 		}
 	}
-	if restore, err = withDeferredConstraints(ctx, tx, set, restore); err != nil {
+	check, err := withDeferredConstraints(ctx, tx, set)
+	if err != nil {
 		return err
 	}
+	end := func() error { return finish(ctx, tx, set, revert, check, restore, outcomes) }
 	if set.SeedGuardTable != "" {
 		seeded, err := tableHasRows(ctx, tx, set.SeedGuardTable)
 		if err != nil {
@@ -199,21 +218,22 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 			o.log(ctx, slog.LevelInfo, "fixture change set not run, the database is not seeded", out,
 				set.Name+": "+msg)
 			o.report(out)
-			return finish(ctx, tx, set, revert, restore, outcomes)
+			return end()
 		}
 	}
 	// Revert undoes what the last Apply here did, which the audit table
 	// says, read under the advisory lock so no other run comes in between.
 	var base Applies
+	var reverted *AuditRecord
 	if revert && set.AuditTable != "" {
-		if base, err = revertBase(ctx, tx, set, o); err != nil {
+		if base, reverted, err = revertBase(ctx, tx, set, o); err != nil {
 			return err
 		}
 	}
 
 	r := &runner{tx: tx, set: set, revert: revert, dryRun: o.dryRun, refs: map[string]string{},
 		resync: map[string]bool{}, advanced: map[string]bool{}, types: map[string]map[string]colType{},
-		sequences: map[string]string{}}
+		sequences: map[string]string{}, seqSelect: map[string]bool{}}
 	order := make([]int, len(set.Changes))
 	for i := range order {
 		order[i] = i
@@ -230,6 +250,14 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 		}
 		where := fmt.Sprintf("%s: %s %s %s", set.Name, c.Model, keyLabel(c.Key), c.Kind)
 		out := Outcome{Set: set.Name, Index: i, Model: c.Model, Kind: c.Kind, Key: keyLabel(c.Key)}
+		if reverted != nil {
+			out.Status, out.Message = StatusUnchanged, fmt.Sprintf("not reverted: already reverted here, audit "+
+				"row %d, and no Apply ran since", reverted.ID)
+			o.log(ctx, slog.LevelInfo, "fixture change not reverted, the change set is reverted here already", out,
+				where+": "+out.Message)
+			o.report(out)
+			continue
+		}
 		if base != nil {
 			if made, done, row := base.Made(i, set.Changes[i]); !made {
 				out.Status, out.Message = StatusUnchanged, notMade(base, done, row)
@@ -278,43 +306,72 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 	if err := r.syncSequences(ctx, o); err != nil {
 		return err
 	}
-	return finish(ctx, tx, set, revert, restore, outcomes)
+	return end()
 }
 
-// finish ends a run that succeeded: it checks the deferred constraints and
-// puts back the session's settings, and then, last of all in the transaction,
-// writes the run's row into the set's audit table, if it has one. A run that
-// fails before this point writes no row; one that fails here rolls back.
-func finish(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, restore func(context.Context) error,
-	outcomes []Outcome) error {
+// finish ends a run that succeeded: it checks the deferred constraints, writes
+// the run's row into the set's audit table, if it has one, and puts back the
+// session's settings. A run that fails before this point writes no row; one
+// that fails here rolls back.
+//
+// The row is written while the set's lock_timeout is in force: put back, the
+// session's is often 0, and a lock on the audit table -- an ALTER TABLE, a
+// VACUUM FULL -- would hold the migration, and the rows it has locked, for as
+// long as it lasts.
+func finish(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool,
+	check, restore func(context.Context) error, outcomes []Outcome) error {
 
-	if err := restore(ctx); err != nil {
+	if err := check(ctx); err != nil {
 		return err
 	}
-	if set.AuditTable == "" {
-		return nil
+	if set.AuditTable != "" {
+		if err := writeAudit(ctx, tx, set, revert, outcomes); err != nil {
+			return err
+		}
 	}
-	return writeAudit(ctx, tx, set, revert, outcomes)
+	return restore(ctx)
 }
 
-// revertBase is the audit rows of the runs of Apply a Revert undoes, and says
-// in the log what Revert does with them, or without them.
-func revertBase(ctx context.Context, tx bun.IDB, set fixturechange.Set, o options) (Applies, error) {
-	base, err := ApplyRecords(ctx, tx, set)
+// revertBase is the audit rows of the runs of Apply a Revert undoes, or the
+// row of the Revert that undid them already, and says in the log what Revert
+// does with them, or without them.
+func revertBase(ctx context.Context, tx bun.IDB, set fixturechange.Set, o options) (Applies, *AuditRecord, error) {
+	base, reverted, err := ApplyRecords(ctx, tx, set)
+	if pgerr.State(err) == pgerr.LockNotAvailable {
+		return nil, nil, auditLocked(set, "reading what to revert from", err)
+	}
 	if pgerr.State(err) == pgerr.InsufficientPrivilege {
-		return nil, fmt.Errorf("%s: the role running the migration may not read the audit table %s, which says what "+
-			"to revert, so nothing was changed: grant it SELECT and INSERT on the table: %w", set.Name, set.AuditTable, err)
+		return nil, nil, fmt.Errorf("%s: the role running the migration may not read the audit table %s, which says "+
+			"what to revert, so nothing was changed: grant it SELECT and INSERT on the table: %w", set.Name,
+			set.AuditTable, err)
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	out := Outcome{Set: set.Name, Index: -1}
-	if len(base) == 0 {
-		out.Message = fmt.Sprintf("%s holds no Apply of this change set that was not reverted since, so every change "+
-			"is reverted, as if the migration had made them all in this database", set.AuditTable)
+	switch {
+	case reverted != nil:
+		// Reverting again would invert the changes the Apply before that
+		// Revert found made or skipped, which the first Revert left alone:
+		// an admin's value overwritten by an old one this database never
+		// held.
+		out.Message = fmt.Sprintf("the change set is reverted here already: the newest row of %s for it, row %d, is "+
+			"the Revert of %s, and no Apply ran since, so nothing is reverted", set.AuditTable, reverted.ID,
+			reverted.AppliedAt.UTC().Format(time.RFC3339))
+		o.log(ctx, slog.LevelWarn, "the change set is reverted here already, nothing is reverted", out,
+			set.Name+": "+out.Message)
+		return nil, reverted, nil
+	case len(base) == 0:
+		out.Message = fmt.Sprintf("%s holds no row of this change set: it never ran here with the audit table, so "+
+			"every change is reverted, as if the migration had made them all in this database", set.AuditTable)
 		o.log(ctx, slog.LevelWarn, "no audit row of the change set, every change is reverted", out,
 			set.Name+": "+out.Message)
-		return nil, nil
+		return nil, nil, nil
+	case base.ran() == nil:
+		out.Message = fmt.Sprintf("the run here was unseeded (row %d of %s): the database was not seeded yet, so "+
+			"nothing was changed, and nothing is reverted", base[0].ID, set.AuditTable)
+		o.log(ctx, slog.LevelInfo, "the change set ran here unseeded, nothing is reverted", out, set.Name+": "+out.Message)
+		return base, nil, nil
 	}
 	made := 0
 	for i, c := range set.Changes {
@@ -333,15 +390,20 @@ func revertBase(ctx context.Context, tx bun.IDB, set fixturechange.Set, o option
 			"did not have is not reverted", base[0].ID, set.AuditTable)
 		o.log(ctx, slog.LevelWarn, "the change set was edited after it ran here", out, set.Name+": "+out.Message)
 	}
-	return base, nil
+	return base, nil, nil
 }
 
 // notMade says why Revert leaves a change alone: no run of Apply in this
 // database made it.
 func notMade(base Applies, done AuditOutcome, row *AuditRecord) string {
 	if row == nil {
+		ran := base.ran()
+		if ran == nil {
+			return fmt.Sprintf("not reverted: the run here was unseeded (audit row %d): nothing was changed, so "+
+				"nothing is reverted", base[0].ID)
+		}
 		return fmt.Sprintf("not reverted: the change set did not hold this change when it ran here, the Apply of %s "+
-			"(row %d)", base[0].AppliedAt.UTC().Format(time.RFC3339), base[0].ID)
+			"(row %d)", ran.AppliedAt.UTC().Format(time.RFC3339), ran.ID)
 	}
 	when := fmt.Sprintf("the Apply of %s (row %d)", row.AppliedAt.UTC().Format(time.RFC3339), row.ID)
 	what := string(done.Status)
@@ -405,11 +467,13 @@ func session(ctx context.Context, tx bun.IDB) (restore func(context.Context) err
 // that bun records as applied; a child table whose rows it hides lets a delete
 // cascade into rows nobody counted.
 //
-// It looks at the tables the set reads and writes, the seed guard table, and
-// the tables whose foreign keys point at a table the set deletes from. A table
-// that only a trigger writes into is not among them: the policy applies to the
-// trigger's rows as to any other write, which is what the trigger's author
-// meant. Turning row_security off would have made those writes fail instead.
+// It looks at the tables the set reads and writes, the seed guard table, the
+// tables whose foreign keys point at a table the set deletes from, and the
+// audit table once it exists: a policy hiding other roles' rows there would
+// have Revert find no Apply and revert every change. A table that only a
+// trigger writes into is not among them: the policy applies to the trigger's
+// rows as to any other write, which is what the trigger's author meant.
+// Turning row_security off would have made those writes fail instead.
 func rowSecurity(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool) error {
 	deletes := map[string]bool{}
 	for _, c := range set.Changes {
@@ -434,6 +498,9 @@ func rowSecurity(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert 
 	if set.SeedGuardTable != "" {
 		add(set.SeedGuardTable, false)
 	}
+	if set.AuditTable != "" {
+		add(set.AuditTable, false)
+	}
 	if len(rows) == 0 {
 		return nil
 	}
@@ -452,10 +519,23 @@ SELECT DISTINCT rel::text FROM (
 	if len(active) == 0 {
 		return nil
 	}
+	audit := ""
+	if set.AuditTable != "" {
+		q, _ := quoteIdent(set.AuditTable)
+		var on bool
+		if err := tx.QueryRowContext(ctx, "SELECT coalesce(row_security_active(to_regclass(?)), false)", q).
+			Scan(&on); err != nil {
+			return fmt.Errorf("look for row-level security on the audit table %s: %w", set.AuditTable, err)
+		}
+		if on {
+			audit = fmt.Sprintf(" On the audit table %s, a policy that hides rows would hide the runs a Revert "+
+				"follows, and the Revert would undo every change.", set.AuditTable)
+		}
+	}
 	return fmt.Errorf("%s: row-level security is active on %s for the role running the migration: a row-level "+
 		"security policy applies to it, which would hide rows from the change set or stop its changes, so nothing "+
-		"was changed. Run migrations as the tables' owner while they are not FORCE ROW LEVEL SECURITY, or as a "+
-		"role with BYPASSRLS", set.Name, strings.Join(active, ", "))
+		"was changed.%s Run migrations as the tables' owner while they are not FORCE ROW LEVEL SECURITY, or as a "+
+		"role with BYPASSRLS", set.Name, strings.Join(active, ", "), audit)
 }
 
 // privilege adds what to do to an error PostgreSQL raised because the role may
@@ -463,7 +543,8 @@ SELECT DISTINCT rel::text FROM (
 // into makes itself known the same way, when the trigger's row does not pass
 // it.
 func privilege(err error) error {
-	if pgerr.State(err) != pgerr.InsufficientPrivilege {
+	var said *grantError
+	if pgerr.State(err) != pgerr.InsufficientPrivilege || errors.As(err, &said) {
 		return err
 	}
 	return fmt.Errorf("%w. The role running the migration lacks a privilege, or a row-level security policy "+
@@ -472,7 +553,7 @@ func privilege(err error) error {
 }
 
 // withDeferredConstraints makes every DEFERRABLE constraint wait for the end of
-// the change set, and returns a restore that checks them all there.
+// the change set, and returns a check that checks them all there.
 //
 // A change set holds as a whole, not after each statement: the rename of a
 // currency code that a DEFERRABLE foreign key points at is followed, in the
@@ -484,8 +565,8 @@ func privilege(err error) error {
 // check also covers whatever the caller had left deferred, and afterwards
 // every constraint is back in the mode it is declared with; see
 // deferredByDefault.
-func withDeferredConstraints(ctx context.Context, tx bun.IDB, set fixturechange.Set,
-	restore func(context.Context) error) (func(context.Context) error, error) {
+func withDeferredConstraints(ctx context.Context, tx bun.IDB,
+	set fixturechange.Set) (func(context.Context) error, error) {
 
 	if _, err := tx.ExecContext(ctx, "SET CONSTRAINTS ALL DEFERRED"); err != nil {
 		return nil, fmt.Errorf("defer the constraints to the end of the change set: %w", err)
@@ -508,10 +589,7 @@ func withDeferredConstraints(ctx context.Context, tx bun.IDB, set fixturechange.
 			return fmt.Errorf("%s: once every change was made, a constraint did not hold, so nothing was "+
 				"changed: %w", set.Name, privilege(err))
 		}
-		if err := deferredByDefault(ctx, tx); err != nil {
-			return err
-		}
-		return restore(ctx)
+		return deferredByDefault(ctx, tx)
 	}, nil
 }
 
@@ -676,8 +754,10 @@ type runner struct {
 	// types holds, per model, the types of its table's columns, read once.
 	types map[string]map[string]colType
 	// sequences holds, per model, the sequence of its id column, "" for
-	// none, read once.
+	// none, read once, and seqSelect, per sequence, whether the role may
+	// read it as a table.
 	sequences map[string]string
+	seqSelect map[string]bool
 }
 
 func tableHasRows(ctx context.Context, tx bun.IDB, table string) (bool, error) {

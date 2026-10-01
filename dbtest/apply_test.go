@@ -6,12 +6,17 @@ package dbtest_test
 // again. And status, reading what the audit table says each run did.
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/uptrace/bun/migrate"
 )
 
 // A migrator that says what bun thinks of every migration, through
@@ -256,5 +261,160 @@ func TestApplyByHandIsWhatBunsMigratorWouldHaveDone(t *testing.T) {
 	}
 	if out := c.must(0, "status"); !strings.Contains(out, "20300101000000_fixture_hammer: applied") {
 		t.Fatalf("status after the migrator ran it again:\n%s", out)
+	}
+}
+
+// An admin made the migration's change before it ran, so the run finds it
+// made, and the revert leaves the admin's value. Its note says to take the
+// record out with -record; doing so has to delete the record and nothing
+// else, not revert the change set a second time, which would have reverted
+// everything, the admin's value included.
+func TestApplyRevertRecordAfterARevertOnlyDeletesTheRecord(t *testing.T) {
+	db := itemDB(t)
+	run(t, db, "DROP TABLE IF EXISTS bun_migrations, bun_migration_locks, bfm_cli_audit")
+	t.Cleanup(func() { run(t, db, "DROP TABLE IF EXISTS bfm_cli_audit") })
+	loadFixture(t, db, itemFixture)
+	c := buildCLI(t)
+	c.write("fixture-migrate.yml", strings.Replace(cliConfig, "seed_guard_table: items\n",
+		"seed_guard_table: items\naudit_table: bfm_cli_audit\n", 1))
+	c.must(0, "baseline")
+	c.write("fixtures/fixture.yml", replaceOnce(t, itemFixture, "      cost: 120\n", "      cost: 130\n"))
+	c.must(0, "generate", "-name", "anvil", "-at", "20300101000000")
+	file := filepath.Join(c.dir, "migrations", "20300101000000_fixture_anvil.go")
+	bin := buildStatusMigrator(t, filepath.Join(c.dir, "migrations"))
+	runStatusMigrator(t, bin) // its Init creates bun_migrations
+
+	run(t, db, "UPDATE items SET cost = 130 WHERE name = 'anvil'")
+	if out := c.must(0, "apply", "-file", file, "-yes", "-record"); !strings.Contains(out,
+		"unchanged Item name=anvil update") {
+		t.Fatalf("apply -yes -record:\n%s", out)
+	}
+	out := c.must(0, "apply", "-file", file, "-revert", "-yes")
+	if !strings.Contains(out, "not reverted: the migration did not make it in this database") ||
+		!strings.Contains(out, "run apply -revert -yes -record") {
+		t.Fatalf("apply -revert -yes:\n%s", out)
+	}
+	cost := func() int64 { return scan[int64](t, db, "SELECT cost FROM items WHERE name = 'anvil'") }
+	if got := cost(); got != 130 {
+		t.Fatalf("the revert reverted the admin's value: %d", got)
+	}
+
+	// Without -yes, it says what -yes will do.
+	if out := c.must(0, "apply", "-file", file, "-revert", "-record"); !strings.Contains(out,
+		"reverted here already") || !strings.Contains(out, "only deletes the record") {
+		t.Fatalf("apply -revert -record:\n%s", out)
+	}
+	out = c.must(0, "apply", "-file", file, "-revert", "-yes", "-record")
+	if !strings.Contains(out, "reverted here already, so not reverted again; its record deleted, committed") {
+		t.Fatalf("apply -revert -yes -record:\n%s", out)
+	}
+	if got := cost(); got != 130 {
+		t.Fatalf("apply -revert -record reverted the change set again, over the admin's value: %d", got)
+	}
+	if got := scan[string](t, db, "SELECT string_agg(direction, ',' ORDER BY id) FROM bfm_cli_audit"); got != "up,down" {
+		t.Fatalf("apply -revert -record ran the change set again: %s", got)
+	}
+	if got := scan[int64](t, db, "SELECT count(*) FROM bun_migrations"); got != 0 {
+		t.Fatalf("the record is still there: %d", got)
+	}
+	if out := runStatusMigrator(t, bin); !strings.Contains(out, "status 20300101000000 applied=false") {
+		t.Fatalf("bun's migrator after apply -revert -record:\n%s", out)
+	}
+}
+
+// apply -record beside bun's migrator, which keeps one migrator at a time with
+// Lock: a row of bun_migration_locks. The change set's advisory lock keeps two
+// runs of it apart, but a migrator that read which migrations were pending
+// before apply committed its record recorded the migration a second time.
+// apply takes bun's lock too: it refuses while a migrator holds it, and a
+// migrator's Lock waits while apply holds it, and then finds the migration
+// recorded.
+func TestApplyRecordTakesTheMigratorsLock(t *testing.T) {
+	db := itemDB(t)
+	ctx := context.Background()
+	run(t, db, "DROP TABLE IF EXISTS bun_migrations, bun_migration_locks")
+	loadFixture(t, db, itemFixture)
+	c := buildCLI(t)
+	c.must(0, "baseline")
+	c.write("fixtures/fixture.yml", replaceOnce(t, itemFixture, "      cost: 120\n", "      cost: 130\n"))
+	c.must(0, "generate", "-name", "anvil", "-at", "20300101000000")
+	file := filepath.Join(c.dir, "migrations", "20300101000000_fixture_anvil.go")
+	bin := buildStatusMigrator(t, filepath.Join(c.dir, "migrations"))
+	runStatusMigrator(t, bin) // its Init creates bun_migrations and bun_migration_locks
+	cost := func() int64 { return scan[int64](t, db, "SELECT cost FROM items WHERE name = 'anvil'") }
+	records := func() int64 { return scan[int64](t, db, "SELECT count(*) FROM bun_migrations") }
+
+	// bun's own Lock, as a deploy takes it before Migrate.
+	migrator := migrate.NewMigrator(db, migrate.NewMigrations())
+	if err := migrator.Lock(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if out := c.must(0, "apply", "-file", file, "-record"); !strings.Contains(out,
+		"bun_migration_locks holds the lock on bun_migrations") {
+		t.Fatalf("apply -record without -yes, while a migrator holds the lock:\n%s", out)
+	}
+	if out := c.must(2, "apply", "-file", file, "-yes", "-record"); !strings.Contains(out,
+		"bun_migration_locks holds the lock on bun_migrations") || !strings.Contains(out, "nothing was changed") {
+		t.Fatalf("apply -yes -record while a migrator holds the lock:\n%s", out)
+	}
+	if cost() != 120 || records() != 0 {
+		t.Fatalf("a refused apply changed the database: cost %d, %d records", cost(), records())
+	}
+	if err := migrator.Unlock(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// apply holds the lock while it waits for a row an admin holds; the
+	// migrator's Lock waits for apply.
+	admin, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Rollback()
+	run(t, admin, "SELECT * FROM items WHERE name = 'anvil' FOR UPDATE")
+	cmd := exec.Command(c.bin, "apply", "-config", filepath.Join(c.dir, "fixture-migrate.yml"), "-file", file,
+		"-yes", "-record")
+	cmd.Env = append(os.Environ(), "BFM_TEST_DSN="+os.Getenv("BUN_FIXTURE_MIGRATE_POSTGRES"))
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	applied := make(chan error, 1)
+	go func() { applied <- cmd.Wait() }()
+	for start := time.Now(); scan[int64](t, db, "SELECT count(*) FROM pg_stat_activity WHERE "+
+		"wait_event_type = 'Lock' AND query LIKE '%items%' AND pid <> pg_backend_pid()") == 0; {
+		if time.Since(start) > 20*time.Second {
+			t.Fatalf("apply did not reach the row the admin holds:\n%s", out.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	locked := make(chan error, 1)
+	go func() { locked <- migrator.Lock(ctx) }()
+	select {
+	case err := <-locked:
+		t.Fatalf("bun's Lock did not wait for apply -record: %v", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+	if err := admin.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-applied; err != nil {
+		t.Fatalf("apply -yes -record: %v\n%s", err, out.String())
+	}
+	if err := <-locked; err != nil {
+		t.Fatalf("once apply committed, bun's Lock has to succeed: %v", err)
+	}
+	defer migrator.Unlock(ctx)
+	if cost() != 130 || records() != 1 {
+		t.Fatalf("cost %d, %d records", cost(), records())
+	}
+	// The migrator, holding the lock now, has nothing to run.
+	if out := runStatusMigrator(t, bin, "-migrate"); !strings.Contains(out, "status 20300101000000 applied=true") ||
+		!strings.Contains(out, "migrated 0") {
+		t.Fatalf("bun's migrator after apply -record:\n%s", out)
+	}
+	if got := scan[int64](t, db, "SELECT count(*) FROM bun_migration_locks"); got != 1 {
+		t.Fatalf("%d rows in bun_migration_locks: only the migrator's lock is there", got)
 	}
 }

@@ -51,9 +51,12 @@ func (r *runner) diagnose(ctx context.Context, c fixturechange.Change, t fixture
 			what = "The row this change reverts is not in the database, so it cannot be reverted"
 		}
 		// Not "drop the change from the migration": every other database
-		// would then never get it, and nothing would say so.
+		// would then never get it, and nothing would say so. The place to
+		// set it is where the model's MissingRow comes from: its table's
+		// own Policy when that sets it, the set's otherwise, whatever else
+		// the table's Policy sets.
 		where := "this migration's Policy"
-		if t.Policy != nil {
+		if t.Policy != nil && t.Policy.MissingRow != "" {
 			where = fmt.Sprintf("the Policy of %s in this migration's Tables", strconv.Quote(c.Model))
 		}
 		return outcome{problem: problemMissing, message: fmt.Sprintf(

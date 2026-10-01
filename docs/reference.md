@@ -50,7 +50,9 @@ a code say, is an ordinary column. Timestamps the database writes with a row, fr
 the triggers are named. Every guess is marked `# GUESS:`.
 
 Which tables are master data only you know. bun's migrations and locks tables are left out and named
-as `migrations_table` and `migration_locks_table`; every other table is proposed, each model with a
+as `migrations_table` and `migration_locks_table`; so is a table with the columns of the
+[audit table](#the-audit-table), whatever its name, which the header then proposes, commented out,
+as `audit_table`; every other table is proposed, each model with a
 `# GUESS:` to delete it when the application writes the table, as it does users, orders or sessions.
 Kept, such a table is exported into the fixture file and is drift after every deploy. A table with
 neither a unique index besides its primary key nor a `name` column has nothing a key can be guessed
@@ -58,7 +60,8 @@ from and is written commented out, with a sentence saying why. `seed_guard_table
 first table, in dependency order, that another model points at, and marked; it has to stay the table
 of a model the fixture files fill.
 
-Refused (exit 1): a table in `-tables` that is not in the schema, a partition or the migrator's own;
+Refused (exit 1): a table in `-tables` that is not in the schema, a partition, the migrator's own or
+the audit table;
 and a schema with no table to propose.
 
 | Flag | |
@@ -318,9 +321,15 @@ the changes and the record are committed together or not at all: the digits of t
 `name`, the newest `group_id` plus one as `group_id`, and the time, which is what bun v1.2.18's
 `Migrate` writes. bun's migrator then reports the migration applied and does not run it. With
 `-revert`, `-record` deletes the record instead, and the migrator runs the migration again on the
-next migrate. Refused (exit 2), with nothing changed: `-record` of a migration recorded already, and
-`-revert -record` of one that is not; both are looked at again once the change set holds its lock.
-`-record` needs the migrations table, which the migrator's `Init` creates (exit 1 without it).
+next migrate; when the audit table says the change set is reverted here already, by an earlier
+`apply -revert -yes`, it deletes the record and does not run the revert again. Refused (exit 2), with nothing changed: `-record` of a migration recorded already, and
+`-revert -record` of one that is not; both are looked at again once the change set holds its lock;
+and `-record` while bun's lock is held.
+`-record` needs the migrations table, which the migrator's `Init` creates (exit 1 without it). It
+takes bun's lock as `Migrator.Lock` does, a row of `migration_locks_table` naming the migrations
+table, in the same transaction, and deletes it before committing: while a migrator holds that lock
+it refuses (exit 2), and a migrator calling `Lock` while apply runs waits for it and then finds the
+migration recorded.
 
 Without `-record`, the migrations table is left as it is, and apply says what that means: a
 migration it applied is still pending for the migrator, which runs it and finds every change made;
@@ -346,7 +355,7 @@ privilege the role lacks; 2 when the record refuses it. Whenever it is not 0, no
 | --- | --- |
 | 0 | done; for `check`, `status` and `plan`: nothing found. A finding the policy makes a warning is reported and is not a failure |
 | 1 | the command could not do its job: a bad flag, no connection, an unreadable file, output that could not be written, a plan that could not finish, nothing for `status` to compare the fixture files with |
-| 2 | refused: a difference that needs a hand-written migration, a finding the policy makes an error, a state `baseline` will not replace, a fixture migration the state file does not include (`generate`, `baseline`), a file `export` will not write, a migration `apply -record` finds recorded already, or not recorded for `-revert` |
+| 2 | refused: a difference that needs a hand-written migration, a finding the policy makes an error, a state `baseline` will not replace, a fixture migration the state file does not include (`generate`, `baseline`), a file `export` will not write, a migration `apply -record` finds recorded already, or not recorded for `-revert`, or bun's lock held |
 | 3 | found something: drift (`check`), a change no migration makes, a change left out, a state file that does not read, a migration not applied or out of order, a leftover lock (`status`), a migration that would fail or skip (`plan`), a problem in the migrations directory or the state file's history of it (`status`, `plan`), a migration that would fail or failed (`apply`) |
 
 A pipeline can tell "the database drifted" (3) from "the check could not run" (1). Whatever the
@@ -701,8 +710,9 @@ when there are none, say what its `result` and `error` do not: why the plan
 could not tell, or where the deploy can differ from the plan. The top-level `notes` say why a
 migration `-with-sql` would have run is in `not_simulated`. `problems` are those `status` reports in
 the migrations directory, each of which fails the plan: two migrations under one name, a generated
-file that does not read, a fixture migration the state file's history does not include, and the
-one it includes last gone from the directory. `rows_locked` is how many rows the fixture
+file that does not read, a fixture migration the state file's history does not include, the
+one it includes last gone from the directory, and a state file that does not read, such as one
+holding git's conflict markers. `rows_locked` is how many rows the fixture
 migrations wrote and held locked until the rollback, and `locked_seconds` how long the plan's
 transaction was open.
 
@@ -726,7 +736,9 @@ transaction was open.
 
 `direction` is `up`, or `down` with `-revert`; `committed` is whether the changes are in the
 database; `record` is `recorded` or `unrecorded` for what `-record` did, left out without it, and so
-is `group_id` unless a record was written; `error` says why it failed, left out when it did not.
+is `group_id` unless a record was written; `already_reverted` is `true` when `-revert -record`
+found the change set reverted here already and only deleted the record, left out otherwise; `error`
+says why it failed, left out when it did not.
 `changes` are [outcomes](#outcomes); `notes` what the run means for bun's record of the migration and,
 for a revert, which changes it undoes.
 
@@ -770,7 +782,8 @@ does, and is tested under `pgdriver` and `pgx`.
 | `WithDryRun()` | for a caller that rolls back: sequences are reported, not moved |
 | `SetSHA256(set)` | the SHA-256 of a canonical encoding of the set, as the audit table records it |
 | `ReadAudit(ctx, db, table)` | the newest row of the audit table for every set it holds, by name; false when the table does not exist |
-| `ApplyRecords(ctx, db, set)` | the rows a `Revert` of the set follows: its `up` rows after its last `down` row, newest first |
+| `WaitForChangeSets(ctx, tx)` | take, in a transaction, the advisory lock every change set runs under, and hold it until the transaction ends: for a program that reads the audit table and acts on it |
+| `ApplyRecords(ctx, db, set)` | the rows a `Revert` of the set follows: its `up` rows after its last `down` row, newest first; and that `down` row when no `up` row follows it, which is a set reverted here already |
 
 A change that fails the set comes back as a `*fixtureapply.ChangeError`, which `errors.As` finds in
 the error bun's migrator returns: its `Outcome` says which change and why, and it unwraps to the
@@ -844,10 +857,14 @@ files the program read, returning a `*SyncResult` with the diff, the findings an
 
 With `audit_table` set, a generated migration carries it as `fixturechange.Set.AuditTable`, and every
 `Apply` and `Revert` of the set that succeeds writes one row into it, last in the transaction that
-made its changes and under the advisory lock the set holds. A run that fails rolls back and writes
+made its changes and under the advisory lock the set holds, and under its `lock_timeout`: a lock
+another session holds on the table, an `ALTER TABLE` or a `VACUUM FULL`, fails the run as a lock on
+a row does, rather than holding the migration and the rows it changed for as long as it lasts. A run that fails rolls back and writes
 nothing. The table is created the first time, with comments saying what it is; that takes `CREATE`
 on its schema, and a role without it gets a sentence saying so, and nothing is changed. A table
-created by another role needs `SELECT` and `INSERT` granted to the role that migrates.
+created by another role needs `SELECT` and `INSERT` granted to the role that migrates. A row-level
+security policy that applies to that role on the audit table stops the run before it changes
+anything, as one on the set's tables does: hiding rows there would hide the runs a `Revert` follows.
 
 | Column | Type | |
 | --- | --- | --- |
@@ -865,8 +882,13 @@ reported `unchanged` with a message saying why. Not only the newest row: a rever
 bun's default migrator leaves the migration pending with its changes made, and the `Apply` of the next
 migrate finds them all `unchanged`; the run before it made them. A set edited since it ran is matched
 to the run by each change's model, key and kind, and a change the run did not have is not reverted.
-Without such a row, because the table is new or the set ran before it had one, `Revert` inverts every
-change, as it does without an audit table, and logs that it does.
+When the set's newest row is a `down` row, the set is reverted here already and no `Apply` ran
+since: `apply -revert -yes` by hand followed by bun's `Rollback`, or two replicas rolling back. That
+`Revert` changes nothing, reports every change `unchanged`, "already reverted here, audit row N",
+and writes its own `down` row. When the `up` rows all record a run that found the seed guard table
+empty, it changes nothing either: "the run here was unseeded". Without a row of the set, because
+the table is new or the set ran before it had one, `Revert` inverts every change, as it does without
+an audit table, and logs that it does.
 
 The hash is of every field of the set, with every map's keys in order and every field at its zero
 value left out, so a field a later version adds does not change the hash of a set that does not use

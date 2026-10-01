@@ -36,11 +36,15 @@ type applyReport struct {
 	Committed bool `json:"committed"`
 	// Record is what -record did to bun's migrations table: "recorded",
 	// "unrecorded", or "" without -record.
-	Record  string                 `json:"record,omitempty"`
-	GroupID int64                  `json:"group_id,omitempty"`
-	Error   string                 `json:"error,omitempty"`
-	Changes []fixtureapply.Outcome `json:"changes"`
-	Notes   []string               `json:"notes"`
+	Record string `json:"record,omitempty"`
+	// AlreadyReverted is -revert -record finding the change set reverted
+	// here already, by the audit table: the record was deleted, and Revert
+	// not run again.
+	AlreadyReverted bool                   `json:"already_reverted,omitempty"`
+	GroupID         int64                  `json:"group_id,omitempty"`
+	Error           string                 `json:"error,omitempty"`
+	Changes         []fixtureapply.Outcome `json:"changes"`
+	Notes           []string               `json:"notes"`
 }
 
 // applyCmd runs one generated fixture migration against the database outside
@@ -137,10 +141,20 @@ func applyCmd(o streams, args []string) error {
 			"it on the next migrate, which finds every change made", name))
 	case *revert && recorded:
 		notes = append(notes, fmt.Sprintf("without -record, %s keeps recording migration %s as applied, so bun's "+
-			"migrator will not run it again; take the record out with -record", s.cfg.MigrationsTable, name))
+			"migrator will not run it again; to take the record out afterwards, run apply -revert -yes -record, "+
+			"which finds the change set reverted and changes nothing more", s.cfg.MigrationsTable, name))
+	}
+	if *record && !*yes {
+		if locked, err := migratorLocked(o.ctx, db, s.cfg.MigrationLocksTable, s.cfg.MigrationsTable); err != nil {
+			return err
+		} else if locked {
+			notes = append(notes, fmt.Sprintf("%s holds the lock on %s, which bun's Lock took: a migrator is "+
+				"migrating now, or one that stopped without Unlock left it. With -yes, apply -record refuses while "+
+				"it is there", s.cfg.MigrationLocksTable, s.cfg.MigrationsTable))
+		}
 	}
 	if *revert {
-		note, err := revertNote(o.ctx, db, set)
+		note, err := revertNote(o.ctx, db, set, *record)
 		if err != nil {
 			return err
 		}
@@ -155,7 +169,8 @@ func applyCmd(o streams, args []string) error {
 	if *revert {
 		report.Direction = string(fixtureapply.DirectionDown)
 	}
-	runErr := applyAndRecord(o.ctx, db, set, *revert, *record, name, s.cfg.MigrationsTable, report)
+	runErr := applyAndRecord(o.ctx, db, set, *revert, *record, name, s.cfg.MigrationsTable, s.cfg.MigrationLocksTable,
+		report)
 	if runErr != nil {
 		report.Error = runErr.Error()
 	}
@@ -207,16 +222,19 @@ func readAppliedRW(ctx context.Context, db *bun.DB, table string) (map[string]fi
 }
 
 // revertNote says what a Revert of the set will undo here: what the audit
-// table says Apply made, or, without it, every change.
-func revertNote(ctx context.Context, db *bun.DB, set fixturechange.Set) (string, error) {
+// table says Apply made, nothing when it says the set is reverted already,
+// or, without it, every change. record is -record, which for a set reverted
+// already deletes the record and runs nothing.
+func revertNote(ctx context.Context, db *bun.DB, set fixturechange.Set, record bool) (string, error) {
 	if set.AuditTable == "" {
 		return "the change set has no audit table, so Revert inverts every change, as if the migration had made " +
 			"them all in this database", nil
 	}
 	var base fixtureapply.Applies
+	var reverted *fixtureapply.AuditRecord
 	err := db.RunInTx(ctx, &sql.TxOptions{ReadOnly: true}, func(ctx context.Context, tx bun.Tx) error {
 		var err error
-		base, err = fixtureapply.ApplyRecords(ctx, tx, set)
+		base, reverted, err = fixtureapply.ApplyRecords(ctx, tx, set)
 		return err
 	})
 	if pgerr.State(err) == pgerr.InsufficientPrivilege {
@@ -226,9 +244,25 @@ func revertNote(ctx context.Context, db *bun.DB, set fixturechange.Set) (string,
 	if err != nil {
 		return "", err
 	}
-	if len(base) == 0 {
-		return fmt.Sprintf("%s holds no Apply of this change set since its last Revert, so Revert inverts every "+
-			"change, as if the migration had made them all in this database", set.AuditTable), nil
+	unseeded := len(base) > 0
+	for _, r := range base {
+		unseeded = unseeded && r.Unseeded()
+	}
+	switch {
+	case reverted != nil && record:
+		return fmt.Sprintf("%s says the change set is reverted here already (row %d, %s), and no Apply ran since, "+
+			"so with -yes apply does not run its Revert again, and only deletes the record", set.AuditTable,
+			reverted.ID, reverted.AppliedAt.UTC().Format("2006-01-02 15:04:05")), nil
+	case reverted != nil:
+		return fmt.Sprintf("%s says the change set is reverted here already (row %d, %s), and no Apply ran since, "+
+			"so Revert changes nothing", set.AuditTable, reverted.ID,
+			reverted.AppliedAt.UTC().Format("2006-01-02 15:04:05")), nil
+	case len(base) == 0:
+		return fmt.Sprintf("%s holds no row of this change set, so Revert inverts every change, as if the "+
+			"migration had made them all in this database", set.AuditTable), nil
+	case unseeded:
+		return fmt.Sprintf("%s says the change set ran here unseeded (row %d), when it changed nothing, so Revert "+
+			"changes nothing", set.AuditTable, base[0].ID), nil
 	}
 	made := 0
 	for i, c := range set.Changes {
@@ -263,7 +297,7 @@ func applyDryRun(o streams, db *bun.DB, target planTarget, lockTimeout time.Dura
 	for _, m := range report.Migrations {
 		switch m.Result {
 		case "inconclusive":
-			return exitError{1, "the dry run could not finish, which says nothing about the migration: " + m.Error}
+			return exitError{1, "the dry run could not finish, " + unfinished(m) + ": " + m.Error}
 		case "fails":
 			return exitError{3, m.ID + " would fail; nothing was changed"}
 		}
@@ -277,17 +311,48 @@ func applyDryRun(o streams, db *bun.DB, target planTarget, lockTimeout time.Dura
 // in the database or neither is. The record is looked at again once the change
 // set holds its advisory lock: a migrator that recorded the migration in the
 // meantime has done so before running it, and its run waits for this one.
-func applyAndRecord(ctx context.Context, db *bun.DB, set fixturechange.Set, revert, record bool, name, table string,
-	report *applyReport) error {
+//
+// With record, apply takes bun's lock on the migrations table first, in the
+// same transaction, and gives it back before it commits; see lockMigrator.
+//
+// A revert with record of a set the audit table says is reverted here already
+// deletes the record and does not run Revert again: the first revert, which
+// left out what the migration had not made, is what this one would repeat at
+// best. That is read under the advisory lock too.
+func applyAndRecord(ctx context.Context, db *bun.DB, set fixturechange.Set, revert, record bool, name, table,
+	locks string, report *applyReport) error {
 
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	locked := false
+	if record {
+		if locked, err = lockMigrator(ctx, tx, locks, table); err != nil {
+			return err
+		}
+	}
+	if revert && record && set.AuditTable != "" {
+		if err := fixtureapply.WaitForChangeSets(ctx, tx); err != nil {
+			return err
+		}
+		_, reverted, err := fixtureapply.ApplyRecords(ctx, tx, set)
+		if pgerr.State(err) == pgerr.InsufficientPrivilege {
+			return fmt.Errorf("the audit table %s, which says what the revert undoes, cannot be read as this role; "+
+				"grant it SELECT on the table, and USAGE on its schema: %w", set.AuditTable, err)
+		}
+		if err != nil {
+			return err
+		}
+		report.AlreadyReverted = reverted != nil
+	}
 	run := fixtureapply.Apply
 	if revert {
 		run = fixtureapply.Revert
+	}
+	if report.AlreadyReverted {
+		run = func(context.Context, bun.IDB, fixturechange.Set, ...fixtureapply.Option) error { return nil }
 	}
 	if err := run(ctx, tx, set,
 		fixtureapply.WithLogger(func(string, ...any) {}),
@@ -325,12 +390,77 @@ func applyAndRecord(ctx context.Context, db *bun.DB, set fixturechange.Set, reve
 			report.Record = "unrecorded"
 		}
 	}
+	if locked {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM "+locks+" WHERE table_name = ?", table); err != nil {
+			return fmt.Errorf("give back the migrator's lock in %s: %w", locks, err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		report.Record, report.GroupID = "", 0
 		return err
 	}
 	report.Committed = true
 	return nil
+}
+
+// uniqueViolation is PostgreSQL's code for a row a unique index already holds.
+const uniqueViolation = "23505"
+
+// lockMigrator takes, in tx, the lock bun's Migrator.Lock takes on the
+// migrations table: a row of the locks table naming it (bun v1.2.18,
+// migrate/migrator.go, Lock), which the table's unique index lets one session
+// hold. The caller deletes the row again before it commits.
+//
+// The advisory lock every change set takes keeps two runs of the change set
+// apart, but not two records of the migration: a migrator that read which
+// migrations were pending before apply committed its record records the
+// migration a second time. One that took bun's Lock first holds the row, and
+// apply refuses (exit 2), changing nothing. One that calls Lock while apply
+// holds the row waits for apply to commit, and then reads the record apply
+// wrote. A migrator that does not call Lock is kept out by nothing; that is
+// what bun's Lock is for.
+//
+// Without the locks table, which bun's Init creates with the migrations table,
+// no migrator can hold the lock, and there is none to take.
+func lockMigrator(ctx context.Context, tx bun.Tx, locks, migrations string) (bool, error) {
+	var exists bool
+	if err := tx.QueryRowContext(ctx, "SELECT to_regclass(?) IS NOT NULL", locks).Scan(&exists); err != nil {
+		return false, fmt.Errorf("look for %s: %w", locks, err)
+	}
+	if !exists {
+		return false, nil
+	}
+	// The name was checked to be a plain, optionally schema-qualified
+	// identifier, and is used unquoted, as bun uses it.
+	if _, err := tx.ExecContext(ctx, "INSERT INTO "+locks+" (table_name) VALUES (?)", migrations); err != nil {
+		if pgerr.State(err) == uniqueViolation {
+			return false, exitError{2, fmt.Sprintf("%s holds the lock on %s, which bun's Lock took: a migrator is "+
+				"migrating now, or one that stopped without Unlock left it. apply -record does not record beside "+
+				"it, so nothing was changed; run it once the migrator is done, or, if none runs, delete the row",
+				locks, migrations)}
+		}
+		return false, fmt.Errorf("take the migrator's lock in %s, as bun's Lock does (set migration_locks_table if "+
+			"yours is another): %w", locks, err)
+	}
+	return true, nil
+}
+
+// migratorLocked reports whether the locks table holds bun's lock on the
+// migrations table now.
+func migratorLocked(ctx context.Context, db *bun.DB, locks, migrations string) (bool, error) {
+	var locked bool
+	err := db.RunInTx(ctx, &sql.TxOptions{ReadOnly: true}, func(ctx context.Context, tx bun.Tx) error {
+		var exists bool
+		if err := tx.QueryRowContext(ctx, "SELECT to_regclass(?) IS NOT NULL", locks).Scan(&exists); err != nil || !exists {
+			return err
+		}
+		return tx.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM "+locks+" WHERE table_name = ?)", migrations).
+			Scan(&locked)
+	})
+	if err != nil {
+		return false, fmt.Errorf("read %s, bun's locks table: %w", locks, err)
+	}
+	return locked, nil
 }
 
 func printApply(o streams, r *applyReport) {
@@ -372,6 +502,8 @@ func printApply(o streams, r *applyReport) {
 		fmt.Fprintf(o.stdout, "%s: rolled back, nothing was changed\n", r.ID)
 	case r.Record == "recorded":
 		fmt.Fprintf(o.stdout, "%s: %s and recorded as applied (group %d), committed\n", r.ID, verb, r.GroupID)
+	case r.Record == "unrecorded" && r.AlreadyReverted:
+		fmt.Fprintf(o.stdout, "%s: reverted here already, so not reverted again; its record deleted, committed\n", r.ID)
 	case r.Record == "unrecorded":
 		fmt.Fprintf(o.stdout, "%s: %s and its record deleted, committed\n", r.ID, verb)
 	default:

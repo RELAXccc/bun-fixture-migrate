@@ -246,11 +246,114 @@ func TestARevertWithoutAnAuditRowRevertsEverything(t *testing.T) {
 	if got := plans(t, db); got != "free=0 gone=1 old=9 solo=5 team=20" {
 		t.Fatalf("after Revert: %s", got)
 	}
-	if !strings.Contains(strings.Join(logged, "\n"), "holds no Apply of this change set") {
+	if !strings.Contains(strings.Join(logged, "\n"), "holds no row of this change set") {
 		t.Fatalf("the fallback has to say so:\n%s", strings.Join(logged, "\n"))
 	}
 	if got := scan[string](t, db, "SELECT direction FROM bfm_audit_test"); got != "down" {
 		t.Fatalf("the Revert is recorded: %s", got)
+	}
+}
+
+// A Revert after a Revert, with no Apply between them: apply -revert -yes
+// without -record, and then bun's Rollback, or apply -revert -yes -record as
+// the first one's note says; or two replicas rolling back. The second one
+// finds the set reverted and changes nothing. Reverting every change, as
+// without an audit row, would overwrite what the first one left alone: here
+// solo's price, which this database had before the migration ran, and gone,
+// which somebody had removed.
+func TestASecondRevertChangesNothing(t *testing.T) {
+	db := auditDB(t)
+	ctx := context.Background()
+	run(t, db, "UPDATE au_plans SET price = 6 WHERE name = 'solo'", "DELETE FROM au_plans WHERE name = 'gone'")
+	set := auditedSet()
+	if err := fixtureapply.Apply(ctx, db, set, quiet()); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixtureapply.Revert(ctx, db, set, quiet()); err != nil {
+		t.Fatal(err)
+	}
+	first := plans(t, db)
+	if first != "free=0 old=9 solo=6 team=20" {
+		t.Fatalf("after the first Revert: %s", first)
+	}
+	var logged []string
+	var reverted []fixtureapply.Outcome
+	if err := fixtureapply.Revert(ctx, db, set,
+		fixtureapply.WithLogger(func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }),
+		fixtureapply.WithReport(func(o fixtureapply.Outcome) { reverted = append(reverted, o) })); err != nil {
+		t.Fatal(err)
+	}
+	if got := plans(t, db); got != first {
+		t.Fatalf("a second Revert changed the database: %s -> %s\n%s", first, got, strings.Join(logged, "\n"))
+	}
+	down := scan[int64](t, db, "SELECT min(id) FROM bfm_audit_test WHERE direction = 'down'")
+	if len(reverted) != len(set.Changes) {
+		t.Fatalf("every change is reported: %+v", reverted)
+	}
+	for _, o := range reverted {
+		if o.Status != fixtureapply.StatusUnchanged ||
+			!strings.Contains(o.Message, fmt.Sprintf("already reverted here, audit row %d", down)) {
+			t.Fatalf("a change of a set reverted already: %+v", o)
+		}
+	}
+	if log := strings.Join(logged, "\n"); !strings.Contains(log, "the change set is reverted here already") ||
+		strings.Contains(log, "every change is reverted") {
+		t.Fatalf("the log has to say why nothing is reverted:\n%s", log)
+	}
+	// It is a run, and recorded as one.
+	if got := scan[string](t, db, "SELECT string_agg(direction, ',' ORDER BY id) FROM bfm_audit_test"); got != "up,down,down" {
+		t.Fatalf("directions: %s", got)
+	}
+
+	// Applied once more, the next Revert undoes what that Apply made.
+	if err := fixtureapply.Apply(ctx, db, set, quiet()); err != nil {
+		t.Fatal(err)
+	}
+	if got := plans(t, db); got != "free=1 old=9 pro=90 solo=6 team=25" {
+		t.Fatalf("after the second Apply: %s", got)
+	}
+	if err := fixtureapply.Revert(ctx, db, set, quiet()); err != nil {
+		t.Fatal(err)
+	}
+	if got := plans(t, db); got != "free=0 old=9 solo=6 team=20" {
+		t.Fatalf("after the Revert of the second Apply: %s", got)
+	}
+}
+
+// An environment seeded after its migrations ran -- dev, CI, a preview: the
+// migration ran unseeded, its row says so, and the seed loaded the fixture file
+// with the change in it. A rollback there reverts nothing, and says the run was
+// unseeded rather than that the set did not hold the change.
+func TestARevertAfterAnUnseededApplyRevertsNothing(t *testing.T) {
+	db := auditDB(t)
+	ctx := context.Background()
+	set := auditedSet()
+	set.SeedGuardTable = "au_plans"
+	run(t, db, "DELETE FROM au_plans")
+	if err := fixtureapply.Apply(ctx, db, set, quiet()); err != nil {
+		t.Fatal(err)
+	}
+	run(t, db, "INSERT INTO au_plans (name, price) VALUES ('free', 1), ('team', 25), ('solo', 6), ('pro', 90)")
+	var logged []string
+	var reverted []fixtureapply.Outcome
+	if err := fixtureapply.Revert(ctx, db, set,
+		fixtureapply.WithLogger(func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }),
+		fixtureapply.WithReport(func(o fixtureapply.Outcome) { reverted = append(reverted, o) })); err != nil {
+		t.Fatal(err)
+	}
+	if got := plans(t, db); got != "free=1 pro=90 solo=6 team=25" {
+		t.Fatalf("a Revert of an unseeded run changed the database: %s", got)
+	}
+	up := scan[int64](t, db, "SELECT id FROM bfm_audit_test WHERE direction = 'up'")
+	for _, o := range reverted {
+		if o.Status != fixtureapply.StatusUnchanged || !strings.Contains(o.Message,
+			fmt.Sprintf("the run here was unseeded (audit row %d): nothing was changed, so nothing is reverted", up)) ||
+			strings.Contains(o.Message, "did not hold this change") {
+			t.Fatalf("a change of an unseeded run: %+v", o)
+		}
+	}
+	if log := strings.Join(logged, "\n"); !strings.Contains(log, "the run here was unseeded") {
+		t.Fatalf("the log:\n%s", log)
 	}
 }
 
@@ -308,6 +411,46 @@ func TestTheAuditTableNeedsTheRightToCreateIt(t *testing.T) {
 	}
 }
 
+// A row-level security policy on the audit table that shows each role its own
+// rows: the deploy ran the Apply as one role, and the rollback runs as
+// another, which saw no Apply and reverted every change, including those the
+// Apply had found made. The audit table is checked with the set's tables.
+func TestRowLevelSecurityOnTheAuditTableStopsTheRun(t *testing.T) {
+	db := auditDB(t)
+	ctx := context.Background()
+	run(t, db,
+		`DO $$BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'bfm_auditor') THEN CREATE ROLE bfm_auditor; END IF; END$$`,
+		"GRANT USAGE ON SCHEMA public TO bfm_auditor",
+		"GRANT SELECT, INSERT, UPDATE, DELETE ON au_plans, au_translations TO bfm_auditor",
+		"GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO bfm_auditor",
+		"UPDATE au_plans SET price = 6 WHERE name = 'solo'")
+	set := auditedSet()
+	if err := fixtureapply.Apply(ctx, db, set, quiet()); err != nil {
+		t.Fatal(err)
+	}
+	run(t, db, "GRANT SELECT, INSERT ON bfm_audit_test TO bfm_auditor",
+		"ALTER TABLE bfm_audit_test ENABLE ROW LEVEL SECURITY",
+		"CREATE POLICY own_runs ON bfm_audit_test USING (applied_by = current_user) WITH CHECK (true)")
+	before := plans(t, db)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	run(t, tx, "SET LOCAL ROLE bfm_auditor")
+	err = fixtureapply.Revert(ctx, tx, set, quiet())
+	if err == nil || !strings.Contains(err.Error(), "row-level security is active on bfm_audit_test") ||
+		!strings.Contains(err.Error(), "would hide the runs a Revert follows") {
+		t.Fatalf("a policy on the audit table: %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if got := plans(t, db); got != before {
+		t.Fatalf("the Revert changed the database: %s -> %s", before, got)
+	}
+}
+
 // Translations at changed_row warn, prices at error: one model's edit is
 // kept, the other's fails the migration.
 func TestEachModelRunsUnderItsOwnPolicy(t *testing.T) {
@@ -343,8 +486,19 @@ func TestEachModelRunsUnderItsOwnPolicy(t *testing.T) {
 		t.Fatalf("a plan edited here fails under the set's changed_row error: %v", err)
 	}
 	// A missing translation is still the set's missing_row error, and the
-	// message says where to change that.
+	// message says where to change that: the set's Policy, where the
+	// model's MissingRow comes from, although the model has a Policy of its
+	// own, which does not set it.
 	run(t, db, "UPDATE au_plans SET price = 25 WHERE name = 'team'", "DELETE FROM au_translations WHERE key = 'hello'")
+	err = fixtureapply.Revert(ctx, db, set, quiet())
+	if !errors.As(err, &ce) || ce.Outcome.Problem != fixtureapply.ProblemMissingRow ||
+		!strings.Contains(err.Error(), `set MissingRow to "warn" in this migration's Policy,`) {
+		t.Fatalf("missing row: %v", err)
+	}
+	// Set by the model's own Policy, it is changed there.
+	set.Tables["Translation"] = fixturechange.Table{Name: "au_translations", ID: "id", Key: "key",
+		Policy: &fixturechange.Policy{ChangedRow: "warn", MissingRow: "error"}}
+	set.Policy.MissingRow = "warn"
 	err = fixtureapply.Revert(ctx, db, set, quiet())
 	if !errors.As(err, &ce) || ce.Outcome.Problem != fixtureapply.ProblemMissingRow ||
 		!strings.Contains(err.Error(), `in the Policy of "Translation" in this migration's Tables`) {

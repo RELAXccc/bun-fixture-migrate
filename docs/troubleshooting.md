@@ -277,10 +277,12 @@ declares.
 do, which the note under it names. Nothing is known about the migration. Try again, or raise
 `-lock-timeout`.
 
-**`the role plan connects as cannot write here; plan as the role the deploy uses`.** A change failed
-with `permission denied` or in a read-only transaction: the role plan connects as lacks a grant the
-deploy's role has, or a row-level security policy limits it. That says nothing about the deploy, so
-the plan is inconclusive (exit 1). Plan as the role the deploy migrates as.
+**`the role plan connects as lacks a privilege here, or a row-level security policy limits it`.** A
+change, or the record of the run in the audit table, failed with `permission denied`. plan cannot
+tell whether it connects as the role the deploy migrates as, so the plan is inconclusive (exit 1).
+If it is that role, the deploy fails here the same way: grant what the error names, such as `CREATE`
+on the schema of an audit table that does not exist yet. If not, plan as that role. **`the role plan
+connects as cannot write here`** is a read-only transaction: plan as the role the deploy uses.
 
 **`pending before it and not simulated: ...`.** Migrations the tool did not write, such as schema
 changes, run before this one in the deploy but not in the plan. If they change the tables the
@@ -308,6 +310,12 @@ round.
 
 **`bun_migrations does not exist, so there is nothing to record the migration in`** (`apply
 -record`, exit 1). The migrator's `Init` creates it; run it once, or leave out `-record`.
+
+**`bun_migration_locks holds the lock on bun_migrations, which bun's Lock took`** (`apply -record`,
+exit 2). A migrator that took bun's `Lock` is migrating now, and apply does not record a migration
+beside it, which could record it twice. Run apply once the migrator is done. A lock that stays, of a
+migrator that stopped without `Unlock`, is reported by `status` too; delete its row once no migrator
+runs.
 
 **`bufio.Scanner: token too long`.** A line of a SQL migration is longer than 64 KiB, and bun reads
 SQL migrations a line at a time. The deploy fails before running any of the file, and unless the
@@ -370,7 +378,8 @@ Messages a generated migration returns through bun's migrator:
 | `cannot be found: the key refers to Plan(free), which no row holds any more` | changed row: a delete whose key names a row that was renamed or removed in this database, so whether the row to delete is still there cannot be told | look for the row under the new name, and delete it if it is to go |
 | `no longer holds the values this change was generated against` | changed row | [a change was skipped](production.md#a-change-was-skipped) |
 | `changed no row all the same: a BEFORE trigger that returned NULL, a rule, or a row-level security policy stopped it` | error | find the trigger, rule or policy on the table; the change set cannot be made past it |
-| `row-level security is active on plans for the role running the migration` | error, before anything runs: a policy would hide rows of a table the set reads or writes, of the seed guard table, or of a table pointing at one the set deletes from | run migrations as the tables' owner while they are not `FORCE ROW LEVEL SECURITY`, or as a role with `BYPASSRLS`. A table only a trigger writes into is not checked: the policy applies to the trigger's rows as to any write |
+| `row-level security is active on plans for the role running the migration` | error, before anything runs: a policy would hide rows of a table the set reads or writes, of the seed guard table, of a table pointing at one the set deletes from, or of the audit table, where hidden rows would have a revert undo every change | run migrations as the tables' owner while they are not `FORCE ROW LEVEL SECURITY`, or as a role with `BYPASSRLS`. A table only a trigger writes into is not checked: the policy applies to the trigger's rows as to any write |
+| `the sequence public.plans_id_seq of plans has to be kept past the ids written into the table explicitly, and the role running this ... may not ...: GRANT UPDATE ON SEQUENCE ...` | error, before the id is written: nothing was changed | run the `GRANT` it names; `plan` says the same |
 | `The role running the migration lacks a privilege, or a row-level security policy applies to it` | error: PostgreSQL refused a statement, or a row a trigger wrote did not pass a policy's check | grant what is missing, or run migrations as the tables' owner or a role with `BYPASSRLS` |
 | `exists, but under id 7 and not 3` | id drift | [a migration failed](production.md#a-fixture-migration-failed-during-a-deploy) |
 | `2 rows of features point at plans name=pro through ...` | referenced | [a migration failed](production.md#a-fixture-migration-failed-during-a-deploy) |
@@ -389,7 +398,9 @@ Messages a generated migration returns through bun's migrator:
 | `wait for another change set to finish` | the advisory lock wait was cancelled | another process was applying a change set; retry |
 | `the audit table bun_fixture_audit does not exist, and the role running the migration may not create it` | error, after the changes: nothing was changed | grant the role `CREATE` on the schema, or have a role that may run a migration once and grant this one `SELECT` and `INSERT` on the table |
 | `may not write into the audit table` / `may not read the audit table` / `may not use the schema of the audit table` | error: nothing was changed | grant the role `SELECT` and `INSERT` on the table, and `USAGE` on its schema |
-| `holds no Apply of this change set that was not reverted since, so every change is reverted` | not an error, a revert's log line: the set never ran here with an audit table, or ran before it had one | look at the rows the migration reported `unchanged` before rolling back; see [rolling back](production.md#rolling-back) |
+| `holds no row of this change set: it never ran here with the audit table, so every change is reverted` | not an error, a revert's log line: the set never ran here with an audit table, or ran before it had one | look at the rows the migration reported `unchanged` before rolling back; see [rolling back](production.md#rolling-back) |
+| `the change set is reverted here already` / `not reverted: already reverted here, audit row N` | not an error: the newest row of the set in the audit table is a revert's, and no migration ran since, so this revert changes nothing; it is a second rollback, or a rollback after `apply -revert` | nothing; `apply -revert -yes -record` takes the migration's record out without reverting again |
+| `not reverted: the run here was unseeded` | not an error: the migration ran here before the database was seeded and changed nothing, so the revert changes nothing either | nothing; seed again from the old fixture file if the old values are wanted |
 | `not reverted: the migration did not make it in this database` | not an error: the audit table says the migration found the change made, or skipped it, so the revert leaves the row alone | nothing |
 
 **`bun had recorded X as applied before running it, and the record could not be removed`.** The

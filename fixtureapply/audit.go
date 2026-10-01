@@ -110,6 +110,17 @@ func (r AuditRecord) Count(status Status) int {
 	return n
 }
 
+// Unseeded reports whether the run found the seed guard table empty, and so
+// did nothing: the database was not seeded yet.
+func (r AuditRecord) Unseeded() bool {
+	for _, o := range r.Outcomes {
+		if o.Index < 0 && o.Status == StatusUnseeded {
+			return true
+		}
+	}
+	return false
+}
+
 // outcomeOf is what the record says its run did with change i of the set, c as
 // the set holds it now, and false when the run did not have the change. The
 // record keeps the position each change had when it ran; a set edited since
@@ -137,6 +148,17 @@ func (r AuditRecord) outcomeOf(i int, c fixturechange.Change) (AuditOutcome, boo
 // Applies are the audit rows of the runs of Apply a Revert undoes, newest
 // first: every 'up' row of the set after its last 'down' row.
 type Applies []AuditRecord
+
+// ran is the newest of the runs that found the database seeded, nil when
+// every one of them found it empty and did nothing.
+func (a Applies) ran() *AuditRecord {
+	for k := range a {
+		if !a[k].Unseeded() {
+			return &a[k]
+		}
+	}
+	return nil
+}
 
 // Made reports whether one of the runs made change i of the set, c as the set
 // holds it now, with the outcome that says so and the run's row, or else the
@@ -335,6 +357,9 @@ func writeAudit(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert b
 	if _, err := tx.ExecContext(ctx, "INSERT INTO "+table+" (set_name, direction, set_sha256, applied_at, applied_by, "+
 		"outcomes) VALUES (?, ?, ?, clock_timestamp(), current_user, ?::jsonb)",
 		set.Name, string(direction), SetSHA256(set), string(data)); err != nil {
+		if pgerr.State(err) == pgerr.LockNotAvailable {
+			return auditLocked(set, "once every change was made, recording the run in", err)
+		}
 		if pgerr.State(err) == pgerr.InsufficientPrivilege {
 			return fmt.Errorf("%s: the role running the migration may not write into the audit table %s, so nothing "+
 				"was changed: grant it SELECT and INSERT on the table, or take AuditTable out of the migration to "+
@@ -343,6 +368,20 @@ func writeAudit(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert b
 		return fmt.Errorf("%s: record the run in the audit table %s: %w", set.Name, set.AuditTable, err)
 	}
 	return nil
+}
+
+// auditLocked is the error of a run that waited for a lock another session
+// held on the audit table for longer than the lock timeout.
+func auditLocked(set fixturechange.Set, what string, err error) error {
+	limit := "the session's lock_timeout"
+	if set.LockTimeout != "" {
+		limit = "the lock timeout of " + set.LockTimeout
+	}
+	out := Outcome{Set: set.Name, Index: -1, Status: StatusFailed, Problem: ProblemLockTimeout,
+		Message: fmt.Sprintf("%s the audit table %s waited for a lock another session held on it, such as an "+
+			"ALTER TABLE or a VACUUM FULL, for longer than %s, so nothing was changed; the change set runs again "+
+			"on the next deploy", what, set.AuditTable, limit)}
+	return &ChangeError{Outcome: out, err: fmt.Errorf("%s: %w", out.Message, err)}
 }
 
 // ensureAuditTable creates the audit table, with its comments, when it is not
@@ -442,38 +481,51 @@ func ReadAudit(ctx context.Context, db bun.IDB, table string) (map[string]AuditR
 
 // ApplyRecords are the rows Revert follows: every 'up' row of the set in its
 // audit table after the set's last 'down' row, newest first, the runs of Apply
-// that made the changes now in this database. Empty, without an error, when
-// the set has no AuditTable, the table does not exist, or it holds no such
-// row: the set never ran here with one, or the last run was a Revert.
-func ApplyRecords(ctx context.Context, db bun.IDB, set fixturechange.Set) (Applies, error) {
+// that made the changes now in this database.
+//
+// The second result is the set's newest row when that is a 'down' row: the set
+// was reverted in this database and no Apply ran since, so a Revert has
+// nothing to undo. It is nil, and the rows are empty, when the set has no
+// AuditTable, the table does not exist, or it holds no row of the set: the set
+// never ran here with one, and nothing says what Apply did.
+func ApplyRecords(ctx context.Context, db bun.IDB, set fixturechange.Set) (Applies, *AuditRecord, error) {
 	if set.AuditTable == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	quoted, err := quoteIdent(set.AuditTable)
 	if err != nil {
-		return nil, fmt.Errorf("audit table %w", err)
+		return nil, nil, fmt.Errorf("audit table %w", err)
 	}
 	exists, err := auditTableExists(ctx, db, quoted)
 	if err != nil || !exists {
-		return nil, err
+		return nil, nil, err
 	}
-	rows, err := db.QueryContext(ctx, "SELECT "+auditColumns+" FROM "+quoted+" WHERE set_name = ? AND direction = 'up' "+
-		"AND id > (SELECT coalesce(max(id), 0) FROM "+quoted+" WHERE set_name = ? AND direction = 'down') "+
-		"ORDER BY id DESC", set.Name, set.Name)
+	// The 'up' rows after the last 'down' row, and that 'down' row when no
+	// 'up' row follows it.
+	rows, err := db.QueryContext(ctx, "WITH d AS (SELECT max(id) AS last_down FROM "+quoted+" WHERE set_name = ? "+
+		"AND direction = 'down') SELECT "+auditColumns+" FROM "+quoted+", d WHERE set_name = ? AND "+
+		"((direction = 'up' AND id > coalesce(last_down, 0)) OR (id = last_down AND NOT EXISTS (SELECT 1 FROM "+
+		quoted+" u WHERE u.set_name = ? AND u.direction = 'up' AND u.id > last_down))) ORDER BY id DESC",
+		set.Name, set.Name, set.Name)
 	if err != nil {
-		return nil, fmt.Errorf("read the audit table %s: %w", set.AuditTable, err)
+		return nil, nil, fmt.Errorf("read the audit table %s: %w", set.AuditTable, err)
 	}
 	defer rows.Close()
 	var out Applies
+	var reverted *AuditRecord
 	for rows.Next() {
 		r, err := scanAudit(rows)
 		if err != nil {
-			return nil, fmt.Errorf("read the audit table %s: %w", set.AuditTable, err)
+			return nil, nil, fmt.Errorf("read the audit table %s: %w", set.AuditTable, err)
+		}
+		if r.Direction == DirectionDown {
+			reverted = &r
+			continue
 		}
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read the audit table %s: %w", set.AuditTable, err)
+		return nil, nil, fmt.Errorf("read the audit table %s: %w", set.AuditTable, err)
 	}
-	return out, rows.Close()
+	return out, reverted, rows.Close()
 }

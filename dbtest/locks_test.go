@@ -174,6 +174,65 @@ func TestALockedRowFailsTheChangeSetAfterTheLockTimeout(t *testing.T) {
 	}
 }
 
+// An ALTER TABLE or a VACUUM FULL holds the audit table. Its row was written
+// once the session's lock_timeout was back, often 0, so the migration waited
+// for as long as that lock lasted, holding every row it had changed. It waits
+// for the set's lock timeout, as for a row, writing the row or reading what to
+// revert.
+func TestALockOnTheAuditTableFailsTheChangeSetAfterTheLockTimeout(t *testing.T) {
+	db := lockedPlans(t)
+	ctx := context.Background()
+	run(t, db, "DROP TABLE IF EXISTS bfm_locked_audit")
+	t.Cleanup(func() { run(t, db, "DROP TABLE IF EXISTS bfm_locked_audit") })
+	set := lockedSet("200ms")
+	set.AuditTable = "bfm_locked_audit"
+	if err := fixtureapply.Apply(ctx, db, set, quiet()); err != nil {
+		t.Fatal(err)
+	}
+	run(t, db, "UPDATE locked_plans SET price = 10")
+	locked := func(fn func(context.Context) error) error {
+		t.Helper()
+		admin, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer admin.Rollback()
+		run(t, admin, "LOCK TABLE bfm_locked_audit IN ACCESS EXCLUSIVE MODE")
+		bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		start := time.Now()
+		err = fn(bounded)
+		if took := time.Since(start); took > 4*time.Second {
+			t.Fatalf("the change set waited %s for the lock on the audit table: %v", took, err)
+		}
+		return err
+	}
+	for _, c := range []struct {
+		name string
+		run  func(context.Context, bun.IDB, fixturechange.Set, ...fixtureapply.Option) error
+		want string
+	}{
+		{"Apply", fixtureapply.Apply, "recording the run in the audit table bfm_locked_audit waited for a lock"},
+		{"Revert", fixtureapply.Revert, "reading what to revert from the audit table bfm_locked_audit waited"},
+	} {
+		if c.name == "Revert" {
+			if err := fixtureapply.Apply(ctx, db, set, quiet()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		before := scan[int64](t, db, "SELECT price FROM locked_plans")
+		err := locked(func(ctx context.Context) error { return c.run(ctx, db, set, quiet()) })
+		var ce *fixtureapply.ChangeError
+		if !errors.As(err, &ce) || ce.Outcome.Problem != fixtureapply.ProblemLockTimeout ||
+			!strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), "lock timeout of 200ms") {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if got := scan[int64](t, db, "SELECT price FROM locked_plans"); got != before {
+			t.Fatalf("%s: price %d after a failed run", c.name, got)
+		}
+	}
+}
+
 // Waiting for another replica's change set is not what the lock timeout is
 // about: the second replica waits its turn and then finds the work done.
 func TestTheLockTimeoutDoesNotCutShortTheWaitForAnotherChangeSet(t *testing.T) {

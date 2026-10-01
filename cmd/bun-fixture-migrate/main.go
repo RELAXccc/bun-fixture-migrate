@@ -479,7 +479,8 @@ func scaffold(o streams, args []string) error {
 			return fmt.Errorf("-tables names %s, a partition: its rows are its partitioned table's, which is the "+
 				"model", t)
 		default:
-			return fmt.Errorf("-tables names %s, which is the migrator's own table and no master data", t)
+			return fmt.Errorf("-tables names %s, which is the migrator's own table, or the audit table generated "+
+				"migrations record their runs in, and no master data", t)
 		}
 	}
 	if len(fixturemigrate.ScaffoldTables(tables, wanted, *schema, opts)) == 0 {
