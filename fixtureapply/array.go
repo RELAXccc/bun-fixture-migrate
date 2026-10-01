@@ -101,9 +101,9 @@ func writeArray(b *strings.Builder, raw json.RawMessage, depth int) ([]int, erro
 var (
 	errRagged = errors.New("its elements are not all arrays of one length, and PostgreSQL only stores an array " +
 		"whose rows all have the same length")
-	errTooDeep = fmt.Errorf("it nests lists more than %d deep, and PostgreSQL stores arrays of at most %d "+
+	errTooDeep = fmt.Errorf("it nests lists more than %d deep, while PostgreSQL stores arrays of at most %d "+
 		"dimensions", maxDimensions, maxDimensions)
-	errEmptyRow = errors.New("it holds an empty list inside a list, and PostgreSQL cannot store that: an empty " +
+	errEmptyRow = errors.New("it holds an empty list inside a list, which PostgreSQL cannot store: an empty " +
 		"array has no dimensions, so it cannot be a row of another")
 	// errNUL is the sentence Validate refuses any value holding a NUL with.
 	errNUL = errors.New("the value holds a NUL character, which PostgreSQL cannot store")
