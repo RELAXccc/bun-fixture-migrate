@@ -175,6 +175,43 @@ func TestInvert(t *testing.T) {
 	if back.Old["seats"].Lit != "2" || back.New["seats"].Lit != "1" {
 		t.Fatalf("an update reverts by swapping, got %+v", back)
 	}
+	if back.Key["name"].Lit != "pro" {
+		t.Fatalf("an update that leaves the key alone keeps it, got %+v", back)
+	}
+}
+
+// A rename leaves its row under the new key, so that is where the revert
+// finds it. Keyed on the old one, it looked for a row named both ways at once.
+func TestInvertARename(t *testing.T) {
+	rename := fixturechange.Change{Model: "Feature", Kind: fixturechange.Update, ID: "7",
+		Key: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "team"), "code": fixturechange.Lit("api")},
+		Old: fixturechange.Values{"code": fixturechange.Lit("api")},
+		New: fixturechange.Values{"code": fixturechange.Lit("rest")}}
+	back := invert(rename)
+	if back.Key["code"].Lit != "rest" || back.Key["plan_id"].Ref == nil || back.Key["plan_id"].Ref.Key != "team" {
+		t.Fatalf("the revert has to find the row under the key the rename gave it, got %+v", back.Key)
+	}
+	if back.ID != "7" || back.Old["code"].Lit != "rest" || back.New["code"].Lit != "api" {
+		t.Fatalf("the revert renames it back under the same id guard, got %+v", back)
+	}
+	if rename.Key["code"].Lit != "api" {
+		t.Fatal("the change itself has to be left alone")
+	}
+	if again := invert(back); keyLabel(again.Key) != keyLabel(rename.Key) {
+		t.Fatalf("inverting twice is the rename again, got %s", keyLabel(again.Key))
+	}
+}
+
+func TestMovedKey(t *testing.T) {
+	key := fixturechange.Values{"name": fixturechange.Lit("team"), "region": fixturechange.Lit("eu")}
+	if got, moved := movedKey(key, fixturechange.Values{"price": fixturechange.Lit("2")}); moved ||
+		keyLabel(got) != "name=team,region=eu" {
+		t.Fatalf("no key column written: %s, %v", keyLabel(got), moved)
+	}
+	if got, moved := movedKey(key, fixturechange.Values{"name": fixturechange.Lit("crew")}); !moved ||
+		keyLabel(got) != "name=crew,region=eu" {
+		t.Fatalf("a rename: %s, %v", keyLabel(got), moved)
+	}
 }
 
 // A guard that matched nothing is not success. bun records a migration as

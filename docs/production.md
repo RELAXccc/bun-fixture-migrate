@@ -176,7 +176,8 @@ that applied every migration (`status -require-applied`) and baseline that.
 
 `migrator.Rollback` runs each migration's down function. For a fixture migration that is `Revert`:
 the changes backwards, every one inverted and guarded like the original, so a rollback that finds a
-row changed since the migration ran reports it rather than overwriting it.
+row changed since the migration ran reports it rather than overwriting it. A rename is looked up
+under the name it gave the row, and named back.
 
 A rolled-back migration is pending again, and the next deploy runs it again. To undo the change for
 good, revert the commit that brought the migration, the fixture edit and the state file, together,

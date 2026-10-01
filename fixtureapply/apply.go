@@ -306,6 +306,11 @@ type outcome struct {
 }
 
 // invert turns a change into the change that undoes it.
+//
+// An update that writes a key column -- a rename -- leaves its row under the
+// key it gives it, so that is the key the inverted update finds the row by.
+// Keeping the old key would look for a row named both the old way and the new
+// way at once, and the revert of every rename would fail as a missing row.
 func invert(c fixturechange.Change) fixturechange.Change {
 	switch c.Kind {
 	case fixturechange.Insert:
@@ -313,8 +318,24 @@ func invert(c fixturechange.Change) fixturechange.Change {
 	case fixturechange.Delete:
 		return fixturechange.Change{Model: c.Model, Kind: fixturechange.Insert, Key: c.Key, New: c.Old}
 	default:
-		return fixturechange.Change{Model: c.Model, Kind: c.Kind, ID: c.ID, Key: c.Key, Old: c.New, New: c.Old}
+		key, _ := movedKey(c.Key, c.New)
+		return fixturechange.Change{Model: c.Model, Kind: c.Kind, ID: c.ID, Key: key, Old: c.New, New: c.Old}
 	}
+}
+
+// movedKey is the natural key a row has once values are written into it: key,
+// with every key column the values hold replaced. The second result says
+// whether they hold one at all, which is what a rename is.
+func movedKey(key, values fixturechange.Values) (fixturechange.Values, bool) {
+	out := make(fixturechange.Values, len(key))
+	moved := false
+	for col, v := range key {
+		if nv, ok := values[col]; ok {
+			v, moved = nv, true
+		}
+		out[col] = v
+	}
+	return out, moved
 }
 
 type runner struct {

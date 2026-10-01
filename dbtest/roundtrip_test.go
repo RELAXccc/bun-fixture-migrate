@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
 	"github.com/RELAXccc/bun-fixture-migrate/fixtureapply"
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 
@@ -483,5 +484,83 @@ func TestARenameUpdatesTheKeyColumnUnderItsIDGuard(t *testing.T) {
 	err := fixtureapply.Apply(ctx, db2, set, quiet())
 	if err == nil || !strings.Contains(err.Error(), "under id 5 and not 2") {
 		t.Fatalf("expected the id drift to be named, got %v", err)
+	}
+}
+
+// A rename written as an update (renames: update) behaves like every other
+// change: a second run finds it made, a revert puts the old name back, and so
+// does a second revert. Keyed on the old name alone, the second run, the
+// revert and a plan of the applied migration all failed as a missing row.
+func TestARenameRunsTwiceAndReverts(t *testing.T) {
+	db := connect(t)
+	db.RegisterModel((*Currency)(nil), (*Plan)(nil), (*Feature)(nil))
+	ctx := context.Background()
+	cfg := pipelineConfig(t)
+	cfg.Policy.Renames = fixturemigrate.RenameUpdate
+	renamed := replaceOnce(t, oldFixture, "      name: team\n      currency_id: '{{ $.Currency.eur.ID }}'\n      price_cents: 2000\n",
+		"      name: crew\n      currency_id: '{{ $.Currency.eur.ID }}'\n      price_cents: 2500\n")
+	renamed = replaceOnce(t, renamed, "      code: sso\n      quota: 1\n", "      code: sso\n      quota: 2\n")
+	res, err := fixturemigrate.Compute(cfg, fixtureSnapshot(t, cfg, oldFixture, "base"),
+		fixtureSnapshot(t, cfg, renamed, "head"))
+	if err != nil || len(res.Refusals) != 0 {
+		t.Fatalf("Compute: %v %+v", err, res.Refusals)
+	}
+	if len(res.Changes) == 0 || res.Changes[0].ID == "" {
+		t.Fatalf("expected a rename first, got %+v", res.Changes)
+	}
+	set := fixturechange.Set{Name: "rename", SeedGuardTable: "plans", Tables: res.Tables, Changes: res.Changes}
+
+	resetSchema(t, db)
+	load(t, db, renamed)
+	want := snapshot(t, db)
+	resetSchema(t, db)
+	load(t, db, oldFixture)
+	before := snapshot(t, db)
+
+	run := func(what string, fn func(context.Context, bun.IDB, fixturechange.Set, ...fixtureapply.Option) error,
+		set fixturechange.Set, wantStatus fixtureapply.Status, wantState string) {
+		t.Helper()
+		var outcomes []fixtureapply.Outcome
+		if err := fn(ctx, db, set, quiet(), fixtureapply.WithReport(func(o fixtureapply.Outcome) {
+			outcomes = append(outcomes, o)
+		})); err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+		for _, o := range outcomes {
+			if o.Index >= 0 && o.Status != wantStatus {
+				t.Fatalf("%s: %s %s %s is %s, want %s: %s", what, o.Model, o.Key, o.Kind, o.Status, wantStatus, o.Message)
+			}
+		}
+		if got := snapshot(t, db); got != wantState {
+			t.Fatalf("%s left\n%s\nwant\n%s", what, got, wantState)
+		}
+	}
+	run("Apply", fixtureapply.Apply, set, fixtureapply.StatusApplied, want)
+	if got := scan[int64](t, db, `SELECT id FROM plans WHERE name = 'crew'`); got != 2 {
+		t.Fatalf("the renamed row keeps its id, got %d", got)
+	}
+	run("a second Apply", fixtureapply.Apply, set, fixtureapply.StatusUnchanged, want)
+	run("Revert", fixtureapply.Revert, set, fixtureapply.StatusApplied, before)
+	// The changes after the rename find their rows under the new name, which
+	// a revert takes away; the rename itself finds its row either way. bun
+	// never rolls one migration back twice, so only the rename is run again.
+	rename := set
+	rename.Changes = set.Changes[:1]
+	run("a second Revert of the rename", fixtureapply.Revert, rename, fixtureapply.StatusUnchanged, before)
+	run("Apply after the revert", fixtureapply.Apply, set, fixtureapply.StatusApplied, want)
+
+	// Another row took the old name after the rename: the rename is still the
+	// one this change made, and says so.
+	if _, err := db.ExecContext(ctx, `INSERT INTO plans (name, currency_id, price_cents, seats, rating, public)
+		VALUES ('team', 1, 1, 1, 1, true)`); err != nil {
+		t.Fatal(err)
+	}
+	var outcomes []fixtureapply.Outcome
+	if err := fixtureapply.Apply(ctx, db, set, quiet(),
+		fixtureapply.WithReport(func(o fixtureapply.Outcome) { outcomes = append(outcomes, o) })); err != nil {
+		t.Fatalf("Apply with the old name taken again: %v", err)
+	}
+	if outcomes[0].Status != fixtureapply.StatusUnchanged || !strings.Contains(outcomes[0].Message, "as name=crew") {
+		t.Fatalf("the rename is made already: %+v", outcomes[0])
 	}
 }

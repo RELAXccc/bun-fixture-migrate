@@ -38,6 +38,9 @@ func (r *runner) diagnose(ctx context.Context, c fixturechange.Change, t fixture
 		if c.Kind == fixturechange.Delete {
 			return outcome{problem: problemBenign, message: "the row is already gone, nothing to delete"}, nil
 		}
+		if out, done, err := r.diagnoseMoved(ctx, c, t, table, wanted); err != nil || done {
+			return out, err
+		}
 		return outcome{problem: problemMissing, message: fmt.Sprintf(
 			"no row of %s has %s. The row this change updates is not in the database, so the change cannot be made. "+
 				"Put the row back, or drop this change from the migration",
@@ -58,6 +61,11 @@ func (r *runner) diagnose(ctx context.Context, c fixturechange.Change, t fixture
 			return outcome{}, err
 		}
 		if withID == 0 {
+			// A rename already made, and somebody has taken the old key since.
+			if out, done, err := r.diagnoseMoved(ctx, c, t, table, wanted); err != nil ||
+				(done && out.problem == problemBenign) {
+				return out, err
+			}
 			ids, err := r.idsFor(ctx, c.Model, table, t, c.Key)
 			if err != nil {
 				return outcome{}, err
@@ -72,6 +80,46 @@ func (r *runner) diagnose(ctx context.Context, c fixturechange.Change, t fixture
 		"%s %s no longer holds the values this change was generated against, so somebody changed it in this "+
 			"database. It was left alone. Compare it with the fixture file and decide which one is right",
 		t.Name, keyLabel(c.Key))}, nil
+}
+
+// diagnoseMoved looks for the row of an update that writes a key column -- a
+// rename -- under the key the update gives it. Finding it there holding the new
+// values is a rename this change already made: a second run, a replica that
+// came second, or a plan of an applied migration. Without this every one of
+// them would fail as a missing row. done is false when there is no such row, and
+// the caller carries on with its own diagnosis.
+func (r *runner) diagnoseMoved(ctx context.Context, c fixturechange.Change, t fixturechange.Table, table string,
+	wanted fixturechange.Values) (out outcome, done bool, err error) {
+
+	moved, ok := movedKey(c.Key, wanted)
+	if !ok {
+		return outcome{}, false, nil
+	}
+	n, err := r.count(ctx, c.Model, table, moved, wanted)
+	if err != nil || n == 0 {
+		return outcome{}, false, err
+	}
+	if n > 1 {
+		return duplicate(t, fixturechange.Change{Key: moved}, n), true, nil
+	}
+	if c.ID != "" {
+		withID, err := r.count(ctx, c.Model, table, moved, wanted, fixturechange.Values{t.ID: fixturechange.Lit(c.ID)})
+		if err != nil {
+			return outcome{}, false, err
+		}
+		if withID == 0 {
+			ids, err := r.idsFor(ctx, c.Model, table, t, moved)
+			if err != nil {
+				return outcome{}, false, err
+			}
+			return outcome{problem: problemIDDrift, message: fmt.Sprintf(
+				"%s %s is gone and %s exists, but under %s %s and not %s. This change was generated for the row "+
+					"with that id; another row took the new key, and this one was not renamed",
+				t.Name, keyLabel(c.Key), keyLabel(moved), t.ID, strings.Join(ids, ", "), c.ID)}, true, nil
+		}
+	}
+	return outcome{problem: problemBenign, message: fmt.Sprintf(
+		"the row already holds these values as %s, nothing to do", keyLabel(moved))}, true, nil
 }
 
 // diagnoseInsert explains an insert whose NOT EXISTS found a row.

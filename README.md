@@ -134,7 +134,8 @@ configuration later does not change what an old migration does. At run time `fix
 - moves the sequence past any explicit id it wrote;
 - logs one line per row, or hands every row's outcome to `fixtureapply.WithReport`.
 
-`Revert` is the same set backwards, every change inverted and guarded the same way.
+`Revert` is the same set backwards, every change inverted and guarded the same way. A rename finds
+its row under the name it gave it, so it reverts, and a second run finds it already made.
 
 ## Three things about bun you may not know
 
