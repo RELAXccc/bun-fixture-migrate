@@ -387,7 +387,7 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 	for i, j := 0, len(deletes)-1; i < j; i, j = i+1, j-1 {
 		deletes[i], deletes[j] = deletes[j], deletes[i]
 	}
-	res.Changes = orderChanges(cfg, renames, deletes, updates, inserts)
+	res.Changes = orderChanges(cfg, distinctColumns(cfg, old, next), renames, deletes, updates, inserts)
 	res.Tables = tablesFor(cfg, res.Changes)
 	for _, list := range [][]Refusal{res.Refusals, res.Warnings} {
 		sort.SliceStable(list, func(i, j int) bool {
@@ -762,13 +762,16 @@ func (h *rankedHeap) Pop() any {
 //     child deleted or moved elsewhere goes first;
 //   - a change taking a value of a column that another change of the same
 //     model gives up waits for it, so a unique value can move from one row to
-//     another in one set. Nothing here knows which columns are unique; a
-//     column whose values would have to wait for each other in a circle, two
-//     rows trading values, cannot be one, and waits for nothing.
+//     another in one set. Nothing here knows which columns are unique, only
+//     which could be (distinct): a column two rows share a value of in
+//     either state cannot be, and waits for nothing. Nor does one whose
+//     values would have to wait for each other in a circle, two rows trading
+//     values, which no unique column allows either.
 //
 // Of the changes whose wait is over, the one first in the base order goes
 // next, so the base order stands wherever nothing forces another.
-func orderChanges(cfg *Config, renames, deletes, updates, inserts []fixturechange.Change) []fixturechange.Change {
+func orderChanges(cfg *Config, distinct map[string]map[string]bool,
+	renames, deletes, updates, inserts []fixturechange.Change) []fixturechange.Change {
 	refOf := func(model string, values fixturechange.Values) (string, bool) {
 		v, ok := values[cfg.Models[model].Ref]
 		if !ok || v.Ref != nil || v.IsNull {
@@ -859,7 +862,7 @@ func orderChanges(cfg *Config, renames, deletes, updates, inserts []fixturechang
 	type moves struct{ freed, taken map[string][]int }
 	byColumn := map[column]*moves{}
 	note := func(c fixturechange.Change, col string, v fixturechange.Value, i int, free bool) {
-		if v.IsNull {
+		if v.IsNull || !distinct[c.Model][col] {
 			return
 		}
 		k := column{c.Model, col}
@@ -966,6 +969,49 @@ func orderChanges(cfg *Config, renames, deletes, updates, inserts []fixturechang
 	for _, i := range topological(waiting, next, rank) {
 		if i < n {
 			out = append(out, changes[i])
+		}
+	}
+	return out
+}
+
+// distinctColumns is, per model, the columns -- the id among them -- that no
+// two rows of either snapshot hold one value in, leaving NULL aside: the
+// only columns a unique index can be on.
+func distinctColumns(cfg *Config, snaps ...*Snapshot) map[string]map[string]bool {
+	shared := map[string]map[string]bool{}
+	seen := map[string]bool{}
+	for _, snap := range snaps {
+		for _, model := range snap.Order {
+			m := cfg.Models[model]
+			if shared[model] == nil {
+				shared[model] = map[string]bool{}
+			}
+			held := map[string]map[string]bool{}
+			for _, e := range snap.Entries[model] {
+				for col, v := range e.Full(m) {
+					seen[model+"\x00"+col] = true
+					if v.IsNull {
+						continue
+					}
+					if held[col] == nil {
+						held[col] = map[string]bool{}
+					}
+					if held[col][valueKey(v)] {
+						shared[model][col] = true
+					}
+					held[col][valueKey(v)] = true
+				}
+			}
+		}
+	}
+	out := map[string]map[string]bool{}
+	for k := range seen {
+		model, col, _ := strings.Cut(k, "\x00")
+		if !shared[model][col] {
+			if out[model] == nil {
+				out[model] = map[string]bool{}
+			}
+			out[model][col] = true
 		}
 	}
 	return out

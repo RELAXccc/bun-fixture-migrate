@@ -1053,3 +1053,28 @@ func TestAnInsertLeavingOutAColumnOthersWriteIsRefused(t *testing.T) {
 		t.Fatalf("with a default it is an ordinary insert: %+v / %+v", res.Changes, res.Refusals)
 	}
 }
+
+// Only a column no two rows share a value of in either state can be unique,
+// so only such a column makes one change wait for another that gives a value
+// up: here slot, and not cur, whose waits would go the other way round.
+func TestOnlyAColumnThatCouldBeUniqueOrdersChanges(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{"Seat": {Table: "seats", Ref: "code", Key: []string{"code"}}}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	old := `- model: Seat
+  rows:
+    - {id: 1, code: g, slot: 5, cur: EUR}
+    - {id: 2, code: f, slot: 9, cur: USD}
+    - {id: 3, code: h, slot: 1, cur: EUR}
+`
+	next := `- model: Seat
+  rows:
+    - {id: 1, code: g, slot: 9, cur: GBP}
+    - {id: 2, code: f, slot: 2, cur: EUR}
+    - {id: 3, code: h, slot: 1, cur: EUR}
+`
+	if got := kindsOf(computeWith(t, cfg, old, next)); got != "update Seat/code=f; update Seat/code=g" {
+		t.Fatalf("f gives slot 9 up, so it goes first: %s", got)
+	}
+}
