@@ -48,6 +48,7 @@ import (
 func main() {
 	onSuccess := flag.Bool("on-success", false, "WithMarkAppliedOnSuccess(true)")
 	table := flag.String("table", "", "WithTableName")
+	down := flag.Bool("down", false, "roll the last group back instead of migrating")
 	flag.Parse()
 	ctx := context.Background()
 	db := bun.NewDB(sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(os.Getenv("DSN")))), pgdialect.New())
@@ -60,6 +61,13 @@ func main() {
 	if err := m.Init(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "init:", err)
 		os.Exit(2)
+	}
+	if *down {
+		if _, err := m.Rollback(ctx); err != nil {
+			fmt.Fprintln(os.Stderr, "rollback:", err)
+			os.Exit(1)
+		}
+		return
 	}
 	if _, err := m.Migrate(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "migrate:", err)

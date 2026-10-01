@@ -215,9 +215,33 @@ and held against the database before anything is written, and a difference fails
   `Hello {{ name }}`, is written as a template whose only action is that text as a string literal,
   `'{{ "Hello {{ name }}" }}'`, which evaluates to it.
 
+Of a model with a `soft_delete`, an export writes live rows only and never the column, with
+`-all-columns` too: written without the column, a soft-deleted row would load live in a fresh seed,
+and written with it, it would be no master data anyway. A note counts the rows left out.
+
 **Without a database**, values are compared as the YAML type says: two spellings of one integer or
 one decimal are equal, a string only equals the same string, and a value the column's type would
 have to settle is refused, as above.
+
+## Rows with deleted_at
+
+A model with a [`soft_delete`](reference.md#soft-deleted-rows) column has live rows, where it is
+NULL, and soft-deleted rows. A fixture row that leaves the column out, or writes `~`, is live.
+`dbfixture` writes the column as the field holds it, so a row that sets it is seeded soft-deleted:
+
+```yaml
+- model: Plan
+  rows:
+    - {_id: free, name: free, price_cents: 0}
+    - {_id: legacy, name: legacy, price_cents: 900, deleted_at: 2026-02-01T00:00:00Z}
+```
+
+Such a row is no master data: the tool leaves it out, with a note, and a migration neither writes nor
+compares it. A live row naming it by a template or an id is an error, since bun loads a soft-deleted
+row through no relation. Setting the column on a row the files held live is a delete, which the
+migration makes as a soft delete at the time it runs, not the file's; taking it out again is an
+insert, which restores the row. The zero time, `0001-01-01T00:00:00Z`, is an `ambiguous value`: a
+`nullzero` field writes it as NULL, a live row, and a pointer field as it is, a deleted one.
 
 ## Columns a row leaves out
 
@@ -340,8 +364,11 @@ hand and `baseline -force`. See the [runbook](production.md#generate-refused-a-c
   what a `[]time.Time` field makes of it, and only the seeding session is checked.
 - Keys equal under their type are found for the type's own equality; a column's nondeterministic
   collation is not considered.
-- A `CHECK` over several columns, a unique index, a foreign key and a trigger are checked by `plan`,
-  not by `check` or `generate`.
+- A `CHECK` over several columns, a unique index over other columns than the natural key, a foreign
+  key and a trigger are checked by `plan`, not by `check` or `generate`. Whether a unique index backs
+  each natural key, and two keys of the files an index stricter than the key holds equal (`Ann@`
+  and `ann@` under `lower(email)`), `check` and `generate` say: see
+  [the natural-key lint](reference.md#the-natural-key-lint).
 - Two `bytea` readings meet in a sequence: a quoted string that is a JSON array of byte values, in a
   `bytea` column, is taken for the sequence.
 - Values never become part of the SQL the tool writes: they are passed as arguments, which bun quotes

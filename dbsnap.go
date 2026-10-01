@@ -82,11 +82,13 @@ func DatabaseSnapshot(ctx context.Context, db bun.IDB, cfg *Config, tables map[s
 		}
 	}
 	snap := &Snapshot{Source: "the database", Order: order,
-		Entries: map[string][]*Entry{}, Columns: map[string][]string{}}
+		Entries: map[string][]*Entry{}, Columns: map[string][]string{}, database: true}
 
 	// First pass: read the rows as text. References still hold ids here,
-	// because the row they point at may not have been read yet.
+	// because the row they point at may not have been read yet. gone holds
+	// the soft-deleted rows of a model with a soft_delete, keys only.
 	raw := map[string][]*rawRow{}
+	gone := map[string][]*rawRow{}
 	for _, model := range order {
 		m, err := cfg.model(model)
 		if err != nil {
@@ -95,6 +97,12 @@ func DatabaseSnapshot(ctx context.Context, db bun.IDB, cfg *Config, tables map[s
 		table := tables[cfg.QualifiedTable(m)]
 		if table == nil {
 			return nil, notATable(ctx, db, model, cfg.QualifiedTable(m))
+		}
+		// Which rows are live is the first thing every query asks.
+		if m.SoftDelete != "" {
+			if problem := softDeleteProblem(m, table); problem != "" {
+				return nil, fmt.Errorf("model %q: %s", model, problem)
+			}
 		}
 		cols, err := readColumns(m, table, opts.Columns[model])
 		if err != nil {
@@ -107,6 +115,12 @@ func DatabaseSnapshot(ctx context.Context, db bun.IDB, cfg *Config, tables map[s
 		raw[model] = rows
 		snap.Columns[model] = cols
 		snap.noteUniques(model, table)
+		if m.SoftDelete != "" {
+			if gone[model], err = readDeleted(ctx, db, cfg, m, table); err != nil {
+				return nil, fmt.Errorf("model %q: %w", model, err)
+			}
+			lintZeroTimes(m, model, gone[model], snap)
+		}
 	}
 
 	// Second pass: what every row is called by the rows that point at it, for
@@ -115,12 +129,25 @@ func DatabaseSnapshot(ctx context.Context, db bun.IDB, cfg *Config, tables map[s
 	// added after its leaves -- and, in the order a caller passes, at a model
 	// that comes later.
 	refValues := map[string]map[string]string{} // model -> id -> ref value
+	// And what the soft-deleted rows are called, which only their own keys
+	// and a message use: no live row may point at one.
+	goneRefs := map[string]map[string]string{}
+	goneAt := map[string]map[string]string{} // model -> id -> deleted at
 	for _, model := range order {
 		m := cfg.Models[model]
 		refValues[model] = map[string]string{}
 		for _, r := range raw[model] {
 			if v, ok := r.refValue(m); ok {
 				refValues[model][r.id] = v
+			}
+		}
+		goneRefs[model], goneAt[model] = map[string]string{}, map[string]string{}
+		for _, r := range gone[model] {
+			if r.id != "" {
+				goneAt[model][r.id] = r.values[m.SoftDelete].Lit
+			}
+			if v, ok := r.refValue(m); ok {
+				goneRefs[model][r.id] = v
 			}
 		}
 	}
@@ -148,6 +175,8 @@ func DatabaseSnapshot(ctx context.Context, db bun.IDB, cfg *Config, tables map[s
 				case isZero(v):
 					// 0 or "" points at no row, unless a row has that id.
 					e.Cells[col] = v
+				case goneAt[target][v.Lit] != "":
+					return nil, pointsAtDeleted(cfg, model, col, target, v.Lit, goneAt[target][v.Lit])
 				default:
 					return nil, fmt.Errorf(
 						"%s: %s = %s points at a row of %s that this snapshot does not hold; "+
@@ -170,6 +199,7 @@ func DatabaseSnapshot(ctx context.Context, db bun.IDB, cfg *Config, tables map[s
 			snap.Entries[model] = append(snap.Entries[model], e)
 		}
 		snap.reportDuplicates(model)
+		noteDeleted(cfg, model, gone[model], refValues, goneRefs, snap)
 	}
 	reportDuplicateRefs(cfg, snap)
 	if err := noteFolds(ctx, db, cfg, snap, tables); err != nil {
@@ -243,6 +273,113 @@ func readColumns(m *Model, table *dbschema.Table, want []string) ([]string, erro
 	return out, nil
 }
 
+// pointsAtDeleted is the error for a live row pointing at a soft-deleted
+// one, which bun loads through no relation and which is no master data: a
+// row's reference could only name it by a row the snapshot does not hold.
+func pointsAtDeleted(cfg *Config, model, col, target, id, at string) error {
+	tm := cfg.Models[target]
+	where := fmt.Sprintf("%s: %s = %s points at %s %s %s", model, col, id, cfg.QualifiedTable(tm), tm.ID, id)
+	if zeroTime(at) {
+		return fmt.Errorf("%s, whose %s holds the zero time, which a time.Time soft_delete field without nullzero "+
+			"writes for a live row and this configuration reads as deleted. Give the field nullzero or make it a "+
+			"pointer, and set such rows to NULL", where, tm.SoftDelete)
+	}
+	return fmt.Errorf("%s, which is soft-deleted (%s = %s): bun loads it through no relation, and it is no master "+
+		"data. Restore it, or point the row elsewhere", where, tm.SoftDelete, at)
+}
+
+// readDeleted reads the soft-deleted rows of a model with a soft_delete:
+// their ids, the columns of their natural key and their ref column, and when
+// they were deleted, newest first. Nothing else of them is master data.
+func readDeleted(ctx context.Context, db bun.IDB, cfg *Config, m *Model, table *dbschema.Table) ([]*rawRow, error) {
+	cols := append([]string{}, m.keyColumns()...)
+	if _, ok := table.Column(m.Ref); ok && m.Ref != m.ID {
+		cols = append(cols, m.Ref)
+	}
+	var keep []string
+	seen := map[string]bool{m.ID: true}
+	for _, col := range cols {
+		if !seen[col] {
+			seen[col] = true
+			keep = append(keep, col)
+		}
+	}
+	sort.Strings(keep)
+	query, hasID, err := rowsQuery(cfg, m, table, append(keep, m.SoftDelete), true)
+	if err != nil {
+		return nil, err
+	}
+	return scanRows(ctx, db, m, table, append(keep, m.SoftDelete), query, hasID)
+}
+
+// lintZeroTimes reports the soft-deleted rows of a model that hold the zero
+// time. A time.Time field tagged soft_delete without nullzero writes it for a
+// live row, and bun reads such a field's rows as live while they hold it
+// (R1); this configuration reads NULL as live, and the zero time as a row
+// deleted at the start of the year 1.
+func lintZeroTimes(m *Model, model string, rows []*rawRow, snap *Snapshot) {
+	n := 0
+	for _, r := range rows {
+		if zeroTime(r.values[m.SoftDelete].Lit) {
+			n++
+		}
+	}
+	if n > 0 {
+		snap.Findings = append(snap.Findings, Finding{Kind: FindingSoftDelete, Model: model, Row: m.SoftDelete,
+			Detail: fmt.Sprintf("%s hold the zero time in %s, which a time.Time soft_delete field without nullzero "+
+				"reads as live and this configuration as deleted. Give the field nullzero or make it a pointer, and "+
+				"set those rows to NULL", plural(n, "row"), m.SoftDelete)})
+	}
+}
+
+// noteDeleted records the natural keys of a model's soft-deleted rows, for
+// check to say that a row the fixture files hold and the database does not is
+// there, soft-deleted, and for the count of rows left out. A row whose key
+// points at a row the database does not hold is counted and not keyed: it
+// names nothing the files could.
+func noteDeleted(cfg *Config, model string, rows []*rawRow, live, gone map[string]map[string]string, snap *Snapshot) {
+	m := cfg.Models[model]
+	for _, r := range rows {
+		snap.noteSoftDeleted(model)
+		values := fixturechange.Values{}
+		resolved := true
+		for col, v := range r.values {
+			target, isRef := m.References[col]
+			if !isRef || v.IsNull || isZero(v) {
+				values[col] = v
+				continue
+			}
+			ref, ok := live[target][v.Lit]
+			if !ok {
+				ref, ok = gone[target][v.Lit]
+			}
+			if !ok {
+				resolved = false
+				break
+			}
+			values[col] = fixturechange.RefTo(target, ref)
+		}
+		if r.id != "" && !m.idsFromDatabase() {
+			values[m.ID] = fixturechange.Lit(r.id)
+		}
+		key, err := keyOf(cfg, m, model, values)
+		if !resolved || err != nil {
+			continue
+		}
+		if snap.deleted == nil {
+			snap.deleted = map[string]map[string]string{}
+		}
+		if snap.deleted[model] == nil {
+			snap.deleted[model] = map[string]string{}
+		}
+		// Newest first, so the first is the newest.
+		ks := keyString(model, key)
+		if _, seen := snap.deleted[model][ks]; !seen {
+			snap.deleted[model][ks] = r.values[m.SoftDelete].Lit
+		}
+	}
+}
+
 // selectQuery is the one SELECT a model needs, and the second result says
 // whether its first column is the primary key.
 //
@@ -253,8 +390,16 @@ func readColumns(m *Model, table *dbschema.Table, want []string) ([]string, erro
 // fixed so two runs against the same database read the rows in the same order,
 // which is what makes an exported file stable enough to diff.
 //
+// A model with a soft_delete reads its live rows only.
+//
 // It is built apart from being run so a test can read it.
 func selectQuery(cfg *Config, m *Model, table *dbschema.Table, cols []string) (string, bool, error) {
+	return rowsQuery(cfg, m, table, cols, false)
+}
+
+// rowsQuery is selectQuery, or with deleted the query of a model's
+// soft-deleted rows, newest first.
+func rowsQuery(cfg *Config, m *Model, table *dbschema.Table, cols []string, deleted bool) (string, bool, error) {
 	// A model without an id of its own (id: none) reads none, whatever
 	// column the table calls id.
 	idColumn, hasID := table.Column(m.ID)
@@ -283,15 +428,31 @@ func selectQuery(cfg *Config, m *Model, table *dbschema.Table, cols []string) (s
 		return "", false, err
 	}
 	query := "SELECT " + strings.Join(selects, ", ") + " FROM " + qualified
+	var filters []string
 	if m.Where != "" {
 		// The line break ends a -- comment the predicate may close with.
-		query += " WHERE (" + m.Where + "\n)"
+		filters = append(filters, "("+m.Where+"\n)")
+	}
+	var orderBy []string
+	ordered := map[string]bool{}
+	if m.SoftDelete != "" {
+		col, err := quoteIdent(m.SoftDelete)
+		if err != nil {
+			return "", false, fmt.Errorf("soft_delete %w", err)
+		}
+		if deleted {
+			filters = append(filters, qualified+"."+col+" IS NOT NULL")
+			orderBy = append(orderBy, qualified+"."+col+" DESC")
+		} else {
+			filters = append(filters, qualified+"."+col+" IS NULL")
+		}
+	}
+	if len(filters) > 0 {
+		query += " WHERE " + strings.Join(filters, " AND ")
 	}
 	// The id and the key are ordered by as the table holds them, which is
 	// why they are qualified: a bare "id" would name the output column of
 	// the same name, the id's text, and put 10 before 9.
-	var orderBy []string
-	ordered := map[string]bool{}
 	if hasID {
 		orderBy = append(orderBy, qualified+"."+idQuoted)
 		ordered[m.ID] = true
@@ -360,6 +521,13 @@ func readRows(ctx context.Context, db bun.IDB, cfg *Config, m *Model, table *dbs
 	if err != nil {
 		return nil, err
 	}
+	return scanRows(ctx, db, m, table, cols, query, hasID)
+}
+
+// scanRows runs a query of rowsQuery's.
+func scanRows(ctx context.Context, db bun.IDB, m *Model, table *dbschema.Table, cols []string, query string,
+	hasID bool) ([]*rawRow, error) {
+
 	width := len(cols)
 	if hasID {
 		width++
@@ -549,8 +717,9 @@ func reportDuplicateRefs(cfg *Config, snap *Snapshot) {
 				Kind: FindingDuplicateKey, Model: model, Row: m.Ref + "=" + value,
 				Detail: fmt.Sprintf(
 					"%s share this %s (%s), and every generated reference resolves with "+
-						"WHERE %s = ?, so it cannot name one of them: add a unique index on %s",
-					plural(len(ids), "row"), m.Ref, strings.Join(ids, ", "), m.Ref, m.Ref),
+						"WHERE %s = ?, so it cannot name one of them: %s",
+					plural(len(ids), "row"), m.Ref, strings.Join(ids, ", "), m.Ref,
+					indexAdvice(snap.tables[model], []string{m.Ref}, "add a unique index on "+m.Ref)),
 			})
 		}
 	}

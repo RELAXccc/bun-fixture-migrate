@@ -85,8 +85,14 @@ func printSync(o streams, r *fixturemigrate.SyncReport) {
 			status = "would apply"
 		}
 		line := fmt.Sprintf("  %s\t%s %s %s", status, c.Model, c.Key, c.Kind)
-		if c.Problem != "" {
+		switch {
+		case c.Problem != "":
 			line += fmt.Sprintf(" [%s]: %s", c.Problem, c.Message)
+		case c.Status == fixtureapply.StatusApplied && softAction(c):
+			line += " (" + string(c.Action) + ")"
+		}
+		if c.Problem == "" && c.Message != "" {
+			line += ": " + c.Message
 		}
 		fmt.Fprintln(w, line)
 	}

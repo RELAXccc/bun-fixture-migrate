@@ -361,6 +361,7 @@ func lintAll(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table) {
 	LintColumns(cfg, snap, tables)
 	LintZeroDefaults(cfg, snap, tables)
 	LintNullDefaults(cfg, snap, tables)
+	LintSoftDelete(cfg, snap, tables)
 }
 
 // refuseFindings refuses files with a finding the policy makes an error, such
@@ -506,6 +507,9 @@ func (p *Project) Check(ctx context.Context, db bun.IDB) (*CheckReport, error) {
 			return err
 		}
 		lintAll(p.Config, head, tables)
+		if err := LintKeys(ctx, tx, p.Config, head, tables); err != nil {
+			return err
+		}
 		database, err := databaseSnapshot(ctx, tx, p.Config, tables, head)
 		if err != nil {
 			return err
@@ -610,6 +614,7 @@ func (p *Project) Export(ctx context.Context, db bun.IDB, opts ExportOptions) (*
 		if err := KeepOwned(ctx, tx, p.Config, tables, head, snap); err != nil {
 			return err
 		}
+		exp.Notes = append(exp.Notes, softDeletedNotes(p.Config, snap)...)
 		LintZeroDefaults(p.Config, snap, tables)
 		LintNullDefaults(p.Config, snap, tables)
 		mode, exp.Findings = p.Config.Worst(snap.Findings)
@@ -681,6 +686,19 @@ func (e *Exported) Write() ([]string, error) {
 		e.Written = append(e.Written, paths[i])
 	}
 	return e.Written, nil
+}
+
+// softDeletedNotes say, per model, how many soft-deleted rows an export of a
+// database leaves out: no master data, and written into the files without
+// their soft_delete column a fresh seed would load them live.
+func softDeletedNotes(cfg *Config, snap *Snapshot) []string {
+	var out []string
+	for _, model := range cfg.ModelNames() {
+		if n := snap.softDeleted[model]; n > 0 {
+			out = append(out, fmt.Sprintf("%s: %s not exported", model, plural(n, "soft-deleted row")))
+		}
+	}
+	return out
 }
 
 // droppedComments counts the comment lines of a fixture file that an export of

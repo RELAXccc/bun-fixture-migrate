@@ -445,6 +445,9 @@ func (p *Project) uncoveredInDB(ctx context.Context, tx bun.Tx, r *StatusReport,
 	// The lint generate runs before it writes anything, so status does not
 	// send anybody to a generate that refuses.
 	lintAll(p.Config, head, tables)
+	if err := LintKeys(ctx, tx, p.Config, head, tables); err != nil {
+		return nil, err
+	}
 	res, err := Compute(p.Config, old, head)
 	if err != nil {
 		return nil, err

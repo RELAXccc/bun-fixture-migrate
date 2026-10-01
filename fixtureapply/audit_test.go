@@ -68,6 +68,12 @@ func TestSetSHA256SeesEveryChange(t *testing.T) {
 		"where": func(s *fixturechange.Set) {
 			s.Tables["Plan"] = fixturechange.Table{Name: "plans", ID: "id", Key: "name", Serial: true, Where: "true"}
 		},
+		// A delete of a model with a soft delete keeps the row: a file
+		// that gained it after it ran here does something else.
+		"soft delete": func(s *fixturechange.Set) {
+			s.Tables["Plan"] = fixturechange.Table{Name: "plans", ID: "id", Key: "name", Serial: true,
+				SoftDelete: "deleted_at"}
+		},
 		"dropped change": func(s *fixturechange.Set) { s.Changes = s.Changes[:1] },
 		"reordered":      func(s *fixturechange.Set) { s.Changes[0], s.Changes[1] = s.Changes[1], s.Changes[0] },
 		"value":          func(s *fixturechange.Set) { s.Changes[0].New["price_cents"] = fixturechange.Lit("2600") },

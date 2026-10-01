@@ -74,7 +74,7 @@ These decide every trade-off further down.
 | composite primary key, m2m join table | no single id | keyed on the natural key only | done |
 | self-referencing model (`parent_id`) | order inside one model | parents inserted first, children deleted first, exported parents first; read whatever the id order | done |
 | enum types, domains, `citext` | text in, typed out; a domain's own name hides its base type; `Go` and `GO` are one `citext` | PostgreSQL compares; a domain is its base type, its default and `NOT NULL` the column's; keys equal under their type are a duplicate | done |
-| `soft_delete` | a delete is an UPDATE of `deleted_at` | soft-delete aware snapshot and delete | later |
+| `soft_delete` | a delete is an UPDATE of `deleted_at`; bun reads live rows only, and a soft-deleted row comes back by an UPDATE, not an INSERT | `soft_delete: deleted_at`: live rows only, a delete soft-deletes, an insert restores; the zero-time spelling is refused | done |
 | a table the application or tenants insert into too, from one sequence | a fixture file's next id is somebody's row; the rows they add are drift | `mode: upsert` keeps their rows, `ids: database` leaves every id to the sequence | done |
 | a column an admin UI or an operator edits, a price or a flag | every edit is drift, and the file's next change of that column is skipped as a changed row | `insert_only`, or `mode: insert` for a whole table | done |
 | schema-qualified table, mixed-case or reserved-word names | quoting | quoted everywhere | done |
@@ -168,6 +168,13 @@ Each was reproduced before it went into this table.
 | a table `CHECK` the new value violates | generate wrote it, the deploy failed | failed deploy | a single-column `CHECK` is an `invalid value`; others `plan` reports | done |
 | `1.5` in an integer column | dbfixture stores 1 | phantom drift | an `invalid value` saying so | done |
 | a view named as a model's table | "not a table" | misleading | says it is a view, and that only tables hold master data | done |
+| a natural key no unique index backs | no word from `check` or `generate`; the application added a second row, and every change to the key failed from then on | failed deploy | `unbacked key` finding under `policy.key_index`, with the `CREATE UNIQUE INDEX`; `plan` notes it | done |
+| a unique index over more columns than the key, a nullable key column held NULLs distinct, a partial index over other rows | taken for a key | failed deploy | each an `unbacked key` naming the index and what to change; a partial one's predicate put to the planner under the model's `where` | done |
+| `Ann@` and `ann@` under `UNIQUE (lower(email))` | `sync` and the deploy failed with a raw 23505 | failed deploy | the fixture rows grouped by every index stricter than the key: a `duplicate key` before anything is written | done |
+| an invalid unique index a failed `CREATE INDEX CONCURRENTLY` left | read as unique: scaffold keyed on it, and changes were ordered by it | wrong key, misleading | left out of the unique indexes, and named by the lint and scaffold | done |
+| `EXCLUDE (code WITH =)` | not seen as a unique key | wrong guess, unordered changes | a unique key wherever unique indexes are read | done |
+| scaffold on a table with only a partial, expression or exclusion unique index, or a nullable key column | "no unique index besides its primary key", commented out; a nullable column without a word | wrong guess | keyed on them with a `# GUESS:`; the nullable column marked | done |
+| a duplicate key on a table whose index holds NULLs distinct or is partial | "give the table a unique index", which it has | misleading | the message names the index and what is wrong with it | done |
 
 ## 4. Features
 
@@ -216,6 +223,22 @@ Each was reproduced before it went into this table.
   fewer changes, so the run time is untouched.
 - **Drift that explains itself.** Where the database holds a column's default and the file a null or
   a zero, `check` says that bun wrote `DEFAULT` there, on an insert and, since v1.2.17, on an update.
+- **Key lint.** Every natural key, and every `ref` column another model references, is checked
+  against the table's unique indexes and exclusion constraints wherever the database is read: one
+  over exactly the key, a part of it or expressions of it backs it; one over more columns, a
+  nullable column it holds NULLs distinct in, a partial one whose predicate the model's `where` does
+  not imply (PostgreSQL's planner decides) or an invalid one does not. An `unbacked key` finding
+  under `policy.key_index`, `warn` by default and `error` in a scaffolded configuration, says which
+  index to create; keys an index stricter than the key holds equal are a `duplicate key` before
+  deploy; `plan` notes the keys of each pending migration; scaffold keys a table on a partial,
+  exclusion or expression index.
+- **Soft deletes.** A model with `soft_delete: deleted_at` is its live rows: check, sync and export
+  read no other, a fixture row that sets the column is no master data, and a soft-deleted row of a
+  key never makes it ambiguous. A migration's delete sets the column, its insert restores the newest
+  soft-deleted row holding its values, with its id and the rows pointing at it, or inserts beside one
+  holding others where a unique index over live rows lets it, and a revert undoes either. The table
+  carries the column in the generated file, `Table.SoftDelete`, which older files leave out and keep
+  their hard deletes. `scaffold` proposes it as a guess, never the other commands.
 
 ### Later
 
@@ -223,8 +246,9 @@ Each was reproduced before it went into this table.
   `RAISE EXCEPTION` per policy) for projects whose migrations are SQL only and for other migrators.
   It cannot take back bun's record of a failure from inside the failed transaction, so with bun it
   needs `WithMarkAppliedOnSuccess(true)`, and says so in the file.
-- **Soft deletes.** A model with `soft_delete: deleted_at` reads only live rows, deletes by setting
-  the column, and undeletes instead of inserting a second copy.
+- **Soft deletes under `mode: insert`.** Refused for now: under it a soft-deleted row is the
+  database's and must not come back, which needs the run time to know the mode. A restore compares
+  `insert_only` columns too, which the run time cannot tell apart; both need a field in the table.
 - **Scoped inserts.** An insert into a model with a `where` clause is checked against it, so a row
   the export would not see again cannot be written.
 - **Batching** for change sets of thousands of rows: one statement per model and kind instead of
@@ -236,8 +260,6 @@ Each was reproduced before it went into this table.
   when a database is at hand, so a value such as `1.10` is settled offline too and `status -offline`
   never has to refuse one.
 - **Squash.** Replace a chain of applied fixture migrations with one, for projects with hundreds.
-- **Key lint.** A natural key without a unique index behind it is reported, because no guard is
-  reliable without one.
 
 ## 5. Tests
 

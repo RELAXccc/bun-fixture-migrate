@@ -122,6 +122,30 @@ Then decide which one is right:
 - **the file is right**: `generate -from-db -name "..."` against this database writes a migration
   that makes it match the file, or on a database that is not deployed to, `sync -yes`.
 
+### A returning row is soft-deleted with other values
+
+**Symptom.** On a model with a [`soft_delete`](reference.md#soft-deleted-rows):
+`skipped Plan name=legacy insert [changed row]: plans name=legacy is soft-deleted (id 3, deleted at
+2026-02-01 00:00:00+00) with other values than this change writes, and constraint "plans_name_key"
+refuses a second row`.
+
+**What happened.** The file brings back a row that an admin, or an earlier migration, soft-deleted,
+and the soft-deleted row holds other values. Under a unique index over live rows only, `UNIQUE (name)
+WHERE deleted_at IS NULL`, the migration inserts a new row beside it, and says so. Under one over every
+row, `UNIQUE (name)`, the soft-deleted row still holds the key, and nothing can be inserted beside it:
+the change is a changed row, under `changed_row`.
+
+**Steps.** Decide which row the file means:
+
+- **the old row**: restore it by hand, `UPDATE plans SET deleted_at = NULL WHERE id = 3`, and the
+  migration's next run, or a new one, updates it to the file's values; the rows pointing at it point
+  at it again.
+- **a new row**: delete the soft-deleted one for good, if nothing points at it, and run the migration
+  again; or make the index partial, `WHERE deleted_at IS NULL`, so a name can be reused.
+
+A rename into a key a soft-deleted row holds under a unique index over every row is the same
+changed row, and the same steps apply.
+
 ## check reports drift
 
 **Symptom.** `check` exits 3 and lists rows only the database has, rows only the file has, and rows
@@ -267,6 +291,12 @@ A rollback puts back the rows the migration deleted, and nothing a delete reache
 key under `deletes: cascade`: the subscriptions that went with a plan stay gone, and the log of the
 rollback says so for every such row. The log of the migration said how many there were.
 
+A model with a [`soft_delete`](reference.md#soft-deleted-rows) loses nothing: the rollback restores
+the rows the migration soft-deleted, with their ids, and soft-deletes the rows it inserted or
+restored, so the rows the application pointed at them since are not refused or lost. The row a
+rollback soft-deletes carries the rollback's time, not the time it was soft-deleted before the
+migration restored it.
+
 Set `audit_table` before you need to roll back. With it, every run of a generated migration records,
 in the transaction that made its changes, which of them it applied, found made already and skipped,
 and a rollback undoes only the ones it applied in that database. A change the migration found made
@@ -286,7 +316,9 @@ there, seed again from the fixture file as it was.
 Without it, or for a migration that ran before it was set, a rollback assumes the migration made
 every one of its changes on this database, and says so in the log. A change the migration found
 already made is rolled back all the same: the update writes the old value, which this database may
-never have held, and the inserted row is deleted. Before rolling back such a migration where it
+never have held, and the inserted row is deleted. A soft delete the migration found made already,
+a plan an admin had soft-deleted before the deploy, is restored by such a rollback; with an audit
+table it is left soft-deleted. Before rolling back such a migration where it
 reported `unchanged` changes, look at those rows. Where a row does not hold what the migration
 writes, the change is not rolled back and the log says so.
 
@@ -353,7 +385,11 @@ it; either way nothing was changed.
    scaffold guesses one; without one, `generate` warns, and a new environment fails its first
    deploy (see [below](#a-new-environment)).
 3. `bun-fixture-migrate export` from production, or keep your existing fixture file and run `check`
-   against production until they agree.
+   against production until they agree. `check` also names every natural key no unique index backs,
+   an error under the `key_index: error` scaffold writes: create the index it names, `CONCURRENTLY`
+   on a live table, before the first fixture migration, or the application's next duplicate fails
+   the deploy that touches it. A table holding duplicates already cannot get one until they are
+   gone, and `check` lists those too.
 4. `bun-fixture-migrate baseline`: the databases hold the file, record that.
 5. Add `status -offline` to CI.
 

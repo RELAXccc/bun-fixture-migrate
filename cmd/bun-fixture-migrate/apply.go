@@ -480,7 +480,7 @@ func printApply(o streams, r *applyReport) {
 		line := fmt.Sprintf("  %s\t%s %s %s", c.Status, c.Model, c.Key, c.Kind)
 		switch {
 		case c.Status == fixtureapply.StatusApplied:
-			line += fmt.Sprintf(" (%s)", plural(int(c.Rows), "row"))
+			line += applied(c)
 		case c.Problem != "":
 			line += fmt.Sprintf(" [%s]: %s", c.Problem, c.Message)
 		case c.Message != "":
@@ -509,4 +509,26 @@ func printApply(o streams, r *applyReport) {
 	default:
 		fmt.Fprintf(o.stdout, "%s: %s, committed\n", r.ID, verb)
 	}
+}
+
+// applied is what a line of the report says of an applied change after its
+// kind: the rows, what it did to them where the kind does not say, as of a
+// model with a soft_delete, and what else it did.
+func applied(c fixtureapply.Outcome) string {
+	out := " (" + plural(int(c.Rows), "row")
+	if softAction(c) {
+		out += ", " + string(c.Action)
+	}
+	out += ")"
+	if c.Message != "" {
+		out += ": " + c.Message
+	}
+	return out
+}
+
+// softAction reports an applied change of a model with a soft_delete whose
+// kind does not say what it did: a delete that soft-deleted its row, an
+// insert that restored one.
+func softAction(c fixtureapply.Outcome) bool {
+	return c.Action == fixtureapply.ActionSoftDeleted || c.Action == fixtureapply.ActionRestored
 }

@@ -281,15 +281,22 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 			return &ChangeError{Outcome: out, err: err}
 		}
 		out.Rows, out.Message = res.rows, res.message
+		if res.problem == "" {
+			out.Action = res.actionOf(c.Kind)
+		}
 		switch {
-		case res.problem == "" && res.message != "":
-			out.Status = StatusApplied
-			o.log(ctx, slog.LevelWarn, "fixture change applied", out,
-				fmt.Sprintf("%s: applied (%s). %s", where, rowCount(res.rows), res.message))
 		case res.problem == "":
 			out.Status = StatusApplied
-			o.log(ctx, slog.LevelInfo, "fixture change applied", out,
-				fmt.Sprintf("%s: applied (%s)", where, rowCount(res.rows)))
+			// A message says what else the change did, which is worth a
+			// warning, unless it only says how: a restored row.
+			level, text := slog.LevelInfo, fmt.Sprintf("%s: applied (%s)", where, rowsDone(res.rows, out.Action))
+			if res.message != "" {
+				text += ". " + res.message
+				if !res.info {
+					level = slog.LevelWarn
+				}
+			}
+			o.log(ctx, level, "fixture change applied", out, text)
 		case res.problem == problemBenign:
 			out.Status = StatusUnchanged
 			o.log(ctx, slog.LevelInfo, "fixture change already made", out, where+": "+res.message)
@@ -700,6 +707,34 @@ type outcome struct {
 	rows    int64
 	problem problem
 	message string
+	// action is what an applied change did when that is not what its kind
+	// does to a row of a table without a SoftDelete.
+	action Action
+	// info says the message of an applied change only says how it was
+	// made, and is no warning.
+	info bool
+}
+
+// rowsDone is the row count of an applied change, with what it did to them
+// when its kind does not say: "1 row, soft-deleted".
+func rowsDone(n int64, a Action) string {
+	if a == ActionSoftDeleted || a == ActionRestored {
+		return rowCount(n) + ", " + string(a)
+	}
+	return rowCount(n)
+}
+
+// actionOf is what the change, of kind k, did to its row.
+func (o outcome) actionOf(k fixturechange.Kind) Action {
+	switch {
+	case o.action != "":
+		return o.action
+	case k == fixturechange.Insert:
+		return ActionInserted
+	case k == fixturechange.Update:
+		return ActionUpdated
+	}
+	return ActionDeleted
 }
 
 // invert turns a change into the change that undoes it.

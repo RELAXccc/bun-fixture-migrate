@@ -1,0 +1,11 @@
+- model: Currency
+  rows:
+    - {_id: eur, id: 1, code: EUR, symbol: "€"}
+    - {_id: usd, id: 2, code: USD, symbol: "$"}
+    - {_id: gbp, id: 3, code: GBP, symbol: "£", deleted_at: 2026-03-01T00:00:00Z}
+- model: Plan
+  rows:
+    - {_id: free, id: 1, name: free, currency_id: '{{ $.Currency.eur.ID }}', price_cents: 0}
+    - {_id: team, id: 2, name: team, currency_id: '{{ $.Currency.eur.ID }}', price_cents: 2500}
+    - {_id: legacy, id: 3, name: legacy, currency_id: '{{ $.Currency.usd.ID }}', price_cents: 900, deleted_at: 2026-02-01T00:00:00Z}
+    - {_id: pro, id: 4, name: pro, currency_id: '{{ $.Currency.usd.ID }}', price_cents: 5000, deleted_at: 2026-01-01T00:00:00Z}

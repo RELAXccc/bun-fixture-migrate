@@ -140,18 +140,39 @@ func (r *runner) guard(ctx context.Context, c fixturechange.Change, t fixturecha
 	return where, args, nil
 }
 
-// scoped limits a condition on a model's rows to the rows its Where holds for.
+// scoped limits a condition on a model's rows to the rows its Where holds for
+// and, for a model with a SoftDelete, to the live ones: a soft-deleted row is
+// no row to every change, lookup and reference, as it is to bun.
 //
 // The predicate goes in as a bun.Safe argument rather than as text: bun reads
 // every ? in a query's text as a placeholder, and jsonb's ? operator is a
 // likely thing to find in one. It ends in a line break, so a -- comment at its
 // end cannot swallow the rest of the statement.
 func (r *runner) scoped(model, cond string, args []any) (string, []any) {
-	w := r.set.Tables[model].Where
-	if w == "" {
-		return cond, args
+	return r.scopedTo(model, cond, args, true)
+}
+
+// scopedDeleted limits a condition on a model's rows to the rows its Where
+// holds for that are soft-deleted.
+func (r *runner) scopedDeleted(model, cond string, args []any) (string, []any) {
+	return r.scopedTo(model, cond, args, false)
+}
+
+func (r *runner) scopedTo(model, cond string, args []any, live bool) (string, []any) {
+	t := r.set.Tables[model]
+	if t.Where != "" {
+		cond, args = cond+" AND (?\n)", append(append([]any{}, args...), bun.Safe(t.Where))
 	}
-	return cond + " AND (?\n)", append(append([]any{}, args...), bun.Safe(w))
+	if t.SoftDelete != "" {
+		// Validate made sure it is a plain identifier.
+		col, _ := quoteIdent(t.SoftDelete)
+		if live {
+			cond += " AND " + col + " IS NULL"
+		} else {
+			cond += " AND " + col + " IS NOT NULL"
+		}
+	}
+	return cond, args
 }
 
 // match renders "col IS NOT DISTINCT FROM <value>" for every column, joined by
@@ -273,13 +294,20 @@ func (r *runner) written(ctx context.Context, c fixturechange.Change, col string
 }
 
 // missingRef is a reference that names no row: the row was renamed or removed
-// in this database, or never added.
+// in this database, or never added, or is soft-deleted.
 type missingRef struct {
 	ref        fixturechange.Ref
 	table, key string
+	// deleted is, when the model has a SoftDelete and a soft-deleted row
+	// holds the key, when the newest of them was deleted.
+	deleted string
 }
 
 func (e *missingRef) Error() string {
+	if e.deleted != "" {
+		return fmt.Sprintf("%s %q, and the row of %s with %s = %q is soft-deleted, since %s: restore it, or point "+
+			"the row elsewhere", e.ref.Model, e.ref.Key, e.table, e.key, e.ref.Key, e.deleted)
+	}
 	return fmt.Sprintf("%s %q, and no row of %s has %s = %q: it was renamed or removed in this database, or never "+
 		"added", e.ref.Model, e.ref.Key, e.table, e.key, e.ref.Key)
 }
@@ -422,9 +450,19 @@ func (r *runner) resolve(ctx context.Context, ref fixturechange.Ref) (string, er
 	if err := rows.Err(); err != nil {
 		return "", err
 	}
+	if err := rows.Close(); err != nil {
+		return "", err
+	}
 	switch len(ids) {
 	case 0:
-		return "", &missingRef{ref: ref, table: t.Name, key: t.Key}
+		missing := &missingRef{ref: ref, table: t.Name, key: t.Key}
+		if t.SoftDelete != "" {
+			where, args := r.scopedDeleted(ref.Model, keyCol+" = ?", []any{ref.Key})
+			if missing.deleted, err = r.newestDeleted(ctx, ref.Model, table, where, args); err != nil {
+				return "", err
+			}
+		}
+		return "", missing
 	case 1:
 		r.refs[cacheKey] = ids[0]
 		return ids[0], nil

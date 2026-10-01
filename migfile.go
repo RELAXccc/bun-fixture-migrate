@@ -389,6 +389,8 @@ func (r *setReader) tables(expr ast.Expr) (fixturechange.Tables, error) {
 				t.Cascade, err = r.boolean(value)
 			case "Where":
 				t.Where, err = r.str(value)
+			case "SoftDelete":
+				t.SoftDelete, err = r.str(value)
 			case "Policy":
 				t.Policy, err = r.tablePolicy(value)
 			default:

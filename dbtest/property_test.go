@@ -27,6 +27,12 @@ package dbtest_test
 // keeps its rows points at keeps its rows too, or a delete would fail on
 // them, as it does in a deployment. The database then agrees with the new
 // file as check reads it, and exports, by what the files own, as it.
+//
+// Some models soft-delete, as bun does with a soft_delete field: their
+// deleted rows stay, so the database holds the new file in its live rows,
+// and Revert restores them. A model whose rows stay points at models that
+// soft-delete too, or a hard delete would fail on them, as it does in a
+// deployment.
 
 import (
 	"context"
@@ -247,10 +253,11 @@ func ptPair(r *rand.Rand, iteration int, renames bool) (*ptState, *ptState) {
 }
 
 // ptModes is what a pair gives each model to own: its mode, and the nodes'
-// insert_only columns.
+// insert_only columns; and which models soft-delete.
 type ptModes struct {
-	cur, node, link fixturemigrate.Ownership
-	insertOnly      []string
+	cur, node, link             fixturemigrate.Ownership
+	insertOnly                  []string
+	softCur, softNode, softLink bool
 }
 
 // ptDrawModes draws the modes of a pair. A model whose rows a mode keeps
@@ -270,6 +277,13 @@ func ptDrawModes(r *rand.Rand) ptModes {
 			m.insertOnly = append(m.insertOnly, col)
 		}
 	}
+	// A model soft-deletes unless it is under mode insert, which a soft
+	// delete is refused with, and only when what it points at soft-deletes
+	// too: the soft-deleted row still points there, and a revert deletes
+	// what an insert added under any mode.
+	m.softCur = m.cur != fixturemigrate.OwnInsert && r.Intn(2) == 0
+	m.softNode = m.node != fixturemigrate.OwnInsert && r.Intn(2) == 0 && m.softCur
+	m.softLink = m.link != fixturemigrate.OwnInsert && r.Intn(2) == 0 && m.softCur && m.softNode
 	return m
 }
 
@@ -277,6 +291,14 @@ func (m ptModes) apply(t *testing.T, cfg *fixturemigrate.Config) {
 	t.Helper()
 	cfg.Models["PtCur"].Mode, cfg.Models["PtNode"].Mode, cfg.Models["PtLink"].Mode = m.cur, m.node, m.link
 	cfg.Models["PtNode"].InsertOnly = m.insertOnly
+	for model, soft := range map[string]bool{"PtCur": m.softCur, "PtNode": m.softNode, "PtLink": m.softLink} {
+		// A model that does not soft-delete has the column all the same,
+		// which is no master data of it.
+		cfg.Models[model].SoftDelete, cfg.Models[model].Ignore = "", []string{"deleted_at"}
+		if soft {
+			cfg.Models[model].SoftDelete, cfg.Models[model].Ignore = "deleted_at", nil
+		}
+	}
 	if err := cfg.Prepare(); err != nil {
 		t.Fatal(err)
 	}
@@ -286,6 +308,8 @@ func (m ptModes) syncOnly() bool {
 	return m.cur == fixturemigrate.OwnSync && m.node == fixturemigrate.OwnSync && m.link == fixturemigrate.OwnSync &&
 		len(m.insertOnly) == 0
 }
+
+func (m ptModes) soft() bool { return m.softCur || m.softNode || m.softLink }
 
 // ptOwned is the state a database seeded with old holds once a change set
 // took it to next under the modes: next where the files own it, old where
@@ -460,13 +484,15 @@ func TestPropertyAChangeSetTakesTheDatabaseFromOneFileToTheNext(t *testing.T) {
 	db := connect(t)
 	db.RegisterModel((*PtCur)(nil), (*PtNode)(nil), (*PtLink)(nil))
 	ctx := context.Background()
+	// Every unique index holds over every row, soft-deleted or not, so a
+	// row that comes back is restored, never inserted beside its old self.
 	run(t, db, "DROP TABLE IF EXISTS pt_links, pt_nodes, pt_curs",
-		"CREATE TABLE pt_curs (id bigint PRIMARY KEY, code text UNIQUE NOT NULL)",
+		"CREATE TABLE pt_curs (id bigint PRIMARY KEY, code text UNIQUE NOT NULL, deleted_at timestamptz)",
 		"CREATE TABLE pt_nodes (id bigint PRIMARY KEY, name text UNIQUE NOT NULL, "+
 			"parent_id bigint REFERENCES pt_nodes, cur_id bigint REFERENCES pt_curs, price bigint NOT NULL, "+
-			"note text, meta jsonb NOT NULL, slot bigint UNIQUE)",
+			"note text, meta jsonb NOT NULL, slot bigint UNIQUE, deleted_at timestamptz)",
 		"CREATE TABLE pt_links (node_id bigint REFERENCES pt_nodes, cur_id bigint REFERENCES pt_curs, "+
-			"qty bigint NOT NULL, PRIMARY KEY (node_id, cur_id))")
+			"qty bigint NOT NULL, deleted_at timestamptz, PRIMARY KEY (node_id, cur_id))")
 	path := filepath.Join(t.TempDir(), "c.yml")
 	if err := os.WriteFile(path, []byte(ptConfig), 0o644); err != nil {
 		t.Fatal(err)
@@ -508,12 +534,15 @@ func TestPropertyAChangeSetTakesTheDatabaseFromOneFileToTheNext(t *testing.T) {
 		iterations = n
 	}
 	r := rand.New(rand.NewSource(20261001))
-	var renamed, viaDB, noRerun, owned, noRevert int
+	var renamed, viaDB, noRerun, owned, noRevert, soft int
 	for i := 0; i < iterations; i++ {
 		modes := ptDrawModes(r)
 		modes.apply(t, cfg)
 		if !modes.syncOnly() {
 			owned++
+		}
+		if modes.soft() {
+			soft++
 		}
 		// A rename is an update of the key, which mode insert never writes.
 		old, next := ptPair(r, i, modes.node != fixturemigrate.OwnInsert)
@@ -726,8 +755,9 @@ func TestPropertyAChangeSetTakesTheDatabaseFromOneFileToTheNext(t *testing.T) {
 		}
 
 		// A revert puts a deleted row back from its delete's guard, which an
-		// insert_only column is not in: the row comes back without it.
-		if len(modes.insertOnly) > 0 {
+		// insert_only column is not in: the row comes back without it. A
+		// soft-deleted one is restored, and keeps it.
+		if len(modes.insertOnly) > 0 && !modes.softNode {
 			deletes := false
 			for _, c := range set.Changes {
 				deletes = deletes || (c.Model == "PtNode" && c.Kind == fixturechange.Delete)
@@ -744,17 +774,19 @@ func TestPropertyAChangeSetTakesTheDatabaseFromOneFileToTheNext(t *testing.T) {
 	}
 	t.Logf("%d pairs, %d through the database, %d with a rename (not run twice, not reverted), "+
 		"%d naming a row they delete (not run twice), %d with a model the files do not own whole, "+
-		"%d deleting a row with insert_only columns (not reverted)", iterations, viaDB, renamed, noRerun, owned, noRevert)
+		"%d deleting a row with insert_only columns (not reverted), %d with a model that soft-deletes",
+		iterations, viaDB, renamed, noRerun, owned, noRevert, soft)
 }
 
-// ptDump is a database state as text: every row of every table, references
-// by id, ordered.
+// ptDump is a database state as text: every live row of every table,
+// references by id, ordered. A soft-deleted row is no row to the
+// application, nor to a fresh seed of the file.
 func ptDump(t *testing.T, db *bun.DB) string {
 	t.Helper()
 	var parts []string
 	for _, table := range []string{"pt_curs", "pt_nodes", "pt_links"} {
-		parts = append(parts, table+":"+scan[string](t, db,
-			"SELECT coalesce(string_agg(to_jsonb(t)::text, ';' ORDER BY to_jsonb(t)::text), '') FROM "+table+" t"))
+		parts = append(parts, table+":"+scan[string](t, db, "SELECT coalesce(string_agg(r::text, ';' ORDER BY r::text), '') "+
+			"FROM (SELECT to_jsonb(t) - 'deleted_at' AS r FROM "+table+" t WHERE deleted_at IS NULL) s"))
 	}
 	return strings.Join(parts, "\n")
 }

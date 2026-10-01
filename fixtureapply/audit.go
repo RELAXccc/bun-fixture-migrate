@@ -227,7 +227,8 @@ func setFields(set fixturechange.Set) canonicalMap {
 		tables := canonicalMap{}
 		for model, t := range set.Tables {
 			tm := canonicalMap{}
-			for k, v := range map[string]string{"name": t.Name, "id": t.ID, "key": t.Key, "where": t.Where} {
+			for k, v := range map[string]string{"name": t.Name, "id": t.ID, "key": t.Key, "where": t.Where,
+				"soft_delete": t.SoftDelete} {
 				if v != "" {
 					tm[k] = v
 				}

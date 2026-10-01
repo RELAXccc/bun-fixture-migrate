@@ -40,6 +40,9 @@ func (r *runner) execOne(ctx context.Context, c fixturechange.Change) (outcome, 
 	}
 	switch c.Kind {
 	case fixturechange.Insert:
+		if t.SoftDelete != "" {
+			return r.insertOrRestore(ctx, c, t, table)
+		}
 		out, err := r.insert(ctx, c, t, table)
 		// The revert of a delete puts back the row the change set names, and
 		// nothing the delete reached through a foreign key.
@@ -66,6 +69,9 @@ func (r *runner) execOne(ctx context.Context, c fixturechange.Change) (outcome, 
 		}
 		return r.update(ctx, c, t, table)
 	default:
+		if t.SoftDelete != "" {
+			return r.softDelete(ctx, c, t, table)
+		}
 		return r.delete(ctx, c, t, table)
 	}
 }
@@ -193,12 +199,19 @@ func (r *runner) update(ctx context.Context, c fixturechange.Change, t fixturech
 	if err != nil {
 		return outcome{}, err
 	}
-	n, err := r.write(ctx, c.Model, fmt.Sprintf("UPDATE %s SET %s WHERE %s", table, strings.Join(sets, ", "), where), args)
-	if err != nil {
-		return outcome{}, err
+	query := fmt.Sprintf("UPDATE %s SET %s WHERE %s", table, strings.Join(sets, ", "), where)
+	write := func() (outcome, error) {
+		n, err := r.write(ctx, c.Model, query, args)
+		return outcome{rows: n}, err
 	}
-	if n > 0 {
-		return outcome{rows: n}, nil
+	var out outcome
+	if t.SoftDelete != "" {
+		out, err = r.updateInSavepoint(ctx, c, t, table, write)
+	} else {
+		out, err = write()
+	}
+	if err != nil || out.rows > 0 || out.problem != "" {
+		return out, err
 	}
 	return r.diagnose(ctx, c, t, table, c.New)
 }

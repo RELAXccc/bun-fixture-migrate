@@ -129,10 +129,10 @@ func Scaffold(tables map[string]*dbschema.Table, only []string, schema string, o
 			b.WriteString(block)
 			continue
 		}
-		fmt.Fprintf(&b, "  # %s has no unique index besides its primary key and no name column, so\n"+
+		fmt.Fprintf(&b, "  # %s\n"+
 			"  # nothing tells two of its rows apart without their ids, which differ between\n"+
 			"  # databases. Give it a unique index on the columns that do, put them in key,\n"+
-			"  # and take the comment marks away; until then it is no model.\n", tables[name].Qualified())
+			"  # and take the comment marks away; until then it is no model.\n", noKeyHeadline(tables[name]))
 		for _, line := range strings.SplitAfter(strings.TrimSuffix(block, "\n"), "\n") {
 			b.WriteString("  # " + strings.TrimPrefix(line, "  "))
 		}
@@ -264,9 +264,14 @@ func scaffoldModel(tables map[string]*dbschema.Table, t *dbschema.Table, model, 
 		b.WriteString("    serial: true\n")
 	}
 
-	key := guessKey(t, id)
+	guess := guessKeyFrom(t, id)
+	key := guess.key
 	if pkRef != "" {
 		key = []string{t.PrimaryKey[0]}
+		guess = keyGuess{}
+	}
+	for _, line := range guess.comment {
+		b.WriteString(wrapComment(line, "    # "))
 	}
 	if key == nil {
 		b.WriteString("    # GUESS: this table has no unique index besides its primary key, so\n" +
@@ -282,12 +287,17 @@ func scaffoldModel(tables map[string]*dbschema.Table, t *dbschema.Table, model, 
 			"    # migration writes matches on these columns.\n")
 	}
 	fmt.Fprintf(&b, "    key: [%s]\n", strings.Join(key, ", "))
+	if guess.where != "" {
+		fmt.Fprintf(&b, "    # where: %s\n", guess.where)
+	}
 	// A model keyed by a reference has no column of its own a reference to it
 	// could name it by.
 	if ref := guessRef(t, key, id); ref != "" && ref != "name" && pkRef == "" {
 		b.WriteString("    # The column another model's reference to this one names it by.\n")
 		fmt.Fprintf(&b, "    ref: %s\n", ref)
 	}
+
+	b.WriteString(scaffoldSoftDelete(t))
 
 	var refs []string
 	for _, c := range t.Columns {
@@ -376,6 +386,57 @@ func scaffoldModel(tables map[string]*dbschema.Table, t *dbschema.Table, model, 
 	return b.String()
 }
 
+// scaffoldSoftDelete proposes soft_delete for a table that looks like bun's
+// soft delete keeps its deleted rows in it: a nullable timestamp column
+// without a default that a unique index's predicate requires to be NULL, or
+// that is named deleted_at, the column of bun's DeletedAt field. It is a
+// guess: only the model's Go tag says, and without it bun reads every row.
+func scaffoldSoftDelete(t *dbschema.Table) string {
+	col, index := guessSoftDelete(t)
+	switch {
+	case col == "":
+		return ""
+	case index != "":
+		return wrapComment(fmt.Sprintf("GUESS: %s holds only where %s IS NULL, which is how a table keeps the "+
+			"rows bun's soft delete deleted: a DeletedAt field tagged soft_delete. Only live rows are master data "+
+			"then, a delete soft-deletes, and check and export read live rows only. Delete this line if the "+
+			"model's field is not tagged soft_delete: bun then reads every row.", index, col), "    # ") +
+			fmt.Sprintf("    soft_delete: %s\n", col)
+	}
+	return wrapComment(fmt.Sprintf("GUESS: %s, a nullable timestamp, is the column of bun's DeletedAt field "+
+		"tagged soft_delete. Only live rows, where it is NULL, are master data then, a delete soft-deletes, and "+
+		"check and export read live rows only. Delete this line if the model's field is not tagged soft_delete: "+
+		"bun then reads every row.", col), "    # ") + fmt.Sprintf("    soft_delete: %s\n", col)
+}
+
+// guessSoftDelete is the column scaffoldSoftDelete proposes, with the unique
+// index that says so, if one does.
+func guessSoftDelete(t *dbschema.Table) (string, string) {
+	for _, index := range t.KeyIndexes {
+		if !index.Valid || !index.Equality() || index.Predicate == "" {
+			continue
+		}
+		if col := liveRowsPredicate(t, index.Predicate); softDeleteColumn(t, col) {
+			return col, index.Definition()
+		}
+	}
+	if softDeleteColumn(t, "deleted_at") {
+		return "deleted_at", ""
+	}
+	return "", ""
+}
+
+// softDeleteColumn reports a column soft_delete can name: a nullable
+// timestamptz or timestamp column without a default, NULL for a live row.
+func softDeleteColumn(t *dbschema.Table, name string) bool {
+	c, ok := t.Column(name)
+	if !ok || name == "" || c.Type != "timestamptz" && c.Type != "timestamp" || !c.Nullable || c.Generated {
+		return false
+	}
+	_, def := c.NonNullDefault()
+	return !def
+}
+
 // guessGuard is the seed guard table Scaffold proposes: of the models, the
 // first in dependency order that another model points at, which a seeded
 // database has rows in for the others to point at; else the first model.
@@ -451,25 +512,9 @@ func writtenByTheDatabase(t *dbschema.Table, triggers []string) []string {
 	return out
 }
 
-// guessKey is the narrowest unique index that is not the primary key and does
-// not contain the id, which is very often exactly the natural key.
+// guessKey is the natural key guessKeyFrom guesses, nil when there is none.
 func guessKey(t *dbschema.Table, id string) []string {
-	var best []string
-	for _, cols := range t.Uniques {
-		skip := false
-		for _, c := range cols {
-			if c == id {
-				skip = true
-			}
-		}
-		if skip || len(cols) == 0 {
-			continue
-		}
-		if best == nil || len(cols) < len(best) {
-			best = cols
-		}
-	}
-	return best
+	return guessKeyFrom(t, id).key
 }
 
 // guessRef is the column a reference to this table would name it by: a
@@ -670,8 +715,9 @@ func auditTable(t *dbschema.Table) bool {
 const policyBlock = `# The choices that depend on how you run your databases rather than on what is
 # correct. Everything not here is fixed, because the alternative would let this
 # tool corrupt a database. A model can set id_drift, missing_row, changed_row,
-# duplicate_key, deletes and array_nulls for itself, as in the policy block:
-# changed_row: warn for translations an admin UI edits, error for prices.
+# duplicate_key, key_index, deletes and array_nulls for itself, as in the
+# policy block: changed_row: warn for translations an admin UI edits, error
+# for prices.
 policy:
   # The id in the fixture file is not the id the database gave the row: the
   # file's id belongs to another row, or the row lives under a different id.
@@ -733,6 +779,19 @@ policy:
   # setting that makes that safe; warn exists so you can see the whole list
   # before you fix it.
   duplicate_key: error
+
+  # No unique index or constraint of the table makes a model's natural key
+  # unique among its rows: there is none, it is over more columns, it holds
+  # NULLs distinct in a nullable key column, it is partial over other rows,
+  # or a failed CREATE INDEX CONCURRENTLY left it invalid.
+  #   error  refuse in check, generate, status and sync
+  #   warn   report it (the default when this line is left out)
+  #   ignore do not look
+  # Without one the application can add a second row with the key, and every
+  # change to it fails from then on; an INSERT ... WHERE NOT EXISTS races an
+  # insert of the application's. error suits a new project; the finding says
+  # which CREATE UNIQUE INDEX to add.
+  key_index: error
 
   # A row kept its id and changed its natural key.
   #   refuse  report it and write nothing for that row (default)

@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -165,6 +166,13 @@ type Policy struct {
 	// natural key in the database, which makes every lookup by that key
 	// ambiguous. Default "error".
 	DuplicateKey Mode `yaml:"duplicate_key"`
+	// KeyIndex decides what happens when no unique index or constraint of
+	// the table makes a model's natural key unique among its rows: the
+	// database then lets the application add a second row with the key, and
+	// every change to it fails as a duplicate key from then on. It is
+	// checked against a database by check, generate, status and sync, and
+	// never written into a migration. Default "warn".
+	KeyIndex Mode `yaml:"key_index"`
 	// Renames decides what a change of a row's natural key under an unchanged
 	// id becomes: "refuse" (default) leaves it to you, "update" writes an
 	// UPDATE of the key columns guarded by the id and the old key.
@@ -315,6 +323,9 @@ type Model struct {
 	MissingRow   Mode `yaml:"missing_row"`
 	ChangedRow   Mode `yaml:"changed_row"`
 	DuplicateKey Mode `yaml:"duplicate_key"`
+	// KeyIndex overrides Policy.KeyIndex for this model. It is checked
+	// against a database and is not written into the migration.
+	KeyIndex Mode `yaml:"key_index"`
 	// Where is an SQL predicate that limits which rows of the table are master
 	// data, for a table that holds other rows too. It is written into every
 	// query the export and check commands run, and it is your text: keep it
@@ -339,6 +350,16 @@ type Model struct {
 	// fixture files' ids would collide with; see IDSource. Under database
 	// the natural key and the ref column cannot be the id.
 	IDs IDSource `yaml:"ids"`
+	// SoftDelete is the column of the model's bun soft_delete field, for a
+	// model the application deletes rows of with bun's soft delete: a
+	// nullable timestamptz or timestamp column, NULL for a live row. Only
+	// live rows are master data. check, sync and export read no other, a
+	// generated migration's delete sets the column to now() rather than
+	// delete the row, and its insert restores a soft-deleted row that holds
+	// its values before it writes a new one. The column itself is never
+	// compared, written or exported. The tool never guesses it from a
+	// deleted_at column: without the Go tag, bun reads every row.
+	SoftDelete string `yaml:"soft_delete"`
 
 	derived    map[string]bool
 	ignored    map[string]bool
@@ -550,9 +571,15 @@ func (c *Config) Prepare() error {
 			return fmt.Errorf("model %q: deletes is %q, it has to be %q, %q or %q", name, m.Deletes,
 				DeleteAllow, DeleteRefuse, DeleteCascade)
 		}
+		if err := m.prepareSoftDelete(name); err != nil {
+			return err
+		}
 		if m.ArrayNulls != "" && !m.ArrayNulls.valid() {
 			return fmt.Errorf("model %q: array_nulls is %q, it has to be %q or %q", name, m.ArrayNulls,
 				ArrayNullsRefuse, ArrayNullsKeep)
+		}
+		if err := m.prepareKeyIndex(name); err != nil {
+			return err
 		}
 		for _, f := range m.runTimePolicy() {
 			if *f.value != "" && !f.value.valid(f.allowed...) {
@@ -580,6 +607,7 @@ func (p *Policy) prepare() error {
 		{"zero_default", &p.ZeroDefault, ModeError, []Mode{ModeError, ModeWarn, ModeIgnore}},
 		{"null_default", &p.NullDefault, ModeError, []Mode{ModeError, ModeWarn, ModeIgnore}},
 		{"duplicate_key", &p.DuplicateKey, ModeError, []Mode{ModeError, ModeWarn}},
+		{"key_index", &p.KeyIndex, ModeWarn, keyIndexModes},
 	} {
 		if *f.value == "" {
 			*f.value = f.def
@@ -687,6 +715,127 @@ func (m *Model) prepareOwnership(name string, p Policy) error {
 	return nil
 }
 
+// prepareSoftDelete checks a model's soft_delete. The column says whether a
+// row is live and nothing else, so it can be no other column the model names:
+// a change never writes or compares it. It runs once Deletes is filled in.
+func (m *Model) prepareSoftDelete(name string) error {
+	col := m.SoftDelete
+	if col == "" {
+		return nil
+	}
+	if !identPattern.MatchString(col) {
+		return fmt.Errorf("model %q: soft_delete is %q, which is not a plain column name", name, col)
+	}
+	_, isDefault := m.Defaults[col]
+	_, isReference := m.References[col]
+	var why string
+	switch {
+	case col == m.ID:
+		why = "is the id"
+	case slices.Contains(m.keyColumns(), col):
+		why = "is part of the natural key, which a soft-deleted row keeps"
+	case col == m.Ref:
+		why = "is the ref column, which every reference to the model names its row by"
+	case slices.Contains(m.Ignore, col):
+		why = "is in ignore; take it out of there, soft_delete leaves it out of every comparison already"
+	case slices.Contains(m.Derived, col):
+		why = "is in derived; take it out of there, soft_delete leaves it out of every comparison already"
+	case slices.Contains(m.InsertOnly, col):
+		why = "is in insert_only, which an insert writes"
+	case isDefault:
+		why = "has a default in defaults, and a fixture row leaving it out is live"
+	case isReference:
+		why = "is a reference"
+	case m.Deletes == DeleteCascade && !m.deletesInherited:
+		why = "is set with deletes: cascade, and a soft delete reaches no row through a foreign key: take deletes out"
+	case m.Mode == OwnInsert:
+		// A soft-deleted row is a row the database holds and owns under
+		// mode insert, and must not come back; a migration cannot tell,
+		// since mode is not in what it carries.
+		why = "is set with mode insert, which this version does not support: a soft-deleted row would be " +
+			"restored by an insert of its key, and under mode insert the database owns it"
+	case mentions(m.Where, col):
+		why = "is named in where: drop it from where, soft_delete already limits the model to live rows, and " +
+			"a migration that restores a row has to find the soft-deleted ones"
+	}
+	if why != "" {
+		return fmt.Errorf("model %q: soft_delete column %q %s", name, col, why)
+	}
+	return nil
+}
+
+// mentions reports whether an SQL predicate names a column: as a word outside
+// quotes, string constants and comments, in any case, or as a quoted name
+// exactly.
+func mentions(where, col string) bool {
+	identChar := func(c byte) bool {
+		return c == '_' || c == '$' || (c >= '0' && c <= '9') || (c|0x20 >= 'a' && c|0x20 <= 'z') || c >= 0x80
+	}
+	for i := 0; i < len(where); i++ {
+		c := where[i]
+		switch {
+		case c == '\'':
+			escapes := i > 0 && (where[i-1]|0x20) == 'e' && (i == 1 || !identChar(where[i-2]))
+			j := i + 1
+			for ; j < len(where) && where[j] != '\''; j++ {
+				if escapes && where[j] == '\\' {
+					j++
+				}
+			}
+			i = j
+		case c == '"':
+			j := strings.IndexByte(where[i+1:], '"')
+			if j < 0 {
+				return false
+			}
+			if where[i+1:i+1+j] == col {
+				return true
+			}
+			i += j + 1
+		case c == '$' && (i == 0 || !identChar(where[i-1])):
+			tag := dollarTag.FindString(where[i:])
+			if tag == "" {
+				continue
+			}
+			j := strings.Index(where[i+len(tag):], tag)
+			if j < 0 {
+				return false
+			}
+			i += len(tag) + j + len(tag) - 1
+		case c == '-' && strings.HasPrefix(where[i:], "--"):
+			j := strings.IndexByte(where[i:], '\n')
+			if j < 0 {
+				return false
+			}
+			i += j
+		case c == '/' && strings.HasPrefix(where[i:], "/*"):
+			nest, j := 1, i+2
+			for ; j < len(where) && nest > 0; j++ {
+				switch {
+				case strings.HasPrefix(where[j:], "/*"):
+					nest, j = nest+1, j+1
+				case strings.HasPrefix(where[j:], "*/"):
+					nest, j = nest-1, j+1
+				}
+			}
+			i = j - 1
+		case identChar(c) && (i == 0 || !identChar(where[i-1])):
+			j := i
+			for j < len(where) && identChar(where[j]) {
+				j++
+			}
+			if strings.EqualFold(where[i:j], col) {
+				return true
+			}
+			i = j - 1
+		}
+	}
+	return false
+}
+
+// dollarTag is the opening of a dollar-quoted string, $$ or $tag$.
+var dollarTag = regexp.MustCompile(`^\$([A-Za-z_][A-Za-z0-9_]*)?\$`)
+
 // ownsValue reports whether the fixture files own a column's value in a row
 // the database already holds: compare it, update it and guard a delete with
 // it. They own none under mode insert, and no insert_only column.
@@ -734,6 +883,7 @@ func (c *Config) ModelPolicy(model string) Policy {
 	for _, o := range []struct{ to, from *Mode }{
 		{&p.IDDrift, &m.IDDrift}, {&p.MissingRow, &m.MissingRow},
 		{&p.ChangedRow, &m.ChangedRow}, {&p.DuplicateKey, &m.DuplicateKey},
+		{&p.KeyIndex, &m.KeyIndex},
 	} {
 		if *o.from != "" {
 			*o.to = *o.from
@@ -789,7 +939,34 @@ func (c *Config) ModeOf(f Finding) Mode {
 	if f.Kind == FindingDuplicateKey {
 		return c.ModelPolicy(f.Model).DuplicateKey
 	}
+	if f.Kind == FindingUnbackedKey {
+		return keyIndexMode(c.ModelPolicy(f.Model).KeyIndex, f)
+	}
 	return c.FindingMode(f.Kind)
+}
+
+// keyIndexModes are the values key_index takes, in the policy block and in a
+// model.
+var keyIndexModes = []Mode{ModeError, ModeWarn, ModeIgnore}
+
+// prepareKeyIndex checks the key_index a model sets for itself. It is no
+// run-time policy, so it is not among runTimePolicy's.
+func (m *Model) prepareKeyIndex(name string) error {
+	if m.KeyIndex != "" && !m.KeyIndex.valid(keyIndexModes...) {
+		return fmt.Errorf("model %q: key_index is %q, it has to be one of %s, or left out for the policy block's",
+			name, m.KeyIndex, modeList(keyIndexModes))
+	}
+	return nil
+}
+
+// keyIndexMode is what key_index makes of an unbacked-key finding: the
+// policy, but never more than a warning for one the lint could not decide,
+// which says so.
+func keyIndexMode(mode Mode, f Finding) Mode {
+	if f.unsure && mode == ModeError {
+		return ModeWarn
+	}
+	return mode
 }
 
 // arrayNulls is what a null inside a sequence means for a model.
@@ -930,7 +1107,8 @@ func (c *Config) DependencyOrder() ([]string, error) {
 
 // skip reports whether a column takes no part in the comparison.
 func (m *Model) skip(col string) bool {
-	return col == anchorColumn || col == m.ID || m.ignored[col] || m.derived[col]
+	return col == anchorColumn || col == m.ID || m.ignored[col] || m.derived[col] ||
+		(m.SoftDelete != "" && col == m.SoftDelete)
 }
 
 // inKeyAnyOf reports a column of a key_any_of group.

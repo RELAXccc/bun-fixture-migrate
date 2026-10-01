@@ -55,7 +55,8 @@ func (o options) log(ctx context.Context, level slog.Level, msg string, out Outc
 		attrs = append(attrs, slog.Int("index", out.Index))
 	}
 	for _, a := range []struct{ key, value string }{{"model", out.Model}, {"kind", string(out.Kind)},
-		{"key", out.Key}, {"status", string(out.Status)}, {"problem", string(out.Problem)}, {"message", out.Message}} {
+		{"key", out.Key}, {"status", string(out.Status)}, {"action", string(out.Action)},
+		{"problem", string(out.Problem)}, {"message", out.Message}} {
 		if a.value != "" {
 			attrs = append(attrs, slog.String(a.key, a.value))
 		}
@@ -125,6 +126,26 @@ const (
 	StatusSequence Status = "sequence"
 )
 
+// Action is what an applied change did to its row.
+type Action string
+
+const (
+	// ActionInserted is a row inserted: an insert, or the revert of a delete,
+	// that wrote a new row.
+	ActionInserted Action = "inserted"
+	// ActionUpdated is a row updated.
+	ActionUpdated Action = "updated"
+	// ActionDeleted is a row deleted.
+	ActionDeleted Action = "deleted"
+	// ActionSoftDeleted is a delete of a model with a SoftDelete: the row
+	// is kept, its soft delete column set to the transaction's time.
+	ActionSoftDeleted Action = "soft-deleted"
+	// ActionRestored is an insert of a model with a SoftDelete that found
+	// a soft-deleted row holding its values and set the column back to
+	// NULL: the row keeps its id, and the rows pointing at it.
+	ActionRestored Action = "restored"
+)
+
 // Problem names why a change could not be made.
 type Problem string
 
@@ -164,6 +185,10 @@ type Outcome struct {
 	// Key is the natural key, as "col=value,col=value".
 	Key    string `json:"key,omitempty"`
 	Status Status `json:"status"`
+	// Action is what an applied change did to its row; empty for any other
+	// status. For a model with a SoftDelete it says what Kind alone does
+	// not: a delete that soft-deleted the row, an insert that restored one.
+	Action Action `json:"action,omitempty"`
 	// Rows is the row count of an applied change.
 	Rows int64 `json:"rows,omitempty"`
 	// Problem is set when the change could not be made.

@@ -137,6 +137,25 @@ type Snapshot struct {
 	// snapshot describes it, as unique does; check reads the column
 	// defaults from it.
 	tables map[string]*dbschema.Table
+
+	// database is true for a snapshot DatabaseSnapshot read.
+	database bool
+	// softDeleted counts, per model with a soft_delete, the rows the
+	// snapshot leaves out because they are soft-deleted: a database's, or
+	// a fixture file's rows that set the column.
+	softDeleted map[string]int
+	// deleted holds, per model with a soft_delete, the natural keys a
+	// database holds soft-deleted rows of, by KeyStr, with the time the
+	// newest of them was deleted. Only DatabaseSnapshot fills it.
+	deleted map[string]map[string]string
+}
+
+// noteSoftDeleted counts a row the snapshot leaves out as soft-deleted.
+func (s *Snapshot) noteSoftDeleted(model string) {
+	if s.softDeleted == nil {
+		s.softDeleted = map[string]int{}
+	}
+	s.softDeleted[model]++
 }
 
 // typed reports a column of a model whose type the catalog read for the
@@ -244,6 +263,10 @@ type Finding struct {
 	Row   string
 	// Detail is one sentence an operator can act on.
 	Detail string
+
+	// unsure marks an unbacked-key finding the lint could not decide, which
+	// key_index never makes more than a warning.
+	unsure bool
 }
 
 // FindingKind is what a finding is about.
@@ -273,6 +296,18 @@ const (
 	// two branches each adding the next id leave behind after a merge:
 	// dbfixture cannot load such a file, and no migration can insert both.
 	FindingDuplicateID FindingKind = "duplicate id"
+	// FindingUnbackedKey is a natural key, or the ref column of a model
+	// something references, that no unique index or constraint of the table
+	// makes unique among the model's rows: the database lets the
+	// application add a second row with it. Its Row is the key, "key
+	// [plan_id, code]" or "ref code"; see LintKeys.
+	FindingUnbackedKey FindingKind = "unbacked key"
+	// FindingSoftDelete is a soft_delete column the tool cannot work with:
+	// one the table does not have, or that is not a nullable timestamptz or
+	// timestamp column without a default, or rows holding the zero time,
+	// which a time.Time field without nullzero reads as live. It is always
+	// an error.
+	FindingSoftDelete FindingKind = "soft delete"
 )
 
 func (f Finding) String() string { return f.Where() + ": " + f.Detail }
@@ -388,7 +423,8 @@ func (s *Snapshot) reportDuplicates(model string) {
 		s.Findings = append(s.Findings, Finding{
 			Kind: FindingDuplicateKey, Model: model, Row: group[0].label(model),
 			Detail: "this natural key is held by " + plural(len(group), "row") + " (" + strings.Join(ids, ", ") +
-				"), so no lookup by it can tell them apart: give the table a unique index, or add a column to key",
+				"), so no lookup by it can tell them apart: " + indexAdvice(s.tables[model], sortedColumns(group[0].Key),
+				"give the table a unique index") + ", or add a column to key",
 		})
 	}
 }

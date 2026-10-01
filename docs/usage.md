@@ -244,6 +244,19 @@ file, the newer truth. First say what the database owns, so that it is no drift 
   tenant's row may already hold, and the file's rows point at it by name as before. Where a column
   tells the two kinds of rows apart, `where: tenant_id IS NULL` keeps the tenants' rows out of
   everything instead.
+- A table whose rows the application deletes with bun's soft delete, a `DeletedAt` field tagged
+  `soft_delete`: name its column in `soft_delete`. A row an admin soft-deleted is then no drift and
+  never exported, a row that leaves the file is soft-deleted by the migration rather than deleted,
+  and one that comes back is restored with its id, so the rows pointing at it point at it again. Do
+  not spell it as `where: deleted_at IS NULL`, which keeps the deletes hard and cannot restore; see
+  [soft-deleted rows](reference.md#soft-deleted-rows).
+
+  ```yaml
+  Plan:
+    table: plans
+    key: [name]
+    soft_delete: deleted_at
+  ```
 
 For what the file does own, three settings and one loop keep the edits safe:
 
@@ -459,6 +472,8 @@ created from the models or the tags mirror the schema.
 | `GENERATED ALWAYS AS IDENTITY` | no id | `DEFAULT` | `export` leaves the id out; an explicit id is reported |
 | a generated column (`GENERATED ALWAYS AS (...) STORED`) | not in the file | nothing | skipped by `export` and reported if the file writes it |
 | `CreatedAt time.Time` with `default:current_timestamp` | left out | `DEFAULT` | `ignore` it |
+| ``DeletedAt time.Time `bun:",soft_delete,nullzero"` `` or `*time.Time` with `soft_delete` | left out, `~`, or a time | NULL, a live row; or the time, a row seeded soft-deleted | `soft_delete: deleted_at`; a row with a time is no master data. A `nullable timestamptz` without a default only |
+| ``DeletedAt time.Time `bun:",soft_delete"` `` without `nullzero` | left out | the zero time, which bun reads as live | refused: give it `nullzero`, or make it a pointer |
 
 Dates and timestamps are written unquoted, as YAML timestamps, because a quoted one decodes into a
 `time.Time` only in RFC 3339.

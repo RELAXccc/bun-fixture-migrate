@@ -44,12 +44,21 @@ rows the policy lets through.
 Writes a commented starting configuration from a database's catalog: a model per table, the primary
 key, whether it is serial, the foreign keys to a table's id as `references`, the column defaults as
 `defaults`, and a natural key guessed from the narrowest unique index besides the primary key. A
-partition is part of its partitioned table, not a model of its own; a foreign key to another column,
-a code say, is an ordinary column. A table whose primary key is another table's id, a plan's details
-keyed by the plan, has no id of its own: it is written `id: none`, keyed and referenced by that
-column, and a foreign key to it is a reference to the plan whose id it holds. Timestamps the database writes with a row, from a default such as
-`now()` or, on a table with a `BEFORE` row trigger, an `updated_at`, are proposed for `ignore`, and
-the triggers are named. Every guess is marked `# GUESS:`.
+table without a plain one is keyed, with a `# GUESS:` saying what it was taken from, on a partial
+unique index, whose predicate is proposed as a commented-out `where`, or, over the rows where a
+nullable timestamp column without a default is NULL, `deleted_at IS NULL`, as the model's
+[`soft_delete`](#soft-deleted-rows); an exclusion constraint whose
+every operator is `=`; or a unique index over expressions, `lower(email)`, keyed on the columns they
+read and marked stricter than the key. A key column that is nullable under an index holding NULLs
+distinct is marked, with the `NULLS NOT DISTINCT`, `COALESCE` and `NOT NULL` remedies, and an invalid
+index, which a failed `CREATE INDEX CONCURRENTLY` leaves, is never used and is named. The policy
+block it writes sets `key_index: error`. A partition is part of its partitioned table, not a model of
+its own; a foreign key to another column, a code say, is an ordinary column. A table whose primary
+key is another table's id, a plan's details keyed by the plan, has no id of its own: it is written
+`id: none`, keyed and referenced by that column, and a foreign key to it is a reference to the plan
+whose id it holds. Timestamps the database writes with a row, from a default such as `now()` or, on
+a table with a `BEFORE` row trigger, an `updated_at`, are proposed for `ignore`, and the triggers are
+named. Every guess is marked `# GUESS:`.
 
 Which tables are master data only you know. bun's migrations and locks tables are left out and named
 as `migrations_table` and `migration_locks_table`; so is a table with the columns of the
@@ -57,10 +66,10 @@ as `migrations_table` and `migration_locks_table`; so is a table with the column
 as `audit_table`; every other table is proposed, each model with a
 `# GUESS:` to delete it when the application writes the table, as it does users, orders or sessions.
 Kept, such a table is exported into the fixture file and is drift after every deploy. A table with
-neither a unique index besides its primary key nor a `name` column has nothing a key can be guessed
-from and is written commented out, with a sentence saying why. `seed_guard_table` is guessed as the
-first table, in dependency order, that another model points at, and marked; it has to stay the table
-of a model the fixture files fill.
+neither a unique index or constraint besides its primary key nor a `name` column has nothing a key
+can be guessed from and is written commented out, with a sentence saying why. `seed_guard_table` is
+guessed as the first table, in dependency order, that another model points at, and marked; it has to
+stay the table of a model the fixture files fill.
 
 Refused (exit 1): a table in `-tables` that is not in the schema, a partition, the migrator's own or
 the audit table;
@@ -93,7 +102,9 @@ key and the `ref` column, and the ids only when the rows name them. A column the
 is not master data, and the ids of the database exported from mean nothing in another one; written
 into the file, either would be a change of every row to `generate`. A model the files do not hold
 yet is written whole, ids included, unless a default other than a sequence makes its ids up, as
-`gen_random_uuid()` does. Fixture files that cannot be read are replaced whole, with a note.
+`gen_random_uuid()` does. Fixture files that cannot be read are replaced whole, with a note. Of a
+model with a [`soft_delete`](#soft-deleted-rows), it writes live rows only and never the column, and
+a note counts the rows it left out.
 
 It writes what the fixture files own and nothing the configuration gives to the database (see
 [who owns what](#who-owns-what)): of a model under `mode: upsert` or `insert` the files hold, only
@@ -121,9 +132,15 @@ difference `generate` would refuse. Exit 3 for a difference, a refusal or a find
 an error; a finding the policy makes a warning is reported and leaves the exit code 0. A column the
 fixture files write and the table does not have is not read: it is the `unknown column` finding.
 
+It also runs [the natural-key lint](#the-natural-key-lint): a key no unique index backs is an
+`unbacked key` finding under `policy.key_index`, and two keys of the files an index stricter than the
+key holds equal are a `duplicate key`.
+
 What the configuration gives to the database (see [who owns what](#who-owns-what)) is no difference
 and leaves the exit code 0; a last block counts it per model, such as `Role: 3 rows only in the
-database, which mode upsert never deletes`, so nobody wonders whether check saw it. A difference in
+database, which mode upsert never deletes`, so nobody wonders whether check saw it; so are the rows
+of a model with a [`soft_delete`](#soft-deleted-rows) the database holds soft-deleted, and a row the
+files hold and the database holds soft-deleted says so. A difference in
 which the database holds the column's literal default and the file a null or the type's zero gets a
 `hint:` line: bun writes `DEFAULT` for a nil pointer, a zero in a `nullzero` field and a zero in a
 field with a `default:` tag, on an `INSERT` and, since bun v1.2.17, on an `UPDATE` of a model, so a
@@ -147,7 +164,7 @@ state file on. The base is the state file; while there is none, git's `HEAD`.
 | `-out <dir>` | write the migration here instead of `out` |
 | `-dry-run` | print the migration and write nothing |
 | `-allow-partial` | write what was accepted when something else was refused |
-| `-no-lint` | skip the checks against the database's columns and defaults, and do not connect for them |
+| `-no-lint` | skip the checks against the database's columns, defaults and unique indexes, and do not connect for them |
 | `-at <time>` | name the migration as of this time, `YYYYMMDDHHMMSS` or RFC 3339, instead of now: for output that is the same on every run |
 | `-json` | say what was generated and written as JSON, see [generate](#generate-output); with `-dry-run` the migration is in it |
 
@@ -297,6 +314,12 @@ transaction, an enum value a migration in the same plan added, a table or column
 migration plan did not run, a write the role plan connects as may not make), which says nothing
 about the migration.
 
+Each fixture migration plan reaches gets a note for every natural key its changes look rows up by
+that no unique index or constraint backs, as the database stands when that migration would run:
+`Feature: no unique index or constraint backs key [code, plan_id]: …`, with the index to create.
+There, a duplicate the application adds before the deploy makes the change fail. The notes never
+change plan's exit code; `check` and `generate` report the same keys under `policy.key_index`.
+
 ### sync
 
 Brings the database to the fixture files directly, without a migration: a development database, a
@@ -411,10 +434,12 @@ listed stops every command.
 | `deletes` | `policy.deletes` | `allow`, `refuse` or `cascade`; only under `mode: sync`, and refused next to `mode: upsert` or `insert`, under which nothing is deleted |
 | `array_nulls` | `policy.array_nulls` | `refuse` or `keep`, for the model's array columns |
 | `changed_row`, `missing_row`, `id_drift`, `duplicate_key` | the policy block's | the [policy](#policy) for this model's rows alone: translations an admin UI edits at `changed_row: warn`, prices at `error`. Written into the migration, in the model's table, only when set |
+| `key_index` | the policy block's | `error`, `warn` or `ignore`: what [the natural-key lint](#the-natural-key-lint) makes of this model's keys. Never written into a migration |
 | `where` | | an SQL predicate limiting which rows are master data; your SQL, used as written. A generated migration carries it: every statement, natural-key lookup and reference for the model sees only those rows, and a row it writes must hold it. A `;` or a parenthesis it does not open is refused |
 | `mode` | `policy.mode` | `sync`, `upsert` or `insert`: which of the model's rows the fixture files own; see [who owns what](#who-owns-what) |
 | `insert_only` | | columns an insert writes and the database owns afterwards, an operator's `enabled` on a feature flag: never compared, updated or guarded on. Not a column of the key, the `ref` column, the id, nor one in `ignore` or `derived` |
 | `ids` | `file` | `file`, or `database` for a table the application inserts into too: the database gives every row its id, which a migration never writes, nothing compares and export never writes. The key and the `ref` column cannot be the id |
+| `soft_delete` | | the column of the model's bun `soft_delete` field, `deleted_at`: only live rows, where it is NULL, are master data, and a migration soft-deletes and restores rather than delete and insert; see [soft-deleted rows](#soft-deleted-rows). Never guessed from the catalog |
 
 ### policy
 
@@ -426,6 +451,7 @@ listed stops every command.
 | `zero_default` | error, warn, ignore | error | a zero in a column whose default is not that zero, which bun replaces with the default |
 | `null_default` | error, warn, ignore | error | a null in a column with a default, which a nil pointer or `nullzero` field replaces with the default |
 | `duplicate_key` | error, warn | error | two rows sharing a natural key |
+| `key_index` | error, warn, ignore | warn | a natural key, or the `ref` column of a model something references, that no unique index or constraint makes unique among the model's rows; see [the natural-key lint](#the-natural-key-lint). A finding the lint could not decide is a warning at most. `scaffold` writes `error` |
 | `renames` | refuse, update | refuse | a row that kept its id and changed its natural key |
 | `deletes` | allow, refuse, cascade | allow | a row that left the file. `allow` fails while other rows point at it; `cascade` lets the foreign keys' ON DELETE act |
 | `array_nulls` | refuse, keep | refuse | a null inside a sequence in an array column: `refuse` reports it and refuses a change carrying it, because a `[]string` field drops it and a `[]*string` one keeps it; `keep` says the models' array fields keep it. A model can override it |
@@ -441,6 +467,58 @@ renumbered rows and shared keys, and its run-time policies are written into the 
 ```go
 "Translation": {Name: "translations", ID: "id", Key: "key", Policy: &fixturechange.Policy{ChangedRow: "warn"}},
 ```
+
+`key_index` is a model's too, and is not written into a migration: it is checked where the database
+is read, never at run time.
+
+### The natural-key lint
+
+Every guard and every reference a migration writes looks a row up by its natural key, and the run
+time refuses a key two rows hold rather than pick one. What keeps the second row out is a unique
+index, and only one that makes the key unique among the model's rows: its `where` holds for them.
+`check`, `generate`, `status` and `sync`, whenever they read the database (and the library's
+`Check`, `Generate`, `Status` and `Sync`), ask that of every key of every model with a table, of
+each combination a `key_any_of` makes, and of the `ref` column of a model another one references,
+which every reference resolves by. `-no-lint` skips it; `plan` only notes it.
+
+| The table has | The key is |
+| --- | --- |
+| a unique index or constraint over exactly the key's columns, the primary key included | backed |
+| one over a part of them, or over expressions of them alone (`lower(email)`) | backed, and stricter: see below |
+| one over `NULLS NOT DISTINCT` columns (PostgreSQL 15 and later), or over an expression that maps NULL to a value (`COALESCE(parent_id, 0)`) | backed, NULLs included |
+| a `DEFERRABLE` constraint | backed: a migration defers every constraint to its end anyway |
+| an exclusion constraint whose every operator is `=` | backed, NULLs distinct as in a unique index |
+| a partial index whose predicate the model's `where` implies, or, over `deleted_at IS NULL`, a model whose [`soft_delete`](#soft-deleted-rows) is `deleted_at` | backed |
+| nothing over the key's columns | `unbacked key`, with the `CREATE UNIQUE INDEX` that backs it |
+| an index over more columns than the key, or an expression reading one outside it | `unbacked key`: two rows may share the key |
+| a nullable key column the index holds NULLs distinct in | `unbacked key`: any number of rows may hold the key with a NULL in it, which the tool's lookups hold equal |
+| a partial index whose predicate the `where` does not imply | `unbacked key`: the rows outside it may share the key |
+| an exclusion constraint with another operator | nothing that backs the key |
+| an invalid index, left by a `CREATE INDEX CONCURRENTLY` that failed | `unbacked key`, naming it: `REINDEX INDEX CONCURRENTLY` once the duplicates it failed on are gone |
+
+Whether an expression reads the key's columns alone, and what it makes of a NULL, PostgreSQL says,
+evaluating it over a row named and typed like the key that reads no row of the table. Whether the
+`where` implies a partial index's predicate PostgreSQL's planner says: a lookup by the index's
+columns under the `where`, prepared with a generic plan and sequential scans off, may use a partial
+index exactly when its `where` implies the predicate. A predicate the `where` repeats is taken as
+implied without asking, and one naming a column neither the `where` nor the lookup does as not.
+Where neither settles it, because the planner chose another index or could not be asked, the
+finding says it cannot tell, and is a warning whatever `key_index` says. All of it runs in
+savepoints that are rolled back, in the transaction the command reads in, and every statement it
+prepares is deallocated.
+
+An index stricter than the key holds two keys the tool tells apart equal: `Ann@example.com` and
+`ann@example.com` under `lower(email)`, two plans' `api` features under a unique `code`, a NULL and a
+0 under `COALESCE(parent_id, 0)`. The fixture rows are grouped by such an index, evaluated by
+PostgreSQL over their keys, and two of them it holds equal are a `duplicate key`, under
+`policy.duplicate_key`: dbfixture cannot load both, and a migration inserting the second fails on
+the index.
+
+Without an index nothing is written to the wrong row: a lookup two rows answer is a `duplicate key`
+at run time and touches neither. What is at stake is the deploy: the application, an admin UI or a
+race with the migration's own `INSERT … WHERE NOT EXISTS` adds the second row, and every change to
+the key fails from then on. That is why the default is `warn`, and `scaffold` writes `error` for a
+new project.
 
 ### Who owns what
 
@@ -502,7 +580,78 @@ it always does: move the sequence after it with `fixtureapply.SyncSequences`.
 What a revert cannot do: a delete is put back from its guard, which an `insert_only` column is not
 in, so `Revert` inserts the row with the column's default there, and fails where the column is
 `NOT NULL` without one. An insert is taken back by a delete guarded by everything it wrote, so a
-row whose `insert_only` column an operator changed since is skipped as changed.
+row whose `insert_only` column an operator changed since is skipped as changed. A model with a
+`soft_delete` restores the row it soft-deleted instead, which keeps the column.
+
+### Soft-deleted rows
+
+A model whose bun struct has a `soft_delete` field, `DeletedAt time.Time
+bun:",soft_delete,nullzero"` or `DeletedAt *time.Time bun:",soft_delete"`, names its column:
+
+```yaml
+models:
+  Plan:
+    table: plans
+    key: [name]
+    soft_delete: deleted_at   # NULL means live
+```
+
+bun deletes such a row by setting the column, and reads only the rows where it is NULL; so does the
+tool. A row is live while the column is NULL, and only live rows are master data:
+
+| Command | Soft-deleted rows |
+| --- | --- |
+| `check`, `sync` | not drift. A row the files hold and the database holds soft-deleted is a row only the files hold, annotated `(soft-deleted there at T; a migration restores it)`; the last block counts the soft-deleted rows per model |
+| `export` | never written, nor the column, `-all-columns` included: written without it, a fresh seed would load them live. A note counts them |
+| `generate` | a fixture row that sets the column is seeded soft-deleted by `dbfixture`, so it is no master data either: it is left out, with a note. A row going from live to soft-deleted in the files is a delete, and back an insert |
+| `status`, `baseline` | no rows; with a database, the lints below |
+
+The column is never compared, written or exported. A live row pointing at a soft-deleted row, in the
+database or in the files, is an error that names it: bun loads a soft-deleted row through no relation.
+
+**What a migration does.** The generated file carries the column in its tables, as
+`"Plan": {Name: "plans", ID: "id", Key: "name", SoftDelete: "deleted_at"}`, and every statement,
+natural-key lookup and reference of the model sees live rows only. Soft-deleted history never makes
+a key ambiguous: under `UNIQUE (name) WHERE deleted_at IS NULL` the live row is the row.
+
+| The change | What it does |
+| --- | --- |
+| a delete | `UPDATE … SET deleted_at = now()`, guarded by the key, the old values and one live row; the outcome counts the rows still pointing at it, which bun now loads as nil. A second run finds it soft-deleted already |
+| an insert, a soft-deleted row holding its values | restores the newest such row: the column back to NULL, the row's id and the rows pointing at it kept. When the change writes the id, the row with that id |
+| an insert, the newest soft-deleted row holding other values | inserts a new row beside it, which a unique index over live rows lets in. A unique index over every row refuses it: a `changed row`, under `changed_row`, naming the row and the constraint |
+| an insert, no row with the key | inserts, as always |
+| an update | updates the live row. A soft-deleted one is a `missing row` that says so; a value a soft-deleted row holds under a unique index over every row, a rename into its key, is a `changed row` |
+
+The outcome's `action` says which: `soft-deleted`, `restored`, `inserted`. A revert inverts the
+changes as always, so it restores what the migration soft-deleted and soft-deletes what it restored
+or inserted; with an [audit table](#the-audit-table) it leaves alone a row the migration found
+soft-deleted already, and without one it restores it, assuming the migration soft-deleted it.
+
+**What the column has to be.** A nullable `timestamptz` or `timestamp` column without a default.
+check, sync, export and `generate -from-db` refuse any other, and the lint is a `soft delete`
+finding, always an error: bun's `int64` soft-delete field writes a time into the column and fails on
+PostgreSQL, a `NOT NULL` column has no live row, and with a default bun writes it for a `nullzero`
+field's zero and a row is born deleted. Rows holding the zero time are a `soft delete` finding too:
+a `time.Time` field without `nullzero` writes it for a live row, and bun reads such a row as live
+where this configuration reads it as deleted. Give the field `nullzero` or make it a pointer, and set
+those rows to NULL. A fixture row writing the zero time is an `ambiguous value`.
+
+**What it cannot be combined with.** The column is no other column of the model: not the id, the
+key, the `ref` column, a reference, nor in `ignore`, `derived`, `insert_only` or `defaults`. It is not
+named in `where`, which a restore would then never see past: drop `deleted_at IS NULL` from a where
+when you set `soft_delete`. `deletes: cascade` is refused, since a soft delete reaches no row through
+a foreign key, and so is `mode: insert`: a soft-deleted row is the database's under it and must not
+come back, which a migration cannot tell. Under `mode: upsert` nothing is deleted, soft or hard, and
+a row that comes back is restored.
+
+- A model that gains `soft_delete` later keeps the hard deletes of the migrations generated before:
+  their tables do not carry the column.
+- A restore compares every value the insert writes, `insert_only` columns included, which the
+  migration cannot tell apart: a row whose `insert_only` value an operator changed before it was
+  soft-deleted is inserted beside, or is a changed row, rather than restored.
+- `scaffold` proposes `soft_delete` as a guess, for a nullable timestamp column without a default
+  named `deleted_at`, or that a unique index's predicate requires to be NULL. Only the model's Go tag
+  says it is right: without it, bun reads every row, and so must the tool.
 
 ## JSON output
 
@@ -534,7 +683,8 @@ same call, so a program reading the command and one calling the library see the 
      "hints": {"seats": "the column defaults to 1, and bun writes DEFAULT for ..."}}
   ],
   "left_alone": [{"model": "Role", "mode": "upsert", "rows": 3, "changed": 0},
-                 {"model": "Flag", "mode": "sync", "rows": 0, "changed": 0, "columns": {"enabled": 2}}]
+                 {"model": "Flag", "mode": "sync", "rows": 0, "changed": 0, "columns": {"enabled": 2}},
+                 {"model": "Plan", "mode": "sync", "rows": 0, "changed": 0, "soft_deleted": 2}]
 }
 ```
 
@@ -548,7 +698,10 @@ past, such as a renumbered row under `id_drift: warn`; they leave `agree` as it 
 `left_alone` counts, per model, what the configuration gives to the database and is no drift: `rows`
 only the database holds under `mode: upsert` or `insert`, rows `changed` that `mode: insert` never
 updates, and per `insert_only` column the rows holding another value; `columns` is left out when
-there are none.
+there are none. For a model with a [`soft_delete`](#soft-deleted-rows), `soft_deleted` counts the
+database's soft-deleted rows and `file_soft_deleted` the fixture rows that set the column; each is
+left out when 0. An insert whose key the database holds soft-deleted has `soft_deleted`, the time the
+newest such row was deleted: a migration restores it.
 
 The `row` of a finding and the `key` of a refusal name the row for a person, as
 `Model/column=value/…`, with a NULL as `NULL` and a reference as `Model(key)`. Two rows can read
@@ -557,7 +710,10 @@ still two rows.
 
 Finding kinds: `duplicate key`, `duplicate id` (two rows of the file sharing one id), `zero against a default`, `null against a default`,
 `invalid value` (a value the column's type cannot hold), `ambiguous value` (a value only the Go
-field's type could settle, such as a null inside a sequence), `unknown column`.
+field's type could settle, such as a null inside a sequence), `unknown column`, `unbacked key` (a
+natural key no unique index backs, see [the natural-key lint](#the-natural-key-lint); its `row` is
+the key, `key [plan_id, code]` or `ref code`), `soft delete` (a `soft_delete` column the tool cannot
+work with, or rows holding the zero time in it; always an error).
 
 ### status output
 
@@ -757,6 +913,7 @@ for a revert, which changes it undoes.
 | `index` | the change's position in the set; `-1` for an outcome about the whole set |
 | `model`, `kind`, `key` | which change: `insert`, `update` or `delete`, and the natural key as `col=value,...` |
 | `status` | `applied`, `unchanged` (the database held it already, or, in a revert with an audit table, the migration did not make it here), `skipped` (the policy passed it over), `failed`, `unseeded` (the seed guard table is empty), `sequence` (a sequence moved past explicit ids) |
+| `action` | what an applied change did: `inserted`, `updated`, `deleted`, and for a model with a [`soft_delete`](#soft-deleted-rows) `soft-deleted` (a delete) or `restored` (an insert that brought a soft-deleted row back); left out for any other status |
 | `rows` | rows an applied change touched |
 | `problem` | why it could not be made: `missing row`, `changed row`, `id drift`, `referenced` (a delete other rows point at), `duplicate key` (more than one row holds the natural key), `lock timeout`, `error` |
 | `message` | the sentence a person reads |
@@ -913,6 +1070,8 @@ says so about such a set, and that it still runs in one transaction.
 
 `fixturechange.Set` has a `Format`, which a file leaves out while it is 1. A new field needs no new
 format: a file that uses one does not compile against an older `fixtureapply`, which is refusal
-enough. Only a change to what an existing field means raises it, and then an older `fixtureapply`
+enough, and an older `status` or `plan` refuses to read it. `Table.SoftDelete` is one: it changes
+what a delete and an insert of that table do, and only of a table that carries it, so a file
+without it runs as it always did. Only a change to what an existing field means raises it, and then an older `fixtureapply`
 refuses the file, and an older `status` or `plan` cannot read it, with a sentence saying to upgrade
 `github.com/RELAXccc/bun-fixture-migrate`.

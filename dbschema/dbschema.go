@@ -13,6 +13,7 @@ package dbschema
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -116,6 +117,183 @@ type Table struct {
 	Deferrable [][]string
 	// ForeignKeys lists the outgoing foreign keys.
 	ForeignKeys []ForeignKey
+	// KeyIndexes lists every unique index and exclusion constraint of the
+	// table, the primary key, partial and expression indexes and invalid
+	// ones included, with what decides whether one makes a natural key
+	// unique. Uniques is the plain, valid, whole-table part of it, and
+	// Deferrable says which of those may wait for the end of the
+	// transaction, which no verdict on a key depends on.
+	KeyIndexes []KeyIndex
+}
+
+// KeyIndex is a unique index, a unique or primary-key constraint's index, or
+// an exclusion constraint, as the natural-key lint needs to judge it.
+type KeyIndex struct {
+	// Name is the index's name, which a constraint's index shares.
+	Name string
+	// Primary is the primary key's index.
+	Primary bool
+	// Unique is a unique index; Exclusion an exclusion constraint, which a
+	// constraint over every column WITH = makes a unique key without being
+	// a unique index.
+	Unique, Exclusion bool
+	// Valid is false for an index nothing may trust: one a CREATE INDEX
+	// CONCURRENTLY or REINDEX CONCURRENTLY that failed left behind
+	// (indisvalid, indisready or indislive false). It refuses no duplicate
+	// the table held when it was built, and those are still there.
+	Valid bool
+	// NullsNotDistinct is an index declared NULLS NOT DISTINCT, which holds
+	// two NULLs equal. PostgreSQL 15 and later; always false before.
+	NullsNotDistinct bool
+	// Predicate is a partial index's predicate as pg_get_expr writes it,
+	// "(deleted_at IS NULL)"; "" for an index over every row.
+	Predicate string
+	// Columns are the index's key columns in order, the columns an INCLUDE
+	// clause adds left out.
+	Columns []IndexColumn
+	// Reads are the table's columns the index's expressions and predicate
+	// read, sorted, as pg_depend records them. It lists the plain columns of
+	// an expression or partial index too, and nothing for an index that
+	// backs a constraint over plain columns only.
+	Reads []string
+}
+
+// IndexColumn is one key column of a KeyIndex: a plain column or an
+// expression.
+type IndexColumn struct {
+	// Column is the table's column, "" for an expression.
+	Column string
+	// Expr is the expression as pg_get_indexdef writes it, "lower(email)";
+	// "" for a plain column.
+	Expr string
+	// Operator is an exclusion constraint's operator for the column, "=" or
+	// "&&"; "" in a unique index.
+	Operator string
+}
+
+// Plain reports whether every key column of the index is a plain column.
+func (k KeyIndex) Plain() bool {
+	for _, c := range k.Columns {
+		if c.Column == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// Equality reports whether the index refuses two rows whose columns are
+// equal: a unique index, or an exclusion constraint whose every operator is
+// =.
+func (k KeyIndex) Equality() bool {
+	if k.Unique {
+		return true
+	}
+	if !k.Exclusion || len(k.Columns) == 0 {
+		return false
+	}
+	for _, c := range k.Columns {
+		if c.Operator != "=" {
+			return false
+		}
+	}
+	return true
+}
+
+// Definition is the index as a person reads it in a message: "UNIQUE
+// (parent_id, code)", "UNIQUE NULLS NOT DISTINCT (parent_id, code)",
+// "UNIQUE (lower(email))", "EXCLUDE (code WITH =)", followed by "WHERE"
+// and the predicate of a partial index.
+func (k KeyIndex) Definition() string {
+	parts := make([]string, 0, len(k.Columns))
+	for _, c := range k.Columns {
+		item := c.Column
+		if item == "" {
+			item = c.Expr
+			// An expression that is a call is written as it is; any other
+			// is in the parentheses pg_get_indexdef puts around it, or in
+			// some.
+			if !callExpr(item) && trimParens(item) == item {
+				item = "(" + item + ")"
+			}
+		}
+		if k.Exclusion && !k.Unique {
+			item += " WITH " + c.Operator
+		}
+		parts = append(parts, item)
+	}
+	head := "UNIQUE"
+	switch {
+	case k.Primary:
+		head = "PRIMARY KEY"
+	case k.Exclusion && !k.Unique:
+		head = "EXCLUDE"
+	case k.NullsNotDistinct:
+		head = "UNIQUE NULLS NOT DISTINCT"
+	}
+	out := head + " (" + strings.Join(parts, ", ") + ")"
+	if k.Predicate != "" {
+		out += " WHERE " + trimParens(k.Predicate)
+	}
+	return out
+}
+
+// callExpr reports whether an expression is one function call,
+// "lower(email)", which an index column may be without parentheses of its
+// own.
+func callExpr(expr string) bool {
+	open := strings.IndexByte(expr, '(')
+	if open <= 0 || !strings.HasSuffix(expr, ")") {
+		return false
+	}
+	for _, r := range expr[:open] {
+		if !(r == '_' || r == '.' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9') {
+			return false
+		}
+	}
+	depth := 0
+	for i, r := range expr[open:] {
+		switch r {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 && open+i != len(expr)-1 {
+				return false
+			}
+		}
+	}
+	return depth == 0
+}
+
+// trimParens takes away the parentheses pg_get_expr puts around a whole
+// predicate, "(deleted_at IS NULL)", when they enclose all of it.
+func trimParens(expr string) string {
+	for len(expr) >= 2 && expr[0] == '(' && expr[len(expr)-1] == ')' {
+		depth, whole := 0, true
+		inQuote := false
+		for i := 0; i < len(expr); i++ {
+			switch c := expr[i]; {
+			case c == '\'':
+				inQuote = !inQuote
+			case inQuote:
+			case c == '(':
+				depth++
+			case c == ')':
+				depth--
+				if depth == 0 && i != len(expr)-1 {
+					whole = false
+				}
+			}
+			if !whole {
+				break
+			}
+		}
+		if !whole {
+			break
+		}
+		expr = expr[1 : len(expr)-1]
+	}
+	return expr
 }
 
 // ForeignKey is one foreign-key constraint.
@@ -410,6 +588,12 @@ ORDER BY n.nspname, c.relname, con.conname`
 	// One row per indexed column, in index order. A partial index and an index
 	// over an expression are left out: neither makes a lookup by those columns
 	// unique, so neither is a natural key.
+	//
+	// So is an index that is not valid, which a CREATE INDEX CONCURRENTLY
+	// that failed leaves behind: it refuses nothing it was built over, and
+	// the duplicates it failed on are still there. An exclusion constraint
+	// whose every operator is = refuses two rows equal in its columns, as a
+	// unique index does, and is one; the columns an INCLUDE adds are not.
 	const indexQuery = `
 SELECT n.nspname, c.relname, i.indexrelid::bigint, i.indisprimary, NOT i.indimmediate, a.attname
 FROM pg_index i
@@ -417,7 +601,10 @@ JOIN pg_class c ON c.oid = i.indrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
 CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY k(attnum, ord)
 JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
-WHERE n.nspname IN (?) AND i.indisunique AND i.indpred IS NULL AND i.indexprs IS NULL
+WHERE n.nspname IN (?) AND i.indpred IS NULL AND i.indexprs IS NULL AND i.indisvalid AND i.indislive
+  AND k.ord <= i.indnkeyatts AND (i.indisunique OR i.indisexclusion AND NOT EXISTS (
+      SELECT 1 FROM pg_constraint x JOIN pg_operator o ON o.oid = ANY (x.conexclop)
+      WHERE x.conindid = i.indexrelid AND x.contype = 'x' AND o.oprname <> '='))
 ORDER BY n.nspname, c.relname, i.indisprimary DESC, i.indexrelid, k.ord`
 	type indexKey struct {
 		table string
@@ -455,6 +642,11 @@ ORDER BY n.nspname, c.relname, i.indisprimary DESC, i.indexrelid, k.ord`
 		if deferrable[k] {
 			t.Deferrable = append(t.Deferrable, indexes[k])
 		}
+	}
+
+	if err := loadKeyIndexes(ctx, db, list, tables); err != nil {
+		return nil, fmt.Errorf("read the unique indexes and exclusion constraints of %s: %w",
+			strings.Join(schemas, ", "), err)
 	}
 
 	// One row per foreign-key column. The two unnests share an ordinality so a
@@ -498,6 +690,76 @@ ORDER BY n.nspname, c.relname, con.oid, k.ord`
 		}
 	}
 	return tables, nil
+}
+
+// keyIndexQuery is one row per unique index and exclusion constraint, with
+// its key columns, and the columns its expressions and predicate read, as
+// JSON: a column name may hold any character, and JSON quotes every one.
+// pg_index.indnullsnotdistinct exists from PostgreSQL 15 on, so it is read
+// through to_jsonb, which has no such key before.
+const keyIndexQuery = `
+SELECT n.nspname, c.relname, ic.relname, i.indisprimary, i.indisunique, i.indisexclusion,
+       i.indisvalid AND i.indisready AND i.indislive,
+       COALESCE((to_jsonb(i) ->> 'indnullsnotdistinct')::bool, false),
+       COALESCE(pg_get_expr(i.indpred, i.indrelid), ''),
+       (SELECT json_agg(json_build_object(
+                  'column', CASE WHEN k.attnum > 0 THEN a.attname END,
+                  'expr', CASE WHEN k.attnum = 0 THEN pg_get_indexdef(i.indexrelid, k.n::int, true) END,
+                  'op', CASE WHEN i.indisexclusion THEN (SELECT o.oprname FROM pg_constraint x
+                             JOIN pg_operator o ON o.oid = x.conexclop[k.n]
+                             WHERE x.conindid = i.indexrelid AND x.contype = 'x') END)
+                ORDER BY k.n)
+        FROM unnest(i.indkey::int2[]) WITH ORDINALITY k(attnum, n)
+        LEFT JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+        WHERE k.n <= i.indnkeyatts)::text,
+       (SELECT COALESCE(json_agg(DISTINCT a.attname), '[]') FROM pg_depend d
+        JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
+        WHERE d.classid = 'pg_class'::regclass AND d.objid = i.indexrelid
+          AND d.refclassid = 'pg_class'::regclass AND d.refobjid = i.indrelid AND d.refobjsubid > 0)::text
+FROM pg_index i
+JOIN pg_class ic ON ic.oid = i.indexrelid
+JOIN pg_class c ON c.oid = i.indrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname IN (?) AND (i.indisunique OR i.indisexclusion)
+ORDER BY n.nspname, c.relname, ic.relname`
+
+// loadKeyIndexes reads every table's KeyIndexes.
+func loadKeyIndexes(ctx context.Context, db bun.IDB, list bun.ListValues, tables map[string]*Table) error {
+	return each(ctx, db, keyIndexQuery, list, func(rows *sql.Rows) error {
+		var schema, table, columns, reads string
+		var k KeyIndex
+		if err := rows.Scan(&schema, &table, &k.Name, &k.Primary, &k.Unique, &k.Exclusion, &k.Valid,
+			&k.NullsNotDistinct, &k.Predicate, &columns, &reads); err != nil {
+			return err
+		}
+		var cols []struct {
+			Column, Expr, Op *string
+		}
+		if err := json.Unmarshal([]byte(columns), &cols); err != nil {
+			return fmt.Errorf("index %s: %w", k.Name, err)
+		}
+		for _, c := range cols {
+			var ic IndexColumn
+			if c.Column != nil {
+				ic.Column = *c.Column
+			}
+			if c.Expr != nil {
+				ic.Expr = *c.Expr
+			}
+			if c.Op != nil {
+				ic.Operator = *c.Op
+			}
+			k.Columns = append(k.Columns, ic)
+		}
+		if err := json.Unmarshal([]byte(reads), &k.Reads); err != nil {
+			return fmt.Errorf("index %s: %w", k.Name, err)
+		}
+		sort.Strings(k.Reads)
+		if t := tables[schema+"."+table]; t != nil {
+			t.KeyIndexes = append(t.KeyIndexes, k)
+		}
+		return nil
+	})
 }
 
 // each runs a query and hands every row to fn. It reports the iteration error
