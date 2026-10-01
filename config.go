@@ -742,6 +742,31 @@ func (c *Config) ModelPolicy(model string) Policy {
 	return p
 }
 
+// policyName names, for a message, where the value of a model's policy key
+// comes from, as ModelPolicy resolves it: "policy.id_drift" for the policy
+// block's, and "the model's id_drift" where the model sets it itself, which
+// is where it has to be changed. key is id_drift, missing_row, changed_row,
+// duplicate_key, deletes or array_nulls.
+func (c *Config) policyName(model, key string) string {
+	own := false
+	if m := c.Models[model]; m != nil {
+		switch key {
+		case "deletes":
+			own = m.Deletes != "" && !m.deletesInherited
+		case "array_nulls":
+			own = m.ArrayNulls != ""
+		default:
+			for _, f := range m.runTimePolicy() {
+				own = own || (f.name == key && *f.value != "")
+			}
+		}
+	}
+	if own {
+		return "the model's " + key
+	}
+	return "policy." + key
+}
+
 // TablePolicy is what a change set carries for a model in its table: the
 // policies the model sets for itself, the rest left to the set's own, and nil
 // when it sets none.

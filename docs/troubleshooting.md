@@ -145,9 +145,9 @@ A refusal is a difference `generate` will not write as it stands (exit 2).
 | Reason | Means |
 | --- | --- |
 | `the natural key is not unique` | two rows share a key and the group changed |
-| `deletes of this model are refused by the configuration` | the model is `deletes: refuse` |
+| `deletes of this model are refused by the configuration, policy.deletes: refuse` | the model is under `deletes: refuse`, the policy block's or, where the message says `the model's deletes`, its own |
 | `renamed from name=a to name=b` | a row kept its id and changed its key; `policy.renames: update` writes it |
-| `its id changed from 3 to 4` | a row changed its id, under `policy.id_drift: error`; with `warn` it is a warning and the rest of the row is migrated |
+| `its id changed from 3 to 4` | a row changed its id, under `id_drift: error`, the policy block's or the model's own, as the message names it; with `warn` it is a warning and the rest of the row is migrated |
 | `column "x" is written on one side and left out on the other` | no `defaults` entry says what leaving it out means |
 | `version is written 1.10, which a column written from a Go string holds as written ...` | a value whose meaning depends on the column type, in a change computed without a database |
 | `currency_id points at the Currency whose code is written 0012, ...` | the same for a reference: the ref value of the row it names reads two ways, and only that ref column's type says which the database holds |

@@ -507,9 +507,9 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 				continue
 			}
 			if m.Deletes == DeleteRefuse {
-				res.Refusals = append(res.Refusals, Refusal{model, label,
-					"deletes of this model are refused by the configuration because other rows may point at it: " +
-						"hand-write the migration"})
+				res.Refusals = append(res.Refusals, Refusal{model, label, fmt.Sprintf(
+					"deletes of this model are refused by the configuration, %s: refuse, because other rows may "+
+						"point at it: hand-write the migration", cfg.policyName(model, "deletes"))})
 				continue
 			}
 			if len(prev) > 1 {
@@ -758,20 +758,24 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 		if !ok || cur.ID == "" || cur.ID == prev.ID || sharedID[cur.ID] {
 			continue
 		}
+		// The message names the id_drift that decided, the model's own
+		// where it sets one: setting the policy block's would change
+		// nothing then.
+		policy := cfg.policyName(model, "id_drift")
 		if idDrift == ModeWarn {
 			// The row still gets its value diff; only the id is left alone,
 			// which an update never writes anyway.
 			res.Warnings = append(res.Warnings, Refusal{model, prev.label(model), fmt.Sprintf(
 				"its %s changed from %s to %s. This tool does not renumber a primary key, so wherever the row "+
-					"is it keeps the %s it has; policy.id_drift is warn, so the rest of the row is migrated",
-				m.ID, prev.ID, cur.ID, m.ID)})
+					"is it keeps the %s it has; %s is warn, so the rest of the row is migrated",
+				m.ID, prev.ID, cur.ID, m.ID, policy)})
 			continue
 		}
 		res.Refusals = append(res.Refusals, Refusal{model, prev.label(model), fmt.Sprintf(
 			"its %s changed from %s to %s. This tool does not renumber a primary key: live data points at %s, "+
 				"and so does anything outside the database that was given an id. Put %s back, or set "+
-				"policy.id_drift to warn if nothing outside this database names these ids",
-			m.ID, prev.ID, cur.ID, prev.ID, prev.ID)})
+				"%s to warn if nothing outside this database names these ids",
+			m.ID, prev.ID, cur.ID, prev.ID, prev.ID, policy)})
 		skip[prev.KeyStr] = true
 	}
 	return nil
