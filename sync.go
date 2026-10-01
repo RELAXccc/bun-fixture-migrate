@@ -16,7 +16,9 @@ import (
 // SyncOptions steers Sync.
 type SyncOptions struct {
 	// DryRun rolls everything back: the result says what would have
-	// changed, and nothing did.
+	// changed, and nothing did. The constraints PostgreSQL defers to COMMIT
+	// are checked first, so a change only a commit would refuse is an error
+	// here too.
 	DryRun bool
 	// Logf receives one line per row, as a migration's would; nil is silent.
 	Logf func(format string, args ...any)
@@ -127,6 +129,14 @@ func Sync(ctx context.Context, db *bun.DB, cfg *Config, files []FixtureFile, opt
 		return res, err
 	}
 	if opts.DryRun {
+		// PostgreSQL checks a DEFERRABLE INITIALLY DEFERRED constraint only at
+		// COMMIT, which a dry run never reaches: without asking for the check
+		// here, changes that break one would be shown as made and then fail
+		// for real.
+		if _, err := tx.ExecContext(ctx, "SET CONSTRAINTS ALL IMMEDIATE"); err != nil {
+			return res, fmt.Errorf("the changes would fail when committed, where PostgreSQL checks the "+
+				"constraints it defers: %w", err)
+		}
 		return res, tx.Rollback()
 	}
 	if err := tx.Commit(); err != nil {

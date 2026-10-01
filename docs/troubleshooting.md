@@ -151,6 +151,11 @@ changes, run before this one in the deploy but not in the plan. If they change t
 fixture migration touches, run `plan -with-sql` so SQL migrations run too, or plan against a copy
 that already has them.
 
+**`when it commits, where PostgreSQL checks the constraints it defers: ...`.** The migration breaks
+a constraint declared `DEFERRABLE INITIALLY DEFERRED`, which PostgreSQL checks at `COMMIT`. Its
+statements succeed and the deploy fails when it commits, as in the plan. `sync` says the same as
+`the changes would fail when committed`.
+
 **`bufio.Scanner: token too long`.** A line of a SQL migration is longer than 64 KiB, and bun reads
 SQL migrations a line at a time. The deploy fails before running any of the file, and unless the
 migrator is built `WithMarkAppliedOnSuccess(true)` bun keeps it recorded as applied, so it never runs

@@ -225,10 +225,14 @@ func blankLineInLiteral(query string) bool {
 
 // runSQLMigration runs a bun SQL migration inside the plan's transaction, in a
 // savepoint of its own so a failure leaves the rest of the report readable.
+// bun runs a .tx.up.sql in one transaction and any other file a statement at
+// a time on a connection of its own, each statement committing by itself; the
+// deferred constraints are checked at the same points.
 func runSQLMigration(o streams, tx bun.Tx, t planTarget) error {
 	if t.readErr != nil {
 		return t.readErr
 	}
+	inTx := strings.HasSuffix(t.sql, ".tx.up.sql")
 	return tx.RunInTx(o.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		for _, q := range t.queries {
 			// bun skips a statement of nothing but white space, which a
@@ -241,9 +245,45 @@ func runSQLMigration(o streams, tx bun.Tx, t planTarget) error {
 			if _, err := tx.Tx.ExecContext(ctx, q); err != nil {
 				return err
 			}
+			if !inTx {
+				if err := commitPoint(ctx, tx); err != nil {
+					return err
+				}
+			}
+		}
+		if inTx {
+			return commitPoint(ctx, tx)
 		}
 		return nil
 	})
+}
+
+// commitPoint has PostgreSQL check, where the deploy would commit, the
+// constraints it otherwise checks only at COMMIT: a DEFERRABLE INITIALLY
+// DEFERRED foreign key, unique or exclusion constraint, or constraint
+// trigger. The plan never commits, so without this a migration that breaks
+// one is reported as succeeding and fails in the deploy.
+//
+// SET CONSTRAINTS ALL IMMEDIATE runs in a savepoint that is always rolled
+// back, which puts every constraint back in the mode it had, so the next
+// migration runs with the deferral the deploy gives it. Rolling back also
+// leaves the checks to be made again at the next commit point; that repeats
+// a check that passed, and changes no verdict.
+func commitPoint(ctx context.Context, tx bun.Tx) error {
+	if _, err := tx.ExecContext(ctx, "SAVEPOINT bfm_commit_point"); err != nil {
+		return err
+	}
+	_, checkErr := tx.ExecContext(ctx, "SET CONSTRAINTS ALL IMMEDIATE")
+	if _, err := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT bfm_commit_point"); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "RELEASE SAVEPOINT bfm_commit_point"); err != nil {
+		return err
+	}
+	if checkErr != nil {
+		return fmt.Errorf("when it commits, where PostgreSQL checks the constraints it defers: %w", checkErr)
+	}
+	return nil
 }
 
 // judge says what an error a migration met in the plan means for the deploy:
@@ -471,6 +511,10 @@ func simulate(o streams, db *bun.DB, targets []planTarget, lockTimeout time.Dura
 					}
 					pm.Changes = append(pm.Changes, out)
 				}))
+			if err == nil {
+				// bun's migrator commits each fixture migration on its own.
+				err = commitPoint(o.ctx, tx)
+			}
 		}
 		if err != nil {
 			var note string

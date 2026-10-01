@@ -112,8 +112,10 @@ is not migrated, when the directory holds two migrations bun would record under 
 ### plan
 
 Runs the pending fixture migrations against the database, in bun's order, in one transaction that is
-always rolled back, and reports every change. Pending migrations it did not write are named, and so
-is where they would run. Refused against a standby.
+always rolled back, and reports every change. Constraints PostgreSQL defers to `COMMIT` are checked
+where the deploy commits: after each migration, and after each statement of a SQL migration bun runs
+without a transaction. Pending migrations it did not write are named, and so is where they would
+run. Refused against a standby.
 
 | Flag | |
 | --- | --- |
@@ -133,7 +135,8 @@ migration.
 Brings the database to the fixture files directly, without a migration: a development database, a
 test's, a staging copy. It compares as `check` does and applies the difference with the guards and
 the policy of a generated migration, in one `REPEATABLE READ` transaction. Records nothing in the
-migrations table. Without `-yes` it rolls back and shows what it would change.
+migrations table. Without `-yes` it rolls back and shows what it would change, after checking the
+constraints PostgreSQL defers to `COMMIT`.
 
 | Flag | |
 | --- | --- |

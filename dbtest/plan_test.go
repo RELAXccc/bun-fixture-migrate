@@ -125,6 +125,84 @@ func bunMigrate(t *testing.T, db *bun.DB, dir string, opts ...migrate.MigratorOp
 	return err
 }
 
+// A fixture migration whose insert breaks a deferred foreign key is fine
+// until it commits. plan and a dry-run sync never commit, so they have to ask
+// for the check where the deploy commits, and pin the failure on the
+// migration that caused it.
+func TestPlanAndSyncCheckDeferredConstraints(t *testing.T) {
+	db := deferredDB(t)
+	c := deferredCLI(t)
+	withHammer := deferredFixture + "    - {id: 2, name: hammer, region_id: 1}\n"
+	c.write("fixtures/fixture.yml", withHammer)
+	c.must(0, "generate", "-name", "hammer", "-at", "20300101000000")
+	withSaw := withHammer + "    - {id: 3, name: saw, region_id: 9}\n"
+	c.write("fixtures/fixture.yml", withSaw)
+	c.must(0, "generate", "-name", "saw", "-at", "20300101000001")
+
+	out := c.must(3, "plan")
+	for _, want := range []string{
+		"20300101000000_fixture_hammer: would succeed",
+		"20300101000001_fixture_saw: would FAIL",
+		"when it commits, where PostgreSQL checks the constraints it defers",
+		"d_items_region_fkey",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("plan is missing %q:\n%s", want, out)
+		}
+	}
+	if out := c.must(1, "sync"); !strings.Contains(out, "would apply DItem name=saw insert") ||
+		!strings.Contains(out, "would fail when committed") || strings.Contains(out, "run it again with -yes") {
+		t.Fatalf("sync without -yes:\n%s", out)
+	}
+	if out := c.must(1, "sync", "-yes"); !strings.Contains(out, "d_items_region_fkey") {
+		t.Fatalf("sync -yes:\n%s", out)
+	}
+	if got := scan[int64](t, db, "SELECT count(*) FROM d_items"); got != 1 {
+		t.Fatalf("%d items after a sync that failed", got)
+	}
+
+	// The deploy: the first migration commits, the second fails at its commit.
+	ok, deploy := runMigrator(t, projectMigrator(t, filepath.Join(c.dir, "migrations")), false)
+	if ok || !strings.Contains(deploy, "d_items_region_fkey") || !strings.Contains(deploy, "20300101000001") {
+		t.Fatalf("the deploy has to fail at the second migration, as plan said:\n%s", deploy)
+	}
+	if got := scan[string](t, db, "SELECT string_agg(name, ',' ORDER BY id) FROM d_items"); got != "anvil,hammer" {
+		t.Fatalf("after the deploy: %s", got)
+	}
+}
+
+// A SQL migration bun runs without a transaction commits each statement by
+// itself; a .tx.up.sql commits once at the end. A deferred constraint is
+// checked at each of those points, in plan as in the deploy.
+func TestPlanChecksDeferredConstraintsWhereASQLMigrationCommits(t *testing.T) {
+	const childFirst = "INSERT INTO d_items VALUES (3, 'saw', 3);\n--bun:split\nINSERT INTO d_regions VALUES (3, 'eu');\n"
+	for _, tc := range []struct {
+		file    string
+		deploys bool
+	}{
+		{"20000101000000_eu.up.sql", false},
+		{"20000101000000_eu.tx.up.sql", true},
+	} {
+		db := deferredDB(t)
+		c := deferredCLI(t)
+		c.write("migrations/"+tc.file, childFirst)
+		var out string
+		if tc.deploys {
+			out = c.must(0, "plan", "-with-sql")
+		} else {
+			out = c.must(3, "plan", "-with-sql")
+		}
+		if !strings.Contains(out, "20000101000000_eu (SQL): would") {
+			t.Fatalf("%s: plan -with-sql:\n%s", tc.file, out)
+		}
+		deferredDB(t)
+		err := bunMigrate(t, db, filepath.Join(c.dir, "migrations"))
+		if (err == nil) != tc.deploys {
+			t.Fatalf("%s: bun's migrator returned %v, plan said:\n%s", tc.file, err, out)
+		}
+	}
+}
+
 // bunVersion is the version of bun this module is built with.
 func bunVersion() string {
 	info, _ := debug.ReadBuildInfo()

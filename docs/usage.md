@@ -139,8 +139,9 @@ planned against that column. It reads each file exactly as bun v1.2.18 does:
   `WithTemplateData`, and plan does not have the data, so the migration is listed as not simulated.
 
 The plan's one transaction differs from the deploy, which commits each migration, and each statement
-of a SQL migration whose name has no `.tx.`. What cannot be reproduced makes the plan inconclusive
-(exit 1) rather than wrong: a SQL migration that
+of a SQL migration whose name has no `.tx.`. Constraints declared `DEFERRABLE INITIALLY DEFERRED` are
+checked at those same points, so a migration that breaks one fails in the plan as in the deploy. What
+cannot be reproduced makes the plan inconclusive (exit 1) rather than wrong: a SQL migration that
 cannot run in a transaction (`CREATE INDEX CONCURRENTLY`), and an enum value one migration adds and a
 later one uses, which no transaction can do in PostgreSQL. Plan again once those are applied.
 
