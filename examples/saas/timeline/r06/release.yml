@@ -4,7 +4,8 @@ description: |
   outside a transaction, so the value is committed by the time the fixture
   migration uses it, and the deploy works. plan -with-sql runs the SQL
   migrations and the fixture migrations in one transaction, where a value added
-  to an enum cannot be used, and so reports a failure the deploy will not have.
+  to an enum cannot be used, so it cannot tell, and says so: the plan is
+  inconclusive there, not a failure the deploy will not have.
   The on-premises customer, last deployed at r01, catches up five releases in
   one migrate; staging catches up two.
 steps:

@@ -53,12 +53,15 @@ probes:
       - cli: [generate, -dry-run, -name, export]
         env: prod
         output: ["nothing changed in"]
-  # The runbook's remedy for a missing row: "if its absence is right, remove
-  # that change from the migration file and run plan again".
+  # What the runbook used to say for a missing row: "if its absence is right,
+  # remove that change from the migration file and run plan again". It leaves
+  # every other database without the change while the state file says they
+  # have it, which only check tells. The runbook now sets MissingRow to "warn"
+  # in that migration's Policy instead, which keeps the change for the others.
   - name: drop a change production cannot make
     clone: prod
     clone2: staging
-    known: "F11: the runbook's remedy for a missing row leaves every other database without the change, and only check says so"
+    known: "F11, fixed in the runbook: the remedy it gave for a missing row leaves every other database without the change, and only check says so"
     steps:
       - overlay: probe-relabel
       - generate: {name: relabel, at: "20261120100000"}

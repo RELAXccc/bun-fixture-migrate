@@ -66,28 +66,32 @@ command is expected to say. The generated migrations and the state file are not 
 | r07 | the fixture file split into four, listed under `fixtures:` | nothing to generate; a new database is seeded from four files and ends up the same |
 | r08 | priority support removed with its grants, the scale plan retired (`active: false`) | deleting it is refused by `generate`, and with deletes allowed by the run time (invoices point at its prices) |
 | r09 | the category tree rearranged: a root renamed, a subtree moved, a new root | deployed from three replicas at once; an admin renames a category (drift) |
-| r10 | two branches each add a feature with id 7 and are merged | the state file conflicts on purpose; the runbook's resolution, and the id fixed in the generated file after `plan` caught it |
+| r10 | two branches each add a feature with id 7 and are merged | the state file conflicts on purpose; the runbook's resolution: the id fixed in the fixture file as the merge resolves it, one branch's migration deleted and generated again on top of the other's |
 | r11 | `generate -from-db` against production for the admin's rename; `sort_order` renamed to `position` by SQL | `baseline -force` for the rename, then a reorder |
 | r12 | the help centre: 1500 translations in a fifth file | timing; staging and the on-premises customer catch up, the latter across six releases and the column rename. Probes: rolling back staging, exporting into five files, dropping a change production cannot make |
 
 ### What the history found
 
-A release that works around a problem of the tool says so with `known: Fn`, in its `release.yml`
-and in the test, so the workaround can go when the tool is fixed:
+The history was first replayed against the tool as it then was, and every problem it ran into is
+written down here as a finding, `Fn`. A release that works around a finding still open says so with
+`known: Fn`, in its `release.yml` and in the test, so the workaround can go when the tool is fixed.
+Six have been fixed since; the commit that fixed each is named by its subject. Two of their
+workarounds are still in the history, as it was made, and harmless now: `Role`'s
+`defaults: {tenant_id: ~}` (F1) and the categories numbered 10 and 11 in r09 (F8).
 
-| | |
-| --- | --- |
-| F1 | `export` writes every column of the table, including ones the fixture files never write (`roles.tenant_id`), so the runbook's export-then-generate is refused. Worked around with `defaults: {tenant_id: ~}` on `Role` |
-| F2 | `export` writes the source database's ids, including the plans' `gen_random_uuid()` keys and the serial ids of prices and translations the file left to the database; adopted, every other database drifts and later deletes are skipped there. The history never adopts an export wholesale |
-| F3 | a table the application inserts into too has no safe id for a new master row: the next id is a tenant's in production, and an id-less row cannot be seeded after rows with ids. Worked around by moving the sequence to 10000 (`20260504090000_roles_master_id_range`) and numbering master roles below it |
-| F4 | references and the insert guard ignore `where`, so a master role whose code a tenant's custom role has is skipped and its grants go to the tenant's role |
-| F5 | `plan -with-sql` runs the SQL and the fixture migrations in one transaction, so a new enum value cannot be used there |
-| F6 | `plan -with-sql` leaves the non-transactional effects (`setval`) of the SQL migrations it ran |
-| F7 | bun's migrator lock fails rather than waits, and a crashed deploy leaves it taken; worked around in `main.go` |
-| F8 | the database snapshot reads rows in text order of the id (1, 10, 2, ...) and resolves a self-reference only to rows read before it: a parent with id 9 and a child with id 10 break `check`, `export`, `sync`, `generate -from-db`. Worked around by numbering the new categories 10 and 11 |
-| F9 | after the merge, `status -offline` cannot find anything once `baseline -force` ran, and before it points at `generate`, which would turn the id both branches took into a rename |
-| F10 | a rollback inverts changes the migration found already made: staging gets the name production's admin gave a category |
-| F11 | the runbook's remedy for a missing row, dropping the change from the migration, leaves every other database without it while the state file says they have it |
+| | What it was | Now |
+| --- | --- | --- |
+| F1 | `export` wrote every column of the table, including ones the fixture files never write (`roles.tenant_id`), so the runbook's export-then-generate was refused. Worked around with `defaults: {tenant_id: ~}` on `Role` | fixed: an export writes the columns the fixture files hold ("export the columns and ids the fixture files hold, not the database's"); the workaround stays, and changes nothing |
+| F2 | `export` wrote the source database's ids, including the plans' `gen_random_uuid()` keys and the serial ids of prices and translations the file left to the database; adopted, every other database drifted and later deletes were skipped there | fixed by the same change: an id the fixture files leave to the database is not exported |
+| F3 | a table the application inserts into too has no safe id for a new master row: the next id is a tenant's in production, and an id-less row cannot be seeded after rows with ids | open: worked around by moving the sequence to 10000 (`20260504090000_roles_master_id_range`) and numbering master roles below it |
+| F4 | references and the insert guard ignored `where`, so a master role whose code a tenant's custom role has was skipped and its grants went to the tenant's role | fixed: a model's `where` holds in every statement a migration runs ("carry a model's where into the migration, and keep every statement inside it") |
+| F5 | `plan -with-sql` runs the SQL and the fixture migrations in one transaction, so a new enum value cannot be used there, and the plan reported a failure the deploy does not have | open, and said: the plan is inconclusive there (exit 1) and names the cause |
+| F6 | `plan -with-sql` leaves the non-transactional effects (`setval`) of the SQL migrations it ran | open: PostgreSQL's sequences are outside every transaction; plan notes such a migration |
+| F7 | bun's migrator lock fails rather than waits, and a crashed deploy leaves it taken | open, and bun's: `main.go` retries the lock, and `status` reports one left behind |
+| F8 | the database snapshot read rows in text order of the id (1, 10, 2, ...) and resolved a self-reference only to rows read before it: a parent with id 9 and a child with id 10 broke `check`, `export`, `sync`, `generate -from-db`. Worked around by numbering the new categories 10 and 11 | fixed: rows are read in the table's own order, and a tree whatever the order of its ids ("order rows by the table's own id and key, not by their text, so 9 comes before 10"; "read a tree whose parents come after their children, export it parents first, and read every table in a fixed order") |
+| F9 | after the merge, `status -offline` found nothing once `baseline -force` ran, and before it pointed at `generate`, which would have turned the id both branches took into a rename | fixed: the state file keeps its history, and `status`, `generate` and `baseline` refuse a migration generated on another branch; the runbook deletes one of the two and generates it again ("keep the state file's history: what it covers and what that was generated against"; "refuse two branches' migrations from one state, and generate one of them again"). r10 follows it |
+| F10 | a rollback inverts changes the migration found already made: staging gets the name production's admin gave a category | open: the runbook's [rolling back](../../docs/production.md#rolling-back) says what `Revert` assumes, and r12 shows it |
+| F11 | the runbook's remedy for a missing row, dropping the change from the migration, left every other database without it while the state file said they had it | fixed in the runbook, which sets `MissingRow: "warn"` in that one migration's `Policy` instead ("do not tell anybody to drop a change for a missing row from the migration"; "name a missing-row remedy that keeps the change, and say what Revert assumes"). r12's probe still shows what the old remedy did |
 
 ## Running the history
 
