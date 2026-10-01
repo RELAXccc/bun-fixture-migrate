@@ -1475,10 +1475,12 @@ func orderChanges(cfg *Config, uq uniques, renames, deletes, updates, inserts []
 		return more
 	}
 	// circles is the changes of every circle a graph of waits holds, one
-	// list per circle, in the base order, and whether a value it passes
-	// through is one the files hold only in part (approx).
+	// list per circle, in the base order, every node it is made of, and
+	// whether a value it passes through is one the files hold only in part
+	// (approx).
 	type circle struct {
 		changes []int
+		nodes   map[int]bool
 		partial bool
 	}
 	circles := func(lists ...[]edge) []circle {
@@ -1503,10 +1505,11 @@ func orderChanges(cfg *Config, uq uniques, renames, deletes, updates, inserts []
 			}
 			c := byComp[comp[v]]
 			if c == nil {
-				c = &circle{}
+				c = &circle{nodes: map[int]bool{}}
 				byComp[comp[v]] = c
 				order = append(order, comp[v])
 			}
+			c.nodes[v] = true
 			if v < n {
 				c.changes = append(c.changes, v)
 			} else if approx[v] {
@@ -1581,6 +1584,9 @@ func orderChanges(cfg *Config, uq uniques, renames, deletes, updates, inserts []
 	var uniqueEdges []edge
 	var uniqueOf []int
 	var refusals, notes []Refusal
+	// cutEdges are the waits on the changes a circle refused, which the
+	// order leaves out and the changes waiting on them have to know of.
+	var cutEdges []edge
 	for k, ix := range known {
 		more := edgesOf(ix)
 		if len(more) == 0 {
@@ -1601,16 +1607,13 @@ func orderChanges(cfg *Config, uq uniques, renames, deletes, updates, inserts []
 						"row holds in a migration of its own first", labels(c.changes), columns(ix.cols))})
 				continue
 			}
-			involved, inCircle := map[int]bool{}, map[int]bool{}
-			for _, i := range c.changes {
-				inCircle[i] = true
-			}
+			// The indexes whose waits the circle is made of.
+			involved := map[int]bool{k: true}
 			for e, ed := range uniqueEdges {
-				if inCircle[ed.from] || inCircle[ed.to] {
+				if c.nodes[ed.from] && c.nodes[ed.to] {
 					involved[uniqueOf[e]] = true
 				}
 			}
-			involved[k] = true
 			var names []string
 			for j := range known {
 				if involved[j] {
@@ -1644,6 +1647,8 @@ func orderChanges(cfg *Config, uq uniques, renames, deletes, updates, inserts []
 			for _, e := range more {
 				if !refused[e.from] && !refused[e.to] {
 					kept = append(kept, e)
+				} else {
+					cutEdges = append(cutEdges, e)
 				}
 			}
 			more = kept
@@ -1672,6 +1677,43 @@ func orderChanges(cfg *Config, uq uniques, renames, deletes, updates, inserts []
 					"constraint in the circle is DEFERRABLE, the migration fails on one of them: plan says "+
 					"which, and splitting the change into two migrations breaks the circle",
 				labels(c.changes), columns(ix.cols))})
+		}
+	}
+	// A change waiting on a refused one, for a value it gives up or a row it
+	// names, cannot be made without it either.
+	if len(cutEdges) > 0 {
+		next := make([][]int, nodes)
+		for _, list := range [][]edge{edges, cutEdges} {
+			for _, e := range list {
+				next[e.from] = append(next[e.from], e.to)
+			}
+		}
+		cause := map[int]int{}
+		var queue []int
+		for i := 0; i < n; i++ {
+			if refused[i] {
+				cause[i] = i
+				queue = append(queue, i)
+			}
+		}
+		for len(queue) > 0 {
+			v := queue[0]
+			queue = queue[1:]
+			for _, w := range next[v] {
+				if _, seen := cause[w]; seen {
+					continue
+				}
+				cause[w] = cause[v]
+				queue = append(queue, w)
+				if w < n {
+					refused[w] = true
+					c, by := changes[w], changes[cause[v]]
+					refusals = append(refusals, Refusal{Model: c.Model, Key: keyLabel(c.Model, c.Key),
+						Reason: fmt.Sprintf("waits for the change of %s, refused above, for a value it gives up or "+
+							"a row it names, so it cannot be made without it: write them together, or run "+
+							"this again once that one is", keyLabel(by.Model, by.Key))})
+				}
+			}
 		}
 	}
 	// A guess that closes a circle on its own, or with what is known, gives

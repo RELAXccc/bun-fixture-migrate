@@ -172,3 +172,30 @@ func TestACircleThroughTheRowsChangesPointAtIsAWarning(t *testing.T) {
 		t.Fatalf("got %s / %+v / %+v", kindsOf(res), res.Refusals, res.Warnings)
 	}
 }
+
+// A refusal names the indexes the circle is made of, not another whose
+// values the same rows give up to rows outside it.
+func TestARefusalNamesTheIndexesOfItsCircle(t *testing.T) {
+	cfg := itemsConfig(t)
+	table := &dbschema.Table{Uniques: [][]string{{"id"}, {"name"}, {"code"}, {"grp", "position"}}}
+	res := computeUnder(t, cfg, table,
+		"- model: Item\n  rows:\n    - {id: 1, name: a, code: x, grp: g, position: 1}\n"+
+			"    - {id: 2, name: b, code: y, grp: g, position: 2}\n    - {id: 4, name: d, code: z, grp: h, position: 1}\n",
+		"- model: Item\n  rows:\n    - {id: 1, name: a, code: w, grp: g, position: 2}\n"+
+			"    - {id: 2, name: b, code: y, grp: g, position: 1}\n    - {id: 4, name: d, code: x, grp: h, position: 1}\n")
+	if len(res.Refusals) != 3 || len(res.Changes) != 0 {
+		t.Fatalf("got %s / %+v", kindsOf(res), res.Refusals)
+	}
+	for _, r := range res.Refusals[:2] {
+		if !strings.Contains(r.Reason, "the unique index on (grp, position) is checked") {
+			t.Fatalf("got %s", r)
+		}
+	}
+	// d takes the code a gives up, and a's change is refused: d's cannot
+	// be made without it, and says so, rather than fail at run time under
+	// -allow-partial.
+	if r := res.Refusals[2]; r.Key != "Item/name=d" || !strings.Contains(r.Reason, "waits for the change of "+
+		"Item/name=a, refused above") {
+		t.Fatalf("got %s", r)
+	}
+}
