@@ -527,14 +527,23 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 	if cfg.Policy.IDDrift == ModeIgnore {
 		return nil
 	}
-	newByKey := map[string]*Entry{}
-	for _, e := range next.Entries[model] {
-		if _, dup := newByKey[e.KeyStr]; !dup {
-			newByKey[e.KeyStr] = e
+	// A natural key two rows of either snapshot share says nothing about
+	// which of them is which: that is the duplicate-key finding, and the
+	// value diff's to settle, not a renumbering.
+	sharedKey := map[string]bool{}
+	for _, snap := range []*Snapshot{old, next} {
+		seen := map[string]bool{}
+		for _, e := range snap.Entries[model] {
+			sharedKey[e.KeyStr] = sharedKey[e.KeyStr] || seen[e.KeyStr]
+			seen[e.KeyStr] = true
 		}
 	}
+	newByKey := map[string]*Entry{}
+	for _, e := range next.Entries[model] {
+		newByKey[e.KeyStr] = e
+	}
 	for _, prev := range old.Entries[model] {
-		if skip[prev.KeyStr] || prev.ID == "" || sharedID[prev.ID] {
+		if skip[prev.KeyStr] || prev.ID == "" || sharedID[prev.ID] || sharedKey[prev.KeyStr] {
 			continue
 		}
 		cur, ok := newByKey[prev.KeyStr]

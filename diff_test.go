@@ -1054,6 +1054,25 @@ func TestAnInsertLeavingOutAColumnOthersWriteIsRefused(t *testing.T) {
 	}
 }
 
+// A file compared with itself changes nothing and refuses nothing, even with
+// two rows sharing a natural key under ids of their own: that is the
+// duplicate-key finding, not a renumbering.
+func TestAFileAgainstItselfRefusesNothingEvenWithADuplicateKey(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{"Plan": {Table: "plans", Key: []string{"name"}}}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	text := "- model: Plan\n  rows:\n    - {id: 2, name: team, price: 1}\n    - {id: 3, name: team, price: 1}\n"
+	s := snap(t, cfg, text, "fixture.yml")
+	if len(s.Findings) != 1 || s.Findings[0].Kind != FindingDuplicateKey {
+		t.Fatalf("expected the duplicate key to be reported once, got %+v", s.Findings)
+	}
+	res := computeWith(t, cfg, text, text)
+	if len(res.Changes) != 0 || len(res.Refusals) != 0 || len(res.Warnings) != 0 {
+		t.Fatalf("identical inputs: %+v / %+v / %+v", res.Changes, res.Refusals, res.Warnings)
+	}
+}
+
 // Only a column no two rows share a value of in either state can be unique,
 // so only such a column makes one change wait for another that gives a value
 // up: here slot, and not cur, whose waits would go the other way round.
