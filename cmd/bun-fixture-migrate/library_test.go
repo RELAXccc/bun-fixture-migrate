@@ -7,6 +7,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -141,5 +142,27 @@ func TestExportJSONAndStdoutAreOneOrTheOther(t *testing.T) {
 	code, _, errs := call(t, "export", "-config", cfg, "-json", "-stdout")
 	if code != 1 || !strings.Contains(errs, "-json and -stdout both write to standard output") {
 		t.Fatalf("exit %d: %s", code, errs)
+	}
+}
+
+// With nothing changed, generate says so before what stopped the state file
+// taking the files' new text: here a migrations directory that is a file.
+func TestNothingChangedComesBeforeTheDirectorysError(t *testing.T) {
+	cfg, _ := projectWith(t, config+"state: fixture_state.yml\n", oldFixture, oldFixture)
+	if code, _, errs := call(t, "baseline", "-config", cfg); code != 0 {
+		t.Fatal(errs)
+	}
+	dir := filepath.Join(filepath.Dir(cfg), "migrations")
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeFixture(t, cfg, "# a comment, and no value changed\n"+oldFixture)
+	code, out, errs := call(t, "generate", "-config", cfg, "-name", "x")
+	if code != 1 || !strings.HasPrefix(out, "nothing changed in fixtures/fixture.yml since the state after baseline") ||
+		!strings.Contains(errs, "the migrations directory:") {
+		t.Fatalf("exit %d\n%s%s", code, out, errs)
 	}
 }

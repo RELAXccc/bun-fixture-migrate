@@ -117,12 +117,17 @@ func generate(o streams, args []string) error {
 	for _, w := range g.Warnings {
 		fmt.Fprintln(o.stderr, "warning:", w)
 	}
+	// Nothing changed is said before what stopped the state file taking the
+	// files' new text.
+	unchanged := !refused && g.Diff != nil && len(g.Diff.Changes)+len(g.Diff.Refusals) == 0
+	if unchanged {
+		fmt.Fprintf(o.stdout, "nothing changed in %s since %s\n", s.cfg.FixtureLabel(), g.Diff.Base)
+	}
 	if err != nil {
 		return generateError(err, *fromDB)
 	}
 
 	if !toWrite {
-		fmt.Fprintf(o.stdout, "nothing changed in %s since %s\n", s.cfg.FixtureLabel(), g.Diff.Base)
 		if g.State != nil {
 			if _, err := g.Write(); err != nil {
 				return err
