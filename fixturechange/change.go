@@ -155,8 +155,9 @@ type Set struct {
 	// and rolls back instead of waiting behind, say, an admin's open
 	// transaction while the application's own writes queue up behind it; the
 	// next deploy runs it again. Waiting for another change set to finish is
-	// not affected. Empty means the session's own lock_timeout, which is
-	// usually none.
+	// not affected, nor limited by a lock_timeout the session has, unless the
+	// set runs inside a caller's transaction, whose lock_timeout limits that
+	// wait. Empty means the session's own lock_timeout, which is usually none.
 	LockTimeout string
 }
 

@@ -19,6 +19,9 @@ type options struct {
 	report    func(Outcome)
 	migration string
 	dryRun    bool
+	// nested is true when the change set runs inside a caller's
+	// transaction.
+	nested bool
 }
 
 // WithLogger replaces log.Printf as the destination of the per-row report.

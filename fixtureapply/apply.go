@@ -76,6 +76,7 @@ func Apply(ctx context.Context, db bun.IDB, set fixturechange.Set, opts ...Optio
 	if o.migration == "" {
 		o.migration = migrationFromStack()
 	}
+	o.nested = inCallersTx(db)
 	rec := findRecord(ctx, db, set, o)
 	err := db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		return run(ctx, tx, set, false, o)
@@ -108,21 +109,43 @@ const advisoryLock int64 = 0x62666d0001
 // next migrate runs Apply again and every change it finds already made is
 // "unchanged".
 func Revert(ctx context.Context, db bun.IDB, set fixturechange.Set, opts ...Option) error {
+	o := newOptions(opts)
+	o.nested = inCallersTx(db)
 	return db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		return run(ctx, tx, set, true, newOptions(opts))
+		return run(ctx, tx, set, true, o)
 	})
+}
+
+// inCallersTx says whether db is a transaction somebody else began, which a
+// change set runs in a savepoint of.
+func inCallersTx(db bun.IDB) bool {
+	switch db.(type) {
+	case bun.Tx, *bun.Tx:
+		return true
+	}
+	return false
 }
 
 func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o options) error {
 	if err := Validate(set); err != nil {
 		return err
 	}
-	restore, err := session(ctx, tx)
+	restore, lockTimeout, err := session(ctx, tx)
 	if err != nil {
 		return err
 	}
 	if err := rowSecurity(ctx, tx, set, revert); err != nil {
 		return err
+	}
+	// Waiting for another replica's change set is not the wait lock_timeout
+	// is about, whether the set's or one the session has from the DSN. Inside
+	// a caller's transaction the caller's lock_timeout stays: the caller may
+	// hold locks already, as plan does, and set it to bound how long it keeps
+	// them while it waits.
+	if !o.nested {
+		if _, err := tx.ExecContext(ctx, "SELECT set_config('lock_timeout', '0', true)"); err != nil {
+			return fmt.Errorf("set lock_timeout to 0: %w", err)
+		}
 	}
 	// One change set at a time, whoever runs it: two replicas of an
 	// application migrating at the same start-up would otherwise both find a
@@ -131,11 +154,12 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(?)", advisoryLock); err != nil {
 		return fmt.Errorf("wait for another change set to finish: %w", err)
 	}
-	// Only now: waiting for another replica's change set is not the wait
-	// lock_timeout is about.
 	if set.LockTimeout != "" {
-		if restore, err = withLockTimeout(ctx, tx, set.LockTimeout, restore); err != nil {
-			return err
+		lockTimeout = set.LockTimeout
+	}
+	if set.LockTimeout != "" || !o.nested {
+		if _, err := tx.ExecContext(ctx, "SELECT set_config('lock_timeout', ?, true)", lockTimeout); err != nil {
+			return fmt.Errorf("set lock_timeout to %s: %w", lockTimeout, err)
 		}
 	}
 	if restore, err = withDeferredConstraints(ctx, tx, set, restore); err != nil {
@@ -223,24 +247,26 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 // migration binding the same text has to read it the same way, and a date such
 // as 2026-01-02 has to be year-month-day. The settings are local to the
 // transaction; restore puts back what a caller's own transaction had, and a
-// rollback does that by itself.
-func session(ctx context.Context, tx bun.IDB) (func(context.Context) error, error) {
+// rollback does that by itself. restore also puts back lock_timeout, which run
+// changes, and lockTimeout is the session's.
+func session(ctx context.Context, tx bun.IDB) (restore func(context.Context) error, lockTimeout string, err error) {
 	var tz, ds string
-	if err := tx.QueryRowContext(ctx, "SELECT current_setting('TimeZone'), current_setting('DateStyle')").
-		Scan(&tz, &ds); err != nil {
-		return nil, fmt.Errorf("read the session's settings: %w", err)
+	if err := tx.QueryRowContext(ctx,
+		"SELECT current_setting('TimeZone'), current_setting('DateStyle'), current_setting('lock_timeout')").
+		Scan(&tz, &ds, &lockTimeout); err != nil {
+		return nil, "", fmt.Errorf("read the session's settings: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, "SELECT set_config('TimeZone', 'UTC', true), "+
 		"set_config('DateStyle', 'ISO, YMD', true)"); err != nil {
-		return nil, fmt.Errorf("fix the session's settings: %w", err)
+		return nil, "", fmt.Errorf("fix the session's settings: %w", err)
 	}
 	return func(ctx context.Context) error {
-		if _, err := tx.ExecContext(ctx, "SELECT set_config('TimeZone', ?, true), set_config('DateStyle', ?, true)",
-			tz, ds); err != nil {
+		if _, err := tx.ExecContext(ctx, "SELECT set_config('TimeZone', ?, true), set_config('DateStyle', ?, true), "+
+			"set_config('lock_timeout', ?, true)", tz, ds, lockTimeout); err != nil {
 			return fmt.Errorf("restore the session's settings: %w", err)
 		}
 		return nil
-	}, nil
+	}, lockTimeout, nil
 }
 
 // rowSecurity refuses a change set that a row-level security policy would
@@ -314,29 +340,6 @@ func privilege(err error) error {
 	return fmt.Errorf("%w. The role running the migration lacks a privilege, or a row-level security policy "+
 		"applies to it, which would hide rows from the change set or stop its changes: run migrations as the "+
 		"tables' owner or a role with BYPASSRLS, or grant what is missing. Nothing was changed", err)
-}
-
-// withLockTimeout sets lock_timeout for the rest of the transaction, and
-// returns a restore that also puts the caller's value back.
-func withLockTimeout(ctx context.Context, tx bun.IDB, timeout string,
-	restore func(context.Context) error) (func(context.Context) error, error) {
-
-	var old string
-	if err := tx.QueryRowContext(ctx, "SELECT current_setting('lock_timeout')").Scan(&old); err != nil {
-		return nil, fmt.Errorf("read the session's lock_timeout: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, "SELECT set_config('lock_timeout', ?, true)", timeout); err != nil {
-		return nil, fmt.Errorf("set lock_timeout to %s: %w", timeout, err)
-	}
-	return func(ctx context.Context) error {
-		if err := restore(ctx); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, "SELECT set_config('lock_timeout', ?, true)", old); err != nil {
-			return fmt.Errorf("restore the session's lock_timeout: %w", err)
-		}
-		return nil
-	}, nil
 }
 
 // withDeferredConstraints makes every DEFERRABLE constraint wait for the end of
