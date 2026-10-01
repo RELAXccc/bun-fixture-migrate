@@ -177,7 +177,10 @@ func (r *runner) matchAll(ctx context.Context, model string, sets ...fixturechan
 //
 // A literal is text, which PostgreSQL reads as the column's type. The one
 // exception is an array column given a JSON array, which is how a YAML
-// sequence arrives: its elements are unpacked and cast to the array's type.
+// sequence arrives: it is written as a PostgreSQL array of the same shape and
+// cast to the column's type. A JSON array for a bytea column is refused: read
+// as text, the column would hold the characters of the list, not the bytes
+// it names, which is how a YAML sequence of numbers fills a []byte field.
 func (r *runner) value(ctx context.Context, model, col string, v fixturechange.Value) (string, []any, error) {
 	switch {
 	case v.IsNull:
@@ -188,8 +191,20 @@ func (r *runner) value(ctx context.Context, model, col string, v fixturechange.V
 			if err != nil {
 				return "", nil, err
 			}
-			if ct, ok := types[col]; ok && ct.array {
-				return "ARRAY(SELECT jsonb_array_elements_text(?::jsonb))::" + ct.cast, []any{v.Lit}, nil
+			ct, ok := types[col]
+			if !ok || (!ct.array && ct.base != "bytea") {
+				return "?", []any{v.Lit}, nil
+			}
+			literal, isArray, err := arrayLiteral(v.Lit)
+			switch {
+			case err != nil:
+				return "", nil, fmt.Errorf("the value of %s is %s, and %w", col, v.Lit, err)
+			case isArray && !ct.array:
+				return "", nil, fmt.Errorf("the value of %s is the list %s, and %s is a bytea column: the list would "+
+					"be stored as its characters, not as the bytes it names. Write the bytes as \\x followed by "+
+					"their hex digits, as in \\x48690a", col, v.Lit, col)
+			case isArray:
+				return "CAST(? AS " + ct.cast + ")", []any{literal}, nil
 			}
 		}
 		return "?", []any{v.Lit}, nil

@@ -1129,3 +1129,62 @@ func TestTheReportGoesToSlog(t *testing.T) {
 		t.Fatalf("sequence: %v", r)
 	}
 }
+
+// An array of two dimensions was unpacked one level deep at run time, and its
+// rows handed to the element type as text, which no integer reads. Each
+// array is now written whole, of whatever depth, and compared as itself.
+func TestAnArrayOfTwoDimensionsIsWrittenAndCompared(t *testing.T) {
+	db := connect(t)
+	run(t, db, "DROP TABLE IF EXISTS grids",
+		"CREATE TABLE grids (id bigserial PRIMARY KEY, name text NOT NULL UNIQUE, grid integer[], words text[], data bytea)",
+		`INSERT INTO grids (name, grid, words) VALUES ('g', '{{1,2},{3,4}}', '{"a b",NULL,"NULL"}')`)
+	key := fixturechange.Values{"name": fixturechange.Lit("g")}
+	set := fixturechange.Set{
+		Name:   "20260921120000_fixture_grids",
+		Tables: fixturechange.Tables{"Grid": {Name: "grids", ID: "id", Key: "name"}},
+		Changes: []fixturechange.Change{
+			{Model: "Grid", Kind: fixturechange.Update, Key: key,
+				Old: fixturechange.Values{"grid": fixturechange.Lit("[[1,2],[3,4]]"),
+					"words": fixturechange.Lit(`["a b",null,"NULL"]`)},
+				New: fixturechange.Values{"grid": fixturechange.Lit("[[5,6],[7,8]]"),
+					"words": fixturechange.Lit(`["{c}","say \"d\""]`)}},
+			{Model: "Grid", Kind: fixturechange.Insert, Key: fixturechange.Values{"name": fixturechange.Lit("h")},
+				New: fixturechange.Values{"name": fixturechange.Lit("h"), "grid": fixturechange.Lit("[[[1]],[[2]]]")}},
+		},
+	}
+	for _, want := range []fixtureapply.Status{fixtureapply.StatusApplied, fixtureapply.StatusUnchanged} {
+		outcomes, err := applyReporting(t, db, set)
+		if err != nil {
+			t.Fatalf("Apply: %v", err)
+		}
+		for _, o := range outcomes {
+			if o.Status != want {
+				t.Fatalf("want %s: %+v", want, o)
+			}
+		}
+	}
+	if got := scan[string](t, db, "SELECT grid::text || ' ' || words::text FROM grids WHERE name = 'g'"); got != `{{5,6},{7,8}} {"{c}","say \"d\""}` {
+		t.Fatalf("g: %s", got)
+	}
+	if got := scan[string](t, db, "SELECT grid::text FROM grids WHERE name = 'h'"); got != "{{{1}},{{2}}}" {
+		t.Fatalf("h: %s", got)
+	}
+
+	// A list for a bytea column is how a YAML sequence of numbers fills a
+	// []byte field; read as text the column would hold the list's characters.
+	set.Changes = []fixturechange.Change{{Model: "Grid", Kind: fixturechange.Update, Key: key,
+		Old: fixturechange.Values{"data": fixturechange.Null()},
+		New: fixturechange.Values{"data": fixturechange.Lit("[0, 255]")}}}
+	if _, err := applyReporting(t, db, set); err == nil || !strings.Contains(err.Error(), "is a bytea column") {
+		t.Fatalf("want the list refused, got %v", err)
+	}
+	// And rows of different lengths, which PostgreSQL cannot store.
+	set.Changes[0].New = fixturechange.Values{"grid": fixturechange.Lit("[[1,2],[3]]")}
+	set.Changes[0].Old = fixturechange.Values{"grid": fixturechange.Lit("[[5,6],[7,8]]")}
+	if _, err := applyReporting(t, db, set); err == nil || !strings.Contains(err.Error(), "same length") {
+		t.Fatalf("want the ragged array refused, got %v", err)
+	}
+	if got := scan[int64](t, db, "SELECT count(*) FROM grids WHERE data IS NOT NULL"); got != 0 {
+		t.Fatalf("nothing may be written, %d rows have data", got)
+	}
+}
