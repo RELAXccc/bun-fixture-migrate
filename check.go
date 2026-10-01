@@ -230,6 +230,45 @@ func (c *Config) FindingMode(kind FindingKind) Mode {
 	return ModeError
 }
 
+// warnTo is the end of a sentence that says which policies to set to warn
+// for the findings they make errors to be warnings: ", or set
+// policy.zero_default and Plan's duplicate_key to warn", each named where
+// its value comes from (ModeOf). "" when no policy makes any of them an
+// error, an invalid value say, which only fixing it settles.
+func (c *Config) warnTo(findings []Finding) string {
+	var names []string
+	seen := map[string]bool{}
+	for _, f := range findings {
+		if c.ModeOf(f) != ModeError {
+			continue
+		}
+		var key string
+		switch f.Kind {
+		case FindingZeroDefault:
+			key = "zero_default"
+		case FindingNullDefault:
+			key = "null_default"
+		case FindingDuplicateKey:
+			key = "duplicate_key"
+		default:
+			continue
+		}
+		name := c.policyName(f.Model, key)
+		if own, ok := strings.CutPrefix(name, "the model's "); ok {
+			name = f.Model + "'s " + own
+		}
+		if !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	sort.Strings(names)
+	return ", or set " + joinAnd(names) + " to warn"
+}
+
 // Worst is the strictest mode any of the findings calls for, and whether any
 // finding is left once the ignored ones are dropped.
 func (c *Config) Worst(findings []Finding) (Mode, []Finding) {

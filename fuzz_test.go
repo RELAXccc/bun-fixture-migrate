@@ -111,3 +111,21 @@ func FuzzYamlInt(f *testing.F) {
 		}
 	})
 }
+
+// Interval text never panics the reading, and what it writes reads back as
+// itself: the database's own spelling is a fixed point.
+func FuzzIntervalText(f *testing.F) {
+	for _, s := range []string{"1 day", "-1 days +02:00:00", "PT1.5H", "1-2", "@ 1 day ago", "1:30.5", "1.5 days"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		text, ok := intervalText(s)
+		if !ok {
+			return
+		}
+		again, ok := intervalText(text)
+		if !ok || again != text {
+			t.Fatalf("%q reads as %q, which reads as %q %v", s, text, again, ok)
+		}
+	})
+}

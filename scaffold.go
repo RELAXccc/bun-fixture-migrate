@@ -196,23 +196,29 @@ func scaffoldID(t *dbschema.Table) string {
 
 // primaryKeyReference is the model a table's one-column primary key points
 // at, "" when it points nowhere this configuration has or at a column other
-// than that model's id.
+// than that model's id. Where that model's table is keyed by a reference in
+// turn, a plan's details keyed by the plan, it is the model at the end of
+// the chain, whose id they all hold: a model keyed by a reference has none
+// of its own (id: none) for a reference to name.
 func primaryKeyReference(tables map[string]*dbschema.Table, t *dbschema.Table, models map[string]string) string {
-	if len(t.PrimaryKey) != 1 {
-		return ""
+	found := ""
+	for seen := map[*dbschema.Table]bool{}; t != nil && !seen[t] && len(t.PrimaryKey) == 1; {
+		seen[t] = true
+		fk := t.ForeignKeyOf(t.PrimaryKey[0])
+		if fk == nil {
+			break
+		}
+		target, ok := models[fk.RefSchema+"."+fk.RefTable]
+		if !ok {
+			break
+		}
+		next := tables[fk.RefSchema+"."+fk.RefTable]
+		if pk := next.PrimaryKey; len(pk) != 1 || pk[0] != fk.RefColumns[0] {
+			break
+		}
+		found, t = target, next
 	}
-	fk := t.ForeignKeyOf(t.PrimaryKey[0])
-	if fk == nil {
-		return ""
-	}
-	target, ok := models[fk.RefSchema+"."+fk.RefTable]
-	if !ok {
-		return ""
-	}
-	if pk := tables[fk.RefSchema+"."+fk.RefTable].PrimaryKey; len(pk) != 1 || pk[0] != fk.RefColumns[0] {
-		return ""
-	}
-	return target
+	return found
 }
 
 // scaffoldModel is the entry of one model.
@@ -245,7 +251,8 @@ func scaffoldModel(tables map[string]*dbschema.Table, t *dbschema.Table, model, 
 			"    # leave id out and put every key column in key.\n")
 	case pkRef != "":
 		fmt.Fprintf(&b, "    # The primary key, %s, points at a row of %s, so it is a reference and\n"+
-			"    # the natural key, not an id: id is left out.\n", id, pkRef)
+			"    # the natural key, not an id of this model's own: it has none.\n"+
+			"    id: none\n", id, pkRef)
 		id = ""
 	case len(t.PrimaryKey) == 1:
 		fmt.Fprintf(&b, "    id: %s\n", id)
@@ -309,6 +316,13 @@ func scaffoldModel(tables map[string]*dbschema.Table, t *dbschema.Table, model, 
 			refs = append(refs, fmt.Sprintf("      # %s points at %s.%s, which is not its id: an ordinary column",
 				c.Name, fk.RefTable, fk.RefColumns[0]))
 			continue
+		}
+		// A table keyed by a reference has no id of its own, and holds the
+		// id of the row its key points at, which is what this column holds.
+		if via := primaryKeyReference(tables, tables[fk.RefSchema+"."+fk.RefTable], models); via != "" {
+			refs = append(refs, fmt.Sprintf("      # %s points at %s, whose rows are keyed by the id of a %s", c.Name,
+				fk.RefTable, via))
+			target = via
 		}
 		refs = append(refs, fmt.Sprintf("      %s: %s", c.Name, target))
 	}

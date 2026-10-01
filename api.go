@@ -379,8 +379,8 @@ func refuseFindings(cfg *Config, snap *Snapshot) ([]Finding, error) {
 		}
 	}
 	return findings, &RefusedError{reason: ErrFindings, Findings: findings, Message: fmt.Sprintf(
-		"%s in the fixture file that the policy makes errors, nothing written. Fix them, or set the policy to warn",
-		plural(n, "finding"))}
+		"%s in the fixture file that the policy makes errors, nothing written. Fix them%s",
+		plural(n, "finding"), cfg.warnTo(findings))}
 }
 
 // databaseSnapshot reads the database, limited to the columns the fixture file
@@ -648,9 +648,13 @@ func (p *Project) Export(ctx context.Context, db bun.IDB, opts ExportOptions) (*
 		exp.DroppedComments = append(exp.DroppedComments, dropped)
 	}
 	if mode == ModeError {
+		how := "Fix them"
+		if warn := p.Config.warnTo(exp.Findings); warn != "" {
+			how += warn + " to write it anyway"
+		}
 		exp.refused = &RefusedError{reason: ErrFindings, Findings: exp.Findings, Message: fmt.Sprintf(
-			"%s, nothing written: this export would not reproduce the database it was taken from. "+
-				"Fix them, or set the policy to warn to write it anyway", plural(len(exp.Findings), "problem"))}
+			"%s, nothing written: this export would not reproduce the database it was taken from. %s",
+			plural(len(exp.Findings), "problem"), how)}
 		return exp, exp.refused
 	}
 	return exp, nil

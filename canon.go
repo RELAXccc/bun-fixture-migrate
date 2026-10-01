@@ -318,12 +318,22 @@ func instants(c dbschema.Column) bool {
 // settleCopies decides, for every template copying a field of another row,
 // what dbfixture stores: what the field holds as fmt prints it. A field of a
 // string type prints as it is, the value a string field holds, and an
-// integer as the integer; a field of any other type prints otherwise than
-// any value the file can write, a float64 of 100000000 as 1e+08, a time.Time
-// as 2026-01-01 10:00:00 +0000 UTC, and is an invalid value. A copy whose
-// field's column is not in tables is left undecided.
+// integer as the integer. A bool prints as true or false, which is the copy,
+// whatever spelling of it the file loads into the field. A uuid prints as it
+// is in a string field and in lower case with hyphens from a uuid type with a
+// String method, google/uuid's, pgx's or any [16]byte one: a uuid column
+// holds those as one value, and any other column takes the copy only when
+// the file writes the uuid that way, so both print alike. A field of any
+// other type prints otherwise than any value the file can write, a float64 of
+// 100000000 as 1e+08, a time.Time as 2026-01-01 10:00:00 +0000 UTC, and is an
+// invalid value. A copy whose field's column is not in tables is left
+// undecided.
 func settleCopies(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table) {
 	for _, model := range snap.Order {
+		var own *dbschema.Table
+		if m := cfg.Models[model]; m != nil {
+			own = tables[cfg.QualifiedTable(m)]
+		}
 		for _, e := range snap.Entries[model] {
 			for _, col := range sortedSources(e.copied) {
 				decide, known := decidingColumn(cfg, tables, e, col, dbschema.Column{})
@@ -334,7 +344,24 @@ func settleCopies(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table
 				if decide.StringField() || integerType(decide) {
 					continue
 				}
+				var into dbschema.Column
+				if own != nil {
+					into, _ = own.Column(col)
+				}
+				printed, ok, why := printedCopy(decide, into, e.Cells[col].Lit)
+				if ok {
+					e.Cells[col] = fixturechange.Lit(printed)
+					continue
+				}
 				src := e.from[col]
+				if why != "" {
+					snap.Findings = append(snap.Findings, Finding{
+						Kind: FindingInvalidValue, Model: model, Row: e.label(model),
+						Detail: fmt.Sprintf("%s copies %s of a %s row, a %s column, %s", col, src.column, src.model,
+							decide.FullType, why),
+					})
+					continue
+				}
 				snap.Findings = append(snap.Findings, Finding{
 					Kind: FindingInvalidValue, Model: model, Row: e.label(model),
 					Detail: fmt.Sprintf("%s copies %s of a %s row, a %s column, and dbfixture stores what that field "+
@@ -345,6 +372,63 @@ func settleCopies(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table
 			}
 		}
 	}
+}
+
+// printedCopy is what a template copying a field of a bool or a uuid column,
+// decide, stores in the column into: what fmt prints of the value text that
+// field loads. ok is false for a field of another type, and why, when not
+// empty, says why the copy of this value is not one value.
+func printedCopy(decide, into dbschema.Column, text string) (printed string, ok bool, why string) {
+	if decide.Category == "A" {
+		return "", false, ""
+	}
+	switch decide.Type {
+	case "bool":
+		// yaml.v3 loads a bool field from a YAML bool, and from the YAML
+		// 1.1 spellings it keeps for a typed bool; fmt prints true or
+		// false. Any other text does not load into a bool field at all.
+		switch text {
+		case "true", "y", "Y", "yes", "Yes", "YES", "on", "On", "ON":
+			return "true", true, ""
+		case "false", "n", "N", "no", "No", "NO", "off", "Off", "OFF":
+			return "false", true, ""
+		}
+		return "", false, fmt.Sprintf("and %s does not load into a bool field, which is what dbfixture "+
+			"copies: write true or false there", text)
+	case "uuid":
+		// A uuid column reads every spelling of one uuid as one value, as
+		// the cast will say; any other column holds the text, which is
+		// the same from a string field and a uuid type only in the
+		// spelling a uuid type prints.
+		if into.Type == "uuid" && into.Category != "A" || canonicalUUID(text) {
+			return text, true, ""
+		}
+		return "", false, fmt.Sprintf("and dbfixture copies what that field holds as fmt prints it: %s from a "+
+			"string field, and in lower case with hyphens from a uuid.UUID, which only the model says it has. "+
+			"Write the uuid in lower case with hyphens there, or the value here", text)
+	}
+	return "", false, ""
+}
+
+// canonicalUUID reports a uuid written as a uuid type with a String method
+// prints it: 32 lower-case hex digits in groups of 8, 4, 4, 4 and 12.
+func canonicalUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, c := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // integerType reports a column of whole numbers, which a Go integer field

@@ -108,12 +108,21 @@ type Table struct {
 	// expression or a partial one is left out, because it does not make a
 	// lookup by those columns unique.
 	Uniques [][]string
+	// Deferrable lists those of Uniques whose check waits for the end of the
+	// statement or the transaction: a UNIQUE or PRIMARY KEY constraint
+	// declared DEFERRABLE (pg_index.indimmediate is false). A transaction
+	// that defers it may move a value from row to row in any order, two rows
+	// trading values included; every other unique index refuses a value
+	// that another row still holds at the end of each statement.
+	Deferrable [][]string
 	// ForeignKeys lists the outgoing foreign keys.
 	ForeignKeys []ForeignKey
 	// KeyIndexes lists every unique index and exclusion constraint of the
 	// table, the primary key, partial and expression indexes and invalid
 	// ones included, with what decides whether one makes a natural key
-	// unique. Uniques is the plain, valid, whole-table part of it.
+	// unique. Uniques is the plain, valid, whole-table part of it, and
+	// Deferrable says which of those may wait for the end of the
+	// transaction, which no verdict on a key depends on.
 	KeyIndexes []KeyIndex
 }
 
@@ -133,9 +142,6 @@ type KeyIndex struct {
 	// (indisvalid, indisready or indislive false). It refuses no duplicate
 	// the table held when it was built, and those are still there.
 	Valid bool
-	// Deferrable is a constraint declared DEFERRABLE (indimmediate false),
-	// whose check may wait for the end of the transaction.
-	Deferrable bool
 	// NullsNotDistinct is an index declared NULLS NOT DISTINCT, which holds
 	// two NULLs equal. PostgreSQL 15 and later; always false before.
 	NullsNotDistinct bool
@@ -196,8 +202,7 @@ func (k KeyIndex) Equality() bool {
 // Definition is the index as a person reads it in a message: "UNIQUE
 // (parent_id, code)", "UNIQUE NULLS NOT DISTINCT (parent_id, code)",
 // "UNIQUE (lower(email))", "EXCLUDE (code WITH =)", followed by "WHERE"
-// and the predicate of a partial index, and "DEFERRABLE" where the
-// constraint is.
+// and the predicate of a partial index.
 func (k KeyIndex) Definition() string {
 	parts := make([]string, 0, len(k.Columns))
 	for _, c := range k.Columns {
@@ -228,9 +233,6 @@ func (k KeyIndex) Definition() string {
 	out := head + " (" + strings.Join(parts, ", ") + ")"
 	if k.Predicate != "" {
 		out += " WHERE " + trimParens(k.Predicate)
-	}
-	if k.Deferrable {
-		out += " DEFERRABLE"
 	}
 	return out
 }
@@ -593,7 +595,7 @@ ORDER BY n.nspname, c.relname, con.conname`
 	// whose every operator is = refuses two rows equal in its columns, as a
 	// unique index does, and is one; the columns an INCLUDE adds are not.
 	const indexQuery = `
-SELECT n.nspname, c.relname, i.indexrelid::bigint, i.indisprimary, a.attname
+SELECT n.nspname, c.relname, i.indexrelid::bigint, i.indisprimary, NOT i.indimmediate, a.attname
 FROM pg_index i
 JOIN pg_class c ON c.oid = i.indrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -610,18 +612,18 @@ ORDER BY n.nspname, c.relname, i.indisprimary DESC, i.indexrelid, k.ord`
 	}
 	indexes := map[indexKey][]string{}
 	var indexOrder []indexKey
-	primary := map[indexKey]bool{}
+	primary, deferrable := map[indexKey]bool{}, map[indexKey]bool{}
 	if err := each(ctx, db, indexQuery, list, func(rows *sql.Rows) error {
 		var schema, table, column string
 		var oid int64
-		var isPrimary bool
-		if err := rows.Scan(&schema, &table, &oid, &isPrimary, &column); err != nil {
+		var isPrimary, isDeferrable bool
+		if err := rows.Scan(&schema, &table, &oid, &isPrimary, &isDeferrable, &column); err != nil {
 			return err
 		}
 		k := indexKey{schema + "." + table, oid}
 		if _, seen := indexes[k]; !seen {
 			indexOrder = append(indexOrder, k)
-			primary[k] = isPrimary
+			primary[k], deferrable[k] = isPrimary, isDeferrable
 		}
 		indexes[k] = append(indexes[k], column)
 		return nil
@@ -637,6 +639,9 @@ ORDER BY n.nspname, c.relname, i.indisprimary DESC, i.indexrelid, k.ord`
 			t.PrimaryKey = indexes[k]
 		}
 		t.Uniques = append(t.Uniques, indexes[k])
+		if deferrable[k] {
+			t.Deferrable = append(t.Deferrable, indexes[k])
+		}
 	}
 
 	if err := loadKeyIndexes(ctx, db, list, tables); err != nil {
@@ -694,7 +699,7 @@ ORDER BY n.nspname, c.relname, con.oid, k.ord`
 // through to_jsonb, which has no such key before.
 const keyIndexQuery = `
 SELECT n.nspname, c.relname, ic.relname, i.indisprimary, i.indisunique, i.indisexclusion,
-       i.indisvalid AND i.indisready AND i.indislive, NOT i.indimmediate,
+       i.indisvalid AND i.indisready AND i.indislive,
        COALESCE((to_jsonb(i) ->> 'indnullsnotdistinct')::bool, false),
        COALESCE(pg_get_expr(i.indpred, i.indrelid), ''),
        (SELECT json_agg(json_build_object(
@@ -724,7 +729,7 @@ func loadKeyIndexes(ctx context.Context, db bun.IDB, list bun.ListValues, tables
 		var schema, table, columns, reads string
 		var k KeyIndex
 		if err := rows.Scan(&schema, &table, &k.Name, &k.Primary, &k.Unique, &k.Exclusion, &k.Valid,
-			&k.Deferrable, &k.NullsNotDistinct, &k.Predicate, &columns, &reads); err != nil {
+			&k.NullsNotDistinct, &k.Predicate, &columns, &reads); err != nil {
 			return err
 		}
 		var cols []struct {

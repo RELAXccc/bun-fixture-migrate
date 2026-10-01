@@ -204,7 +204,9 @@ models:
     table: currencies
     # The primary key. It is never compared as an ordinary column and never
     # updated; it is written on an insert when the fixture row has one, and it
-    # is what a reference to this model resolves to.
+    # is what a reference to this model resolves to. "none" for a table with no
+    # id of its own, whose primary key is another model's id: a plan's details
+    # keyed by the plan, with key: [id] and references: {id: Plan}.
     id: id
     # The natural key: what identifies a row when its id means nothing. Every
     # guard the generated migration writes matches on these columns, so the

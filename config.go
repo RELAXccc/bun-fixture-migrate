@@ -268,6 +268,13 @@ type Model struct {
 	// ordinary column; it is written on an insert when the fixture row has it,
 	// it is what a reference to this model resolves to, and Policy.IDDrift
 	// decides what happens when it disagrees with the database.
+	//
+	// NoID, "none", says the model has no id of its own: a table whose
+	// primary key is a reference to another model's row, a plan's details
+	// keyed by the plan's id, which the model keys and references by that
+	// column instead: id: none, key: [id], references: {id: Plan}. Such a
+	// model's rows are found by their key alone, and nothing can point at
+	// them. Prepare makes it "", and keeps it so.
 	ID string `yaml:"id"`
 	// Ref is the column a reference to this model matches on. Default "name".
 	Ref string `yaml:"ref"`
@@ -346,10 +353,16 @@ type Model struct {
 	derived    map[string]bool
 	ignored    map[string]bool
 	insertOnly map[string]bool
+	// noID is set by Prepare for a model whose ID is NoID, so a second
+	// Prepare keeps the ID it made "".
+	noID bool
 	// deletesInherited is set when Deletes was filled in from the policy,
 	// so a second Prepare can tell it from one the model sets.
 	deletesInherited bool
 }
+
+// NoID is the id of a model that has none of its own: see Model.ID.
+const NoID = "none"
 
 // Defaults maps a column to the value a fixture row that leaves it out stands
 // for. NullDefault is NULL.
@@ -477,7 +490,10 @@ func (c *Config) Prepare() error {
 				return err
 			}
 		}
-		if m.ID == "" {
+		switch {
+		case m.ID == NoID:
+			m.noID, m.ID = true, ""
+		case m.ID == "" && !m.noID:
 			m.ID = "id"
 		}
 		if m.Ref == "" {
@@ -496,24 +512,43 @@ func (c *Config) Prepare() error {
 				return fmt.Errorf("model %q: key_any_of group %d is empty", name, i)
 			}
 		}
-		for col, target := range m.References {
-			if _, ok := c.Models[target]; !ok {
+		for _, col := range sortedKeysOf(m.References) {
+			target := m.References[col]
+			tm, ok := c.Models[target]
+			if !ok {
 				return fmt.Errorf("model %q: column %q references unknown model %q", name, col, target)
+			}
+			// A reference holds the id of the row it names, which a model
+			// without one does not have.
+			if tm != nil && tm.hasNoID() {
+				hint := ""
+				if len(tm.Key) == 1 && tm.References[tm.Key[0]] != "" {
+					hint = fmt.Sprintf(", %s, whose id %s's %s holds", tm.References[tm.Key[0]], target, tm.Key[0])
+				}
+				return fmt.Errorf("model %q: column %q references %s, which has no id of its own (id: none), and a "+
+					"reference holds the id of the row it names: point it at the model %s's key points at%s",
+					name, col, target, target, hint)
 			}
 		}
 		// The id is the row's own value to the tool, compared and written as
 		// it stands; a reference is looked up by the name of the row it
-		// names. A primary key that is also a reference, a plan's limits
+		// names. A primary key that is also a reference, a plan's details
 		// keyed by the plan, would be read as the template text naming the
 		// plan.
-		if target, ok := m.References[m.ID]; ok {
-			hint := "leave id out, so the model is read without an id, and keep " + m.ID + " in key and references"
-			if m.ID == "id" {
-				hint = "name another column that is unique as id, or take " + m.ID + " out of references and " +
-					"write the ids themselves"
-			}
+		if target, ok := m.References[m.ID]; ok && m.ID != "" {
 			return fmt.Errorf("model %q: its id, %s, is also a reference to %s, and the tool reads an id as the "+
-				"row's own value, never as a reference to look up: %s", name, m.ID, target, hint)
+				"row's own value, never as a reference to look up: set id: none, so the model has no id of its "+
+				"own, and keep %s in key and references", name, m.ID, target, m.ID)
+		}
+		if m.noID {
+			switch {
+			case m.Serial:
+				return fmt.Errorf("model %q: serial is true, and id is none: a model without an id has no "+
+					"sequence to move; take serial out", name)
+			case m.IDs == IDsDatabase:
+				return fmt.Errorf("model %q: ids is database, and id is none: a model without an id has none "+
+					"for the database to give; take ids out", name)
+			}
 		}
 		if err := m.prepareOwnership(name, c.Policy); err != nil {
 			return err
@@ -673,6 +708,10 @@ func (m *Model) ownsValue(col string) bool {
 	return m.Mode != OwnInsert && !m.insertOnly[col]
 }
 
+// hasNoID reports a model without an id of its own (NoID), before Prepare
+// or after it.
+func (m *Model) hasNoID() bool { return m.noID || m.ID == NoID }
+
 // idsFromDatabase reports a model whose ids the database gives: see
 // IDsDatabase.
 func (m *Model) idsFromDatabase() bool { return m.IDs == IDsDatabase }
@@ -716,6 +755,31 @@ func (c *Config) ModelPolicy(model string) Policy {
 		}
 	}
 	return p
+}
+
+// policyName names, for a message, where the value of a model's policy key
+// comes from, as ModelPolicy resolves it: "policy.id_drift" for the policy
+// block's, and "the model's id_drift" where the model sets it itself, which
+// is where it has to be changed. key is id_drift, missing_row, changed_row,
+// duplicate_key, deletes or array_nulls.
+func (c *Config) policyName(model, key string) string {
+	own := false
+	if m := c.Models[model]; m != nil {
+		switch key {
+		case "deletes":
+			own = m.Deletes != "" && !m.deletesInherited
+		case "array_nulls":
+			own = m.ArrayNulls != ""
+		default:
+			for _, f := range m.runTimePolicy() {
+				own = own || (f.name == key && *f.value != "")
+			}
+		}
+	}
+	if own {
+		return "the model's " + key
+	}
+	return "policy." + key
 }
 
 // TablePolicy is what a change set carries for a model in its table: the

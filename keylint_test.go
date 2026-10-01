@@ -113,8 +113,9 @@ func TestTheVerdictOnAKey(t *testing.T) {
 		},
 		nulls: map[string]bool{"lower(email)": true, "lower(login)": true},
 	}
+	// A DEFERRABLE constraint is an index like any other to the lint;
+	// the catalog says so in Table.Deferrable, which no verdict reads.
 	deferrable := unique("t_code_key", "code")
-	deferrable.Deferrable = true
 	exclusion := dbschema.KeyIndex{Name: "t_code_excl", Exclusion: true, Valid: true,
 		Columns: []dbschema.IndexColumn{{Column: "code", Operator: "="}}}
 	ranged := dbschema.KeyIndex{Name: "t_code_during_excl", Exclusion: true, Valid: true,

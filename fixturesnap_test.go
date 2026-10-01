@@ -390,3 +390,76 @@ func TestACopyOfAFieldIsDecidedByItsColumnsType(t *testing.T) {
 		}
 	}
 }
+
+// A copy of a bool field is what fmt prints of it, true or false, whatever
+// spelling of it the file loads into the field; a copy of a uuid field is
+// the uuid, which a uuid column reads as one value from a string field and a
+// uuid type alike, and any other column only when the file writes it the way
+// a uuid type prints it. Before, both were an invalid value, the reviewer's
+// owner_active and owner_ext copies of a user.
+func TestACopyOfABoolOrAUUIDField(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{
+		"User": {Table: "users"},
+		"Org":  {Table: "orgs", References: map[string]string{"owner_id": "User"}},
+	}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	col := func(pos int, name, typ, full string) dbschema.Column {
+		return dbschema.Column{Name: name, Position: pos, Type: typ, FullType: full, Category: map[string]string{
+			"text": "S", "bool": "B", "uuid": "U", "int8": "N", "float8": "N"}[typ]}
+	}
+	tables := map[string]*dbschema.Table{
+		"public.users": {Schema: "public", Name: "users", Columns: []dbschema.Column{col(1, "id", "int8", "bigint"),
+			col(2, "name", "text", "text"), col(3, "active", "bool", "boolean"), col(4, "ext", "uuid", "uuid")}},
+		"public.orgs": {Schema: "public", Name: "orgs", Columns: []dbschema.Column{col(1, "id", "int8", "bigint"),
+			col(2, "name", "text", "text"), col(3, "owner_id", "int8", "bigint"),
+			col(4, "owner_active", "bool", "boolean"), col(5, "owner_label", "text", "text"),
+			col(6, "owner_ext", "uuid", "uuid"), col(7, "owner_ext_text", "text", "text")}},
+	}
+	for _, tc := range []struct {
+		active, ext string
+		want        map[string]string // column -> value, or "!" + a finding's text
+	}{
+		{"true", "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", map[string]string{"owner_active": "true", "owner_label": "true",
+			"owner_ext": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", "owner_ext_text": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"}},
+		{"yes", "A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11", map[string]string{"owner_active": "true", "owner_label": "true",
+			"owner_ext": "A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11",
+			"owner_ext_text": "!owner_ext_text copies ext of a User row, a uuid column, and dbfixture copies what " +
+				"that field holds as fmt prints it: A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11 from a string field"}},
+		{"Off", "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", map[string]string{"owner_active": "false", "owner_label": "false"}},
+		{"t", "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", map[string]string{
+			"owner_label": "!owner_label copies active of a User row, a boolean column, and t does not load into a bool field"}},
+	} {
+		text := "- model: User\n  rows:\n    - {_id: smith, id: 1, name: smith, active: " + tc.active + ", ext: " + tc.ext + "}\n" +
+			"- model: Org\n  rows:\n    - {id: 1, name: o, owner_id: '{{ $.User.smith.ID }}', " +
+			"owner_active: '{{ $.User.smith.Active }}', owner_label: '{{ $.User.smith.Active }}', " +
+			"owner_ext: '{{ $.User.smith.Ext }}', owner_ext_text: '{{ $.User.smith.Ext }}'}\n"
+		s := snap(t, cfg, text, "fixture.yml")
+		settleCopies(cfg, s, tables)
+		org := s.Entries["Org"][0]
+		if len(org.copied) != 0 {
+			t.Errorf("%s/%s: copies still open: %v", tc.active, tc.ext, org.copied)
+		}
+		for column, want := range tc.want {
+			if finding, ok := strings.CutPrefix(want, "!"); ok {
+				var found bool
+				for _, f := range s.Findings {
+					found = found || f.Kind == FindingInvalidValue && strings.Contains(f.Detail, finding)
+				}
+				if !found {
+					t.Errorf("%s/%s: expected %q, got %+v", tc.active, tc.ext, finding, s.Findings)
+				}
+				continue
+			}
+			if got := org.Cells[column].Lit; got != want {
+				t.Errorf("%s/%s: %s is %q, want %q", tc.active, tc.ext, column, got, want)
+			}
+			for _, f := range s.Findings {
+				if strings.HasPrefix(f.Detail, column+" ") {
+					t.Errorf("%s/%s: %s", tc.active, tc.ext, f.Detail)
+				}
+			}
+		}
+	}
+}

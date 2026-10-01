@@ -782,7 +782,7 @@ func keyDetail(t *dbschema.Table, key lintKey, filter string, version int, c can
 	case reasonInvalid:
 		return fmt.Sprintf("unique index %s is invalid, left by a CREATE INDEX CONCURRENTLY that failed, and "+
 			"backs nothing: delete the duplicate rows it failed on, then REINDEX INDEX CONCURRENTLY %s",
-			c.index.Name, indexName(t, c.index.Name))
+			c.index.Name, sqlIndexName(t, c.index.Name))
 	}
 	what := "every change to it then fails as a duplicate key"
 	if key.ref {
@@ -947,8 +947,8 @@ func tableName(t *dbschema.Table) string {
 	return sqlName(t.Schema) + "." + sqlName(t.Name)
 }
 
-// indexName is an index of t as SQL names it.
-func indexName(t *dbschema.Table, name string) string {
+// sqlIndexName is an index of t as SQL names it.
+func sqlIndexName(t *dbschema.Table, name string) string {
 	if t.Schema == "public" {
 		return sqlName(name)
 	}
@@ -1393,7 +1393,7 @@ func indexAdvice(t *dbschema.Table, cols []string, fallback string) string {
 			trimPredicate(partial.Predicate))
 	case invalid != nil:
 		return fmt.Sprintf("unique index %s is invalid, left by a CREATE INDEX CONCURRENTLY that failed: delete "+
-			"the duplicate rows, then REINDEX INDEX CONCURRENTLY %s", invalid.Name, indexName(t, invalid.Name))
+			"the duplicate rows, then REINDEX INDEX CONCURRENTLY %s", invalid.Name, sqlIndexName(t, invalid.Name))
 	}
 	return fallback
 }

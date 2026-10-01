@@ -42,8 +42,12 @@ it means to `dbfixture` and PostgreSQL. Each rule below is checked against the r
   [value](#values) is. A ref column that is itself a template, and a copy of a field that is, are
   refused: write the value.
 - A template copying a field other than the id stores what the field holds as Go's `fmt` prints it.
-  That is the value for a field of a string or an integer column, and nothing a file can write for
-  any other: a `float64` of 100000000 prints as `1e+08`, a `time.Time` as
+  That is the value for a field of a string or an integer column. A `bool` prints as `true` or
+  `false`, whichever spelling the file loads into it (`yes`, `On`). A `uuid` prints as written from a
+  string field and in lower case with hyphens from a uuid type with a `String` method
+  (`github.com/google/uuid`, pgx's `pgtype.UUID`): a `uuid` column holds both as one value, and any
+  other column takes the copy only where the file writes the uuid that way. Nothing else is a value a
+  file can write: a `float64` of 100000000 prints as `1e+08`, a `time.Time` as
   `2026-01-01 10:00:00 +0000 UTC`, a nil pointer as `<nil>`. So a copy of a null, of a mapping or
   sequence, or of a column of another type is refused; without the database, which says the column's
   type, a change carrying a copy is. An id written as a template is refused too: the tool reads the
@@ -85,8 +89,12 @@ the resolved one. A domain is its base type throughout: a domain over integer is
 `jsonb` a JSON document, and its default is the column's when the column has none. The column's type comes from the database, so **without one** (`generate` with no
 `database` configured or with `-no-lint`, `status -offline`, `baseline`) a change that carries a
 value whose two readings differ is refused with a reason, and so is a value only respelled (`1.10`
-before, `1.1` after), which is a change in a text column and none in a numeric one. To have neither
-question arise, quote a value meant as text, and write any other the way it resolves: `1.1`, `15`,
+before, `1.1` after), which is a change in a text column and none in a numeric one. So is a string
+respelled as another spelling of one interval, `'86400 seconds'` before and `'24:00:00'` or `PT24H`
+after, `'1 days'` and `'1 day'`: an interval column holds them as one value, the database run finds
+no change, and a text column holds two. `'1 day'` and `'24 hours'` are two intervals to PostgreSQL,
+which adds them differently to a timestamp across a change of daylight saving time, and a change
+both ways. To have neither question arise, quote a value meant as text, and write any other the way it resolves: `1.1`, `15`,
 `true`, `2026-01-01T10:00:00Z`. `export` writes every value that way.
 
 **With a database at hand** (`check`, `export`, `generate` when one is configured, `sync`), every
@@ -287,8 +295,8 @@ Each ends up in the output with the model, the row and a reason; `generate` writ
   column: PostgreSQL refuses to write either.
 - **A null in a NOT NULL column without a default**, an `invalid value`: bun writes a plain field's
   zero there instead, and a pointer field, like a migration, fails the insert.
-- **A value only the column's type can settle**, such as `1.10` or `017`, in a change computed
-  without a database; see [values](#values).
+- **A value only the column's type can settle**, such as `1.10` or `017`, or an interval respelled,
+  `'86400 seconds'` to `'24:00:00'`, in a change computed without a database; see [values](#values).
 - **A value the column cannot take as `dbfixture` writes it**, an `invalid value`: one PostgreSQL
   refuses to cast, one too long for the column, one a single-column `CHECK` refuses, a fraction in
   an integer column. See [lengths, domains and constraints](#lengths-domains-and-constraints).
@@ -308,8 +316,10 @@ hand and `baseline -force`. See the [runbook](production.md#generate-refused-a-c
   bun's default naming. A template naming a field whose column is spelled otherwise is an error, not
   a guess.
 - A model's `id` is the row's own value, never a reference: a primary key that also points at another
-  model, a plan's limits keyed by the plan, is refused in the configuration. Leave `id` out for such a
-  table, which is then read without one, and keep the column in `key` and `references`.
+  model, a plan's details keyed by the plan, is refused in the configuration. Set `id: none` for such a
+  table, which is then read without an id of its own, and keep the column in `key` and `references`;
+  `scaffold` writes it so. Its rows name their plan, `id: '{{ $.Plan.free.ID }}'`, as `dbfixture` loads
+  them.
 - A structured value (mapping or sequence) is supported in `json`, `jsonb`, array and `bytea` columns,
   and not as a reference. A mapping in an `hstore` column, which a `map[string]string` field loads, is
   an `invalid value`.

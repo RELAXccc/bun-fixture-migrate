@@ -215,7 +215,6 @@ func TestKeyIndexDefinition(t *testing.T) {
 		{KeyIndex{Unique: true, Columns: []IndexColumn{{Expr: "(plan_id + 1)"}}}, "UNIQUE ((plan_id + 1))", true},
 		{KeyIndex{Unique: true, Columns: []IndexColumn{{Expr: "lower(a) || lower(b)"}}},
 			"UNIQUE ((lower(a) || lower(b)))", true},
-		{KeyIndex{Unique: true, Deferrable: true, Columns: plain("code")}, "UNIQUE (code) DEFERRABLE", true},
 		{KeyIndex{Exclusion: true, Columns: []IndexColumn{{Column: "code", Operator: "="}}},
 			"EXCLUDE (code WITH =)", true},
 		{KeyIndex{Exclusion: true, Columns: []IndexColumn{{Column: "code", Operator: "="},
