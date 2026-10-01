@@ -41,8 +41,12 @@ rows the policy lets through.
 ### scaffold
 
 Writes a commented starting configuration from a database's catalog: a model per table, the primary
-key, whether it is serial, the foreign keys as `references`, the column defaults as `defaults`, and
-a natural key guessed from the narrowest unique index besides the primary key. Every guess is marked.
+key, whether it is serial, the foreign keys to a table's id as `references`, the column defaults as
+`defaults`, and a natural key guessed from the narrowest unique index besides the primary key. A
+partition is part of its partitioned table, not a model of its own; a foreign key to another column,
+a code say, is an ordinary column. Timestamps the database writes with a row, from a default such as
+`now()` or, on a table with a `BEFORE` row trigger, an `updated_at`, are proposed for `ignore`, and
+the triggers are named. Every guess is marked.
 
 | Flag | |
 | --- | --- |

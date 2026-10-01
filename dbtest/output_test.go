@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
 )
 
 // A finding the policy makes a warning is reported, and the database and the
@@ -218,5 +220,57 @@ func TestAnExportWritesWhatTheFixtureFilesHold(t *testing.T) {
 	}
 	if out := c.must(0, "export", "-stdout", "-all-columns"); !strings.Contains(out, `note: "heavy"`) {
 		t.Fatalf("-all-columns:\n%s", out)
+	}
+}
+
+// scaffold reads from the catalog what is not master data: a partition is
+// part of its partitioned table, a foreign key to a code is no reference to
+// an id, and the columns a default or a trigger fills when a row is written
+// are proposed for ignore. What it writes loads as a configuration.
+func TestScaffoldReadsWhatIsNotMasterData(t *testing.T) {
+	db := connect(t)
+	run(t, db, "DROP SCHEMA IF EXISTS s_scaffold CASCADE", "CREATE SCHEMA s_scaffold",
+		"CREATE TABLE s_scaffold.currencies (id bigserial PRIMARY KEY, code text UNIQUE NOT NULL)",
+		"CREATE TABLE s_scaffold.warehouses (id bigserial PRIMARY KEY, name text UNIQUE NOT NULL, "+
+			"currency_code text REFERENCES s_scaffold.currencies (code), "+
+			"created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz)",
+		"CREATE FUNCTION s_scaffold.touch() RETURNS trigger LANGUAGE plpgsql AS "+
+			"$$ BEGIN NEW.updated_at = now(); RETURN NEW; END $$",
+		"CREATE TRIGGER warehouses_touch BEFORE UPDATE ON s_scaffold.warehouses "+
+			"FOR EACH ROW EXECUTE FUNCTION s_scaffold.touch()",
+		"CREATE TABLE s_scaffold.tax_rates (country text NOT NULL, code text NOT NULL, rate numeric NOT NULL, "+
+			"PRIMARY KEY (country, code)) PARTITION BY LIST (country)",
+		"CREATE TABLE s_scaffold.tax_rates_de PARTITION OF s_scaffold.tax_rates FOR VALUES IN ('DE')")
+	c := buildCLI(t)
+	// scaffold runs before there is a configuration, so it takes no -config.
+	scaffold := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command(c.bin, append([]string{"scaffold", "-dsn", os.Getenv("BUN_FIXTURE_MIGRATE_POSTGRES"),
+			"-schema", "s_scaffold"}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("scaffold %v: %v\n%s", args, err, out)
+		}
+		return string(out)
+	}
+	out := scaffold()
+	for _, want := range []string{
+		"Warehouse:", "TaxRate:", "currency_code points at currencies.code, which is not its id",
+		"ignore: [created_at, updated_at]", "BEFORE row triggers (warehouses_touch)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("scaffold is missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "TaxRatesDe") || strings.Contains(out, "currency_code: Currency") {
+		t.Fatalf("a partition as a model, or a code as a reference:\n%s", out)
+	}
+	path := filepath.Join(c.dir, "scaffolded.yml")
+	scaffold("-o", path)
+	cfg, err := fixturemigrate.LoadConfig(path)
+	if err != nil {
+		t.Fatalf("the scaffold does not load as a configuration: %v", err)
+	}
+	if len(cfg.Models["Warehouse"].Ignore) != 2 || len(cfg.Models) != 3 {
+		t.Fatalf("%+v", cfg.Models)
 	}
 }

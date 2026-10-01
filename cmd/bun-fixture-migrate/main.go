@@ -639,8 +639,12 @@ func scaffold(o streams, args []string) error {
 	}
 	defer db.Close()
 	var tables map[string]*dbschema.Table
+	var opts fixturemigrate.ScaffoldOptions
 	err = readOnly(o.ctx, db, func(tx bun.Tx) error {
-		tables, err = dbschema.Load(o.ctx, tx, *schema)
+		if tables, err = dbschema.Load(o.ctx, tx, *schema); err != nil {
+			return err
+		}
+		opts, err = fixturemigrate.LoadScaffoldOptions(o.ctx, tx, *schema)
 		return err
 	})
 	if err != nil {
@@ -653,7 +657,7 @@ func scaffold(o streams, args []string) error {
 			wanted[i] = strings.TrimSpace(wanted[i])
 		}
 	}
-	data := fixturemigrate.Scaffold(tables, wanted, *schema)
+	data := fixturemigrate.Scaffold(tables, wanted, *schema, opts)
 	if *out == "" {
 		return writeOut(o.stdout, data)
 	}
