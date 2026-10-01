@@ -10,16 +10,6 @@ import (
 	"github.com/RELAXccc/bun-fixture-migrate/fixtureapply"
 )
 
-type syncReport struct {
-	Applied  bool           `json:"applied"`
-	DryRun   bool           `json:"dry_run"`
-	Findings []checkFinding `json:"findings"`
-	Refusals []checkRefusal `json:"refusals"`
-	// Warnings are what the policy lets a sync carry on past.
-	Warnings []checkRefusal         `json:"warnings"`
-	Changes  []fixtureapply.Outcome `json:"changes"`
-}
-
 // sync brings the configured database to the fixture files directly: a
 // developer's database, a test run's, a staging copy. Without -yes it only
 // says what it would do.
@@ -33,33 +23,15 @@ func syncCmd(o streams, args []string) error {
 	if err != nil {
 		return err
 	}
-	files, _, err := s.readFixture()
-	if err != nil {
-		return err
-	}
-	db, err := s.connect(o.ctx)
-	if err != nil {
-		return err
-	}
+	db := s.database()
 	defer db.Close()
-	res, err := fixturemigrate.Sync(o.ctx, db, s.cfg, files, fixturemigrate.SyncOptions{DryRun: !*yes})
+	report, err := s.p.Sync(o.ctx, db, fixturemigrate.SyncOptions{DryRun: !*yes})
 	// A sync that stopped before it changed anything has no report to give
 	// but its error: an empty one would say the database already holds the
 	// files. A refusal is reported, and so are the changes as far as they ran.
-	if res == nil || err != nil && !errors.Is(err, fixturemigrate.ErrSyncRefused) && !ranChanges(res) {
+	if report == nil || err != nil && !errors.Is(err, fixturemigrate.ErrSyncRefused) && !ranChanges(report.SyncResult) {
 		return err
 	}
-	report := syncReport{Applied: res.Applied, DryRun: !*yes, Findings: findingsJSON(s.cfg, res.Findings),
-		Refusals: []checkRefusal{}, Warnings: []checkRefusal{}, Changes: []fixtureapply.Outcome{}}
-	if res.Diff != nil {
-		for _, r := range res.Diff.Refusals {
-			report.Refusals = append(report.Refusals, checkRefusal{r.Model, r.Key, r.Reason})
-		}
-		for _, w := range res.Diff.Warnings {
-			report.Warnings = append(report.Warnings, checkRefusal{w.Model, w.Key, w.Reason})
-		}
-	}
-	report.Changes = append(report.Changes, res.Outcomes...)
 	if *asJSON {
 		if werr := writeJSON(o.stdout, report); werr != nil {
 			return werr
@@ -73,7 +45,7 @@ func syncCmd(o streams, args []string) error {
 	case err != nil:
 		return err
 	}
-	if !*yes && len(report.Changes) > 0 {
+	if !*yes && len(report.Outcomes) > 0 {
 		fmt.Fprintln(o.stderr, "nothing was changed; run it again with -yes to make these changes")
 	}
 	return nil
@@ -89,19 +61,21 @@ func ranChanges(res *fixturemigrate.SyncResult) bool {
 	return false
 }
 
-func printSync(o streams, r syncReport) {
+func printSync(o streams, r *fixturemigrate.SyncReport) {
 	for _, f := range r.Findings {
-		fmt.Fprintln(o.stdout, f.Kind+": "+fixturemigrate.Finding{Model: f.Model, Row: f.Row}.Where()+": "+f.Detail)
+		fmt.Fprintln(o.stdout, string(f.Kind)+": "+f.Where()+": "+f.Detail)
 	}
-	for _, ref := range r.Refusals {
-		fmt.Fprintln(o.stdout, "refused: "+fixturemigrate.Refusal{Model: ref.Model, Key: ref.Key}.Where()+": "+ref.Reason)
-	}
-	for _, w := range r.Warnings {
-		fmt.Fprintln(o.stdout, "warning: "+fixturemigrate.Refusal{Model: w.Model, Key: w.Key}.Where()+": "+w.Reason)
+	if r.Diff != nil {
+		for _, ref := range r.Diff.Refusals {
+			fmt.Fprintln(o.stdout, "refused: "+ref.Where()+": "+ref.Reason)
+		}
+		for _, w := range r.Diff.Warnings {
+			fmt.Fprintln(o.stdout, "warning: "+w.Where()+": "+w.Reason)
+		}
 	}
 	changes := 0
 	w := tabwriter.NewWriter(o.stdout, 0, 4, 2, ' ', 0)
-	for _, c := range r.Changes {
+	for _, c := range r.Outcomes {
 		if c.Index < 0 {
 			continue
 		}
@@ -117,8 +91,12 @@ func printSync(o streams, r syncReport) {
 		fmt.Fprintln(w, line)
 	}
 	w.Flush()
+	refusals := 0
+	if r.Diff != nil {
+		refusals = len(r.Diff.Refusals)
+	}
 	switch {
-	case changes == 0 && len(r.Findings) == 0 && len(r.Refusals) == 0:
+	case changes == 0 && len(r.Findings) == 0 && refusals == 0:
 		fmt.Fprintln(o.stdout, "the database already holds the fixture files")
 	case r.Applied:
 		fmt.Fprintf(o.stdout, "applied %s\n", plural(changes, "change"))

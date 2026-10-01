@@ -730,7 +730,8 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 
 	// Under ids: database a file's id only names a row inside the files, and
 	// a database's is its own: neither says anything about the other.
-	if cfg.Policy.IDDrift == ModeIgnore || m.idsFromDatabase() {
+	idDrift := cfg.ModelPolicy(model).IDDrift
+	if idDrift == ModeIgnore || m.idsFromDatabase() {
 		return nil
 	}
 	// A natural key two rows of either snapshot share says nothing about
@@ -756,7 +757,7 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 		if !ok || cur.ID == "" || cur.ID == prev.ID || sharedID[cur.ID] {
 			continue
 		}
-		if cfg.Policy.IDDrift == ModeWarn {
+		if idDrift == ModeWarn {
 			// The row still gets its value diff; only the id is left alone,
 			// which an update never writes anyway.
 			res.Warnings = append(res.Warnings, Refusal{model, prev.label(model), fmt.Sprintf(
@@ -1907,6 +1908,7 @@ func tablesFor(cfg *Config, changes []fixturechange.Change) fixturechange.Tables
 			Serial:  m.Serial,
 			Cascade: m.Deletes == DeleteCascade && m.Mode == OwnSync,
 			Where:   m.Where,
+			Policy:  cfg.TablePolicy(model),
 		}
 		if referenced {
 			t.Key = m.Ref

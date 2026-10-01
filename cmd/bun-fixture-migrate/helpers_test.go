@@ -3,11 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,73 +17,6 @@ import (
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 	"github.com/RELAXccc/bun-fixture-migrate/internal/pgerr"
 )
-
-// A literal, NULL and a reference have to be told apart by a program, which
-// the text report cannot do for the literal "NULL".
-func TestCheckJSONTellsValuesApart(t *testing.T) {
-	res := &fixturemigrate.CheckResult{Result: &fixturemigrate.Result{Changes: []fixturechange.Change{{
-		Model: "Plan", Kind: fixturechange.Update,
-		Key: fixturechange.Values{"name": fixturechange.Lit("team")},
-		Old: fixturechange.Values{"note": fixturechange.Lit("NULL"), "currency_id": fixturechange.RefTo("Currency", "EUR")},
-		New: fixturechange.Values{"note": fixturechange.Null(), "currency_id": fixturechange.RefTo("Currency", "USD")},
-	}}}}
-	var buf bytes.Buffer
-	if err := writeJSON(&buf, checkJSON(policyConfig(t, ""), res)); err != nil {
-		t.Fatal(err)
-	}
-	var back struct {
-		Agree   bool
-		Changes []struct {
-			Database map[string]any
-			File     map[string]any
-		}
-	}
-	if err := json.Unmarshal(buf.Bytes(), &back); err != nil {
-		t.Fatal(err)
-	}
-	c := back.Changes[0]
-	if back.Agree || c.Database["note"] != "NULL" || c.File["note"] != nil {
-		t.Fatalf("%s", buf.String())
-	}
-	ref, ok := c.File["currency_id"].(map[string]any)
-	if !ok || ref["model"] != "Currency" || ref["key"] != "USD" {
-		t.Fatalf("a reference is an object: %s", buf.String())
-	}
-	if jsonValues(nil) != nil {
-		t.Fatal("no values is no object")
-	}
-}
-
-// policyConfig is a prepared configuration with one policy line.
-func policyConfig(t *testing.T, policy string) *fixturemigrate.Config {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "c.yml")
-	if err := os.WriteFile(path, []byte("fixture: f.yml\n"+policy+"models:\n  Plan: {table: plans}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := fixturemigrate.LoadConfig(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return cfg
-}
-
-// A finding the policy makes a warning is reported and is not disagreement,
-// in the JSON as in the exit code; one it makes an error is.
-func TestCheckJSONAgreesDespiteAWarning(t *testing.T) {
-	res := &fixturemigrate.CheckResult{Result: &fixturemigrate.Result{}, Findings: []fixturemigrate.Finding{
-		{Kind: fixturemigrate.FindingZeroDefault, Model: "Plan", Row: "name=x", Detail: "a zero"}}}
-	for policy, want := range map[string]checkFinding{
-		"policy: {zero_default: warn}\n":  {Kind: "zero against a default", Level: "warn"},
-		"policy: {zero_default: error}\n": {Kind: "zero against a default", Level: "error"},
-	} {
-		report := checkJSON(policyConfig(t, policy), res)
-		if len(report.Findings) != 1 || report.Findings[0].Level != want.Level ||
-			report.Agree != (want.Level == "warn") {
-			t.Errorf("%s: %+v", policy, report)
-		}
-	}
-}
 
 func TestResolveDSN(t *testing.T) {
 	t.Setenv("BFM_TEST_DSN_SET", "postgres://x")
@@ -213,20 +146,22 @@ func TestPrintPlanSaysWhatHappened(t *testing.T) {
 func TestPrintSync(t *testing.T) {
 	var out bytes.Buffer
 	o := streams{ctx: context.Background(), stdout: &out, stderr: &out}
-	printSync(o, syncReport{DryRun: true, Changes: []fixtureapply.Outcome{
-		{Index: 0, Model: "Plan", Key: "name=pro", Kind: fixturechange.Insert, Status: fixtureapply.StatusApplied}}})
+	printSync(o, &fixturemigrate.SyncReport{DryRun: true, SyncResult: &fixturemigrate.SyncResult{
+		Outcomes: []fixtureapply.Outcome{
+			{Index: 0, Model: "Plan", Key: "name=pro", Kind: fixturechange.Insert, Status: fixtureapply.StatusApplied}}}})
 	if !strings.Contains(out.String(), "would apply  Plan name=pro insert") {
 		t.Fatalf("%s", out.String())
 	}
 	out.Reset()
-	printSync(o, syncReport{})
+	printSync(o, &fixturemigrate.SyncReport{SyncResult: &fixturemigrate.SyncResult{}})
 	if !strings.Contains(out.String(), "already holds") {
 		t.Fatalf("%s", out.String())
 	}
 	out.Reset()
-	printSync(o, syncReport{Applied: true, Refusals: []checkRefusal{{"Plan", "x", "renamed"}},
-		Findings: []checkFinding{{Kind: "invalid value", Model: "Plan", Row: "x", Detail: "bad"}},
-		Changes:  []fixtureapply.Outcome{{Index: 0, Status: fixtureapply.StatusApplied}}})
+	printSync(o, &fixturemigrate.SyncReport{SyncResult: &fixturemigrate.SyncResult{Applied: true,
+		Diff:     &fixturemigrate.Result{Refusals: []fixturemigrate.Refusal{{Model: "Plan", Key: "x", Reason: "renamed"}}},
+		Findings: []fixturemigrate.Finding{{Kind: "invalid value", Model: "Plan", Row: "x", Detail: "bad"}},
+		Outcomes: []fixtureapply.Outcome{{Index: 0, Status: fixtureapply.StatusApplied}}}})
 	for _, want := range []string{"refused: Plan x: renamed", "invalid value: Plan x: bad", "applied 1 change"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("missing %q:\n%s", want, out.String())
@@ -275,16 +210,16 @@ func TestScaffoldDoesNotOverwrite(t *testing.T) {
 	}
 }
 
-// An export is written anew from the database, so the comments of the file
-// it replaces are counted, to say they are gone.
-func TestDroppedComments(t *testing.T) {
-	old := "# master data\n- model: Plan\n  rows:\n    # the cheap one\n    - name: free # forever\n      note: \"a # b\"\n"
-	exported := "# Exported by bun-fixture-migrate from a live database.\n- model: Plan\n  rows:\n    - name: free\n" +
-		"      note: \"a # b\"\n"
-	if n := droppedComments([]byte(old), []byte(exported)); n != 3 {
-		t.Fatalf("got %d, want the three comments", n)
+// git runs git in a directory for a test; its error is what git said.
+func git(dir string, args ...string) ([]byte, error) {
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return nil, errors.New(oneLine(msg))
+		}
+		return nil, err
 	}
-	if n := droppedComments([]byte(exported), []byte(exported)); n != 0 {
-		t.Fatalf("the export's own header is kept: %d", n)
-	}
+	return stdout.Bytes(), nil
 }

@@ -73,6 +73,9 @@ type planTarget struct {
 	queries []string
 	readErr error
 	notes   []string
+	// revert runs the change set's Revert instead of its Apply (apply
+	// -revert without -yes).
+	revert bool
 }
 
 // upSQL is the .up.sql file of a SQL migration, "" for any other.
@@ -439,18 +442,9 @@ func plan(o streams, args []string) error {
 		// not include, or the one it includes last gone from the directory.
 		// Each is a deploy whose migrations were not generated one after
 		// another, however well each of them plans.
-		if s.statePath != "" {
-			if state, err := fixturemigrate.ReadState(s.statePath); err == nil {
-				for _, m := range unaccounted(&state, ms.Fixtures()) {
-					report.Problems = append(report.Problems, lineageProblem(&state, m))
-				}
-				if gone := coveredGone(&state, ms.List, s.outDir, s.statePath); gone != "" {
-					report.Problems = append(report.Problems, gone)
-				}
-			}
-		}
+		report.Problems = append(report.Problems, s.p.LineageProblems(ms)...)
 		var applied map[string]fixturemigrate.Applied
-		err = readOnly(o.ctx, db, func(tx bun.Tx) error {
+		err = fixturemigrate.ReadOnly(o.ctx, db, func(tx bun.Tx) error {
 			applied, _, err = fixturemigrate.ReadApplied(o.ctx, tx, s.cfg.MigrationsTable)
 			return err
 		})
@@ -569,7 +563,11 @@ func simulate(o streams, db *bun.DB, targets []planTarget, lockTimeout time.Dura
 		if t.sql != "" {
 			err = runSQLMigration(o, tx, t)
 		} else {
-			err = fixtureapply.Apply(o.ctx, tx, t.set,
+			run := fixtureapply.Apply
+			if t.revert {
+				run = fixtureapply.Revert
+			}
+			err = run(o.ctx, tx, t.set,
 				fixtureapply.WithDryRun(),
 				fixtureapply.WithLogger(func(string, ...any) {}),
 				fixtureapply.WithReport(func(out fixtureapply.Outcome) {

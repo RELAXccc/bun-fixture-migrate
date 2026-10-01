@@ -54,11 +54,12 @@ func (r *runner) execOne(ctx context.Context, c fixturechange.Change) (outcome, 
 		// nothing and be skipped, and it is the setting such databases use:
 		// the old natural key and the old values find the row on their own,
 		// and onlyRow makes sure it is one row.
-		if c.ID != "" && (r.set.Policy.IDDrift == fixturechange.ModeWarn || r.set.Policy.IDDrift == fixturechange.ModeIgnore) {
+		idDrift := r.set.PolicyFor(c.Model).IDDrift
+		if c.ID != "" && (idDrift == fixturechange.ModeWarn || idDrift == fixturechange.ModeIgnore) {
 			id := c.ID
 			c.ID = ""
 			out, err := r.update(ctx, c, t, table)
-			if err != nil || out.problem != "" || r.set.Policy.IDDrift != fixturechange.ModeWarn {
+			if err != nil || out.problem != "" || idDrift != fixturechange.ModeWarn {
 				return out, err
 			}
 			return r.warnID(ctx, c, t, table, id, out)
@@ -92,7 +93,7 @@ func (r *runner) insert(ctx context.Context, c fixturechange.Change, t fixturech
 	// An explicit id that another row already holds is checked before the
 	// statement runs, so the failure names the row instead of arriving as a
 	// primary-key violation from somewhere inside the driver.
-	if id, ok := c.New[t.ID]; ok && id.Ref == nil && !id.IsNull && r.set.Policy.IDDrift != fixturechange.ModeIgnore {
+	if id, ok := c.New[t.ID]; ok && id.Ref == nil && !id.IsNull && r.set.PolicyFor(c.Model).IDDrift != fixturechange.ModeIgnore {
 		taken, err := r.idTakenByAnotherRow(ctx, c, t, table, id.Lit)
 		if err != nil {
 			return outcome{}, err

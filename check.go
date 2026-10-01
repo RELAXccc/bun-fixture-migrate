@@ -234,7 +234,7 @@ func (c *Config) Worst(findings []Finding) (Mode, []Finding) {
 	worst := ModeWarn
 	var kept []Finding
 	for _, f := range findings {
-		mode := c.FindingMode(f.Kind)
+		mode := c.ModeOf(f)
 		if mode == ModeIgnore {
 			continue
 		}

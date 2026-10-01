@@ -183,8 +183,10 @@ Each was reproduced before it went into this table.
   `deletes: cascade`.
 - **Several fixture files.** `fixtures: [a.yml, b.yml]`, one anchor scope, in load order.
 - **`sync`.** Brings a database to the fixture file directly, with the plan printed first and
-  `-yes` to go through; `fixturemigrate.Sync` does the same from Go, for development servers and
-  test setups.
+  `-yes` to go through; `Project.Sync` does the same from Go, for development servers and test
+  setups.
+- **The commands as a library.** `fixturemigrate.LoadProject` and a method per command, with the
+  command's checks and refusals, typed errors, and results that are the commands' `-json`.
 - **`plan -with-sql`.** Runs pending bun SQL migrations in the plan transaction too, so a fixture
   migration that needs a column a schema migration adds is simulated against that column.
 - **CI.** PostgreSQL 12 to 18, two Go versions, both drivers, bun master; GitHub Actions and an

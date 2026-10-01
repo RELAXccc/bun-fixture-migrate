@@ -20,6 +20,7 @@ database drift apart with nothing to say so.
 | `status` | list the migrations, what a database applied, and what no migration covers yet |
 | `plan` | run the pending migrations against a database and roll back, reporting every row |
 | `sync` | bring a development, test or staging database to the fixture files directly |
+| `apply` | run one generated migration by hand, and record it as bun's migrator would |
 
 It never looks at your Go model types. PostgreSQL's catalog knows the tables, the columns and their
 types, the defaults, the keys, the foreign keys and the sequences; the configuration says which
@@ -29,7 +30,7 @@ model lives in which table and which column is a reference. That is enough for a
 
 | | |
 | --- | --- |
-| [Using it with bun](docs/usage.md) | the deploy step, migrator settings, SQL migrations, several fixture files, admin UIs, tests, drivers, model idioms |
+| [Using it with bun](docs/usage.md) | the deploy step, migrator settings, SQL migrations, several fixture files, admin UIs, tests, use from Go, drivers, model idioms |
 | [Production runbook](docs/production.md) | the pipeline, and what to do when a migration fails, a change is skipped, drift is found, a state file conflicts |
 | [CI](docs/ci.md) | the GitHub Action and the GitLab CI templates |
 | [Fixture files](docs/fixture-files.md) | how a file is read, what each value means, what is refused, limits |
@@ -161,9 +162,10 @@ configuration later does not change what an old migration does. At run time `fix
   `*fixtureapply.ChangeError` that `errors.As` finds.
 
 `Revert` is the same set backwards, every change inverted and guarded the same way. A rename finds
-its row under the name it gave it, so it reverts, and a second run finds it already made. It assumes
-the migration made every change on this database, including those it found already made; see
-[rolling back](docs/production.md#rolling-back).
+its row under the name it gave it, so it reverts, and a second run finds it already made. With an
+`audit_table`, every run records which changes it made, found made already or skipped, and `Revert`
+undoes only the ones it made in that database; without one, it assumes the migration made them all,
+including those it found already made. See [rolling back](docs/production.md#rolling-back).
 
 ## Three things about bun you may not know
 

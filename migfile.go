@@ -327,6 +327,8 @@ func (r *setReader) set(lit *ast.CompositeLit) (fixturechange.Set, error) {
 			set.MigrationsTable, err = r.str(value)
 		case "LockTimeout":
 			set.LockTimeout, err = r.str(value)
+		case "AuditTable":
+			set.AuditTable, err = r.str(value)
 		case "Tables":
 			set.Tables, err = r.tables(value)
 		case "Policy":
@@ -387,6 +389,8 @@ func (r *setReader) tables(expr ast.Expr) (fixturechange.Tables, error) {
 				t.Cascade, err = r.boolean(value)
 			case "Where":
 				t.Where, err = r.str(value)
+			case "Policy":
+				t.Policy, err = r.tablePolicy(value)
 			default:
 				err = r.unknown(value, key)
 			}
@@ -423,6 +427,19 @@ func (r *setReader) policy(expr ast.Expr) (fixturechange.Policy, error) {
 		return err
 	})
 	return p, err
+}
+
+// tablePolicy reads a table's Policy, &fixturechange.Policy{...}, or nil.
+func (r *setReader) tablePolicy(expr ast.Expr) (*fixturechange.Policy, error) {
+	if id, ok := expr.(*ast.Ident); ok && id.Name == "nil" {
+		return nil, nil
+	}
+	ref, ok := expr.(*ast.UnaryExpr)
+	if !ok || ref.Op != token.AND {
+		return nil, r.errorf(expr, "a table's Policy is not written as &fixturechange.Policy{...}")
+	}
+	p, err := r.policy(ref.X)
+	return &p, err
 }
 
 func (r *setReader) mode(expr ast.Expr) (fixturechange.Mode, error) {

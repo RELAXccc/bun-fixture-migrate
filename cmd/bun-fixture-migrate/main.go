@@ -14,6 +14,8 @@
 //	           transaction that is rolled back, and report what each change did
 //	sync       bring a database to the fixture file directly, without a
 //	           migration file: a developer's, a test run's, a staging copy
+//	apply      run one generated migration outside the migrator, and with
+//	           -record record it as bun's migrator would
 //
 // Every command that reads a configuration takes -config, which defaults to
 // $BUN_FIXTURE_MIGRATE_CONFIG and then to fixture-migrate.yml, and every one
@@ -21,11 +23,10 @@
 //
 // Exit codes: 0 when there was nothing to do or the work was done, 1 on an
 // error, 2 when something was refused and nothing was written, 3 when check,
-// status or plan found something.
+// status or plan found something, or a migration apply ran failed.
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -33,12 +34,8 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"runtime/debug"
-	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -59,6 +56,7 @@ const usage = `bun-fixture-migrate <command> [flags]
   status     list the migrations, what a database applied, what nothing covers
   plan       dry-run the pending fixture migrations against a database
   sync       bring a development or test database to the fixture file
+  apply      run one generated migration by hand, outside the migrator
   version    print the version of this binary
 
 Run "bun-fixture-migrate <command> -h" for the flags of one command.`
@@ -73,6 +71,7 @@ const configEnv = "BUN_FIXTURE_MIGRATE_CONFIG"
 // configuration.
 var connects = map[string]bool{
 	"export": true, "check": true, "generate": true, "baseline": true, "status": true, "plan": true, "sync": true,
+	"apply": true,
 }
 
 func main() {
@@ -108,6 +107,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		"status":   status,
 		"plan":     plan,
 		"sync":     syncCmd,
+		"apply":    applyCmd,
 	}
 	var err error
 	switch cmd, ok := commands[args[0]]; {
@@ -133,6 +133,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if errors.As(err, &exit) {
 		fmt.Fprintln(stderr, "bun-fixture-migrate:", oneLine(exit.message))
 		return exit.code
+	}
+	// What the library refuses is the command's exit code 2.
+	if errors.Is(err, fixturemigrate.ErrRefused) {
+		fmt.Fprintln(stderr, "bun-fixture-migrate:", oneLine(err.Error()))
+		return 2
 	}
 	fmt.Fprintln(stderr, "bun-fixture-migrate:", oneLine(err.Error()))
 	return 1
@@ -173,11 +178,6 @@ type exitError struct {
 
 func (e exitError) Error() string { return e.message }
 
-func refused(n int) error {
-	return exitError{2, fmt.Sprintf(
-		"%s refused, nothing written; write them yourself or re-run with -allow-partial", plural(n, "change"))}
-}
-
 func plural(n int, word string) string {
 	if n == 1 {
 		return fmt.Sprintf("1 %s", word)
@@ -185,11 +185,12 @@ func plural(n int, word string) string {
 	return fmt.Sprintf("%d %ss", n, word)
 }
 
-// setup is the part every command shares: read the configuration, work out
-// where the fixture file, the migrations and the state file are.
+// setup is the part every command shares: the project, which reads the
+// configuration and the fixture files, and where the fixture files, the
+// migrations and the state file are.
 type setup struct {
-	cfg  *fixturemigrate.Config
-	root string
+	p   *fixturemigrate.Project
+	cfg *fixturemigrate.Config
 	// fixturePaths are the fixture files, in load order, as paths from
 	// where the command runs.
 	fixturePaths []string
@@ -248,7 +249,7 @@ func common(o streams, fs *flag.FlagSet, args []string) (*setup, error) {
 	if err := parseFlags(o, fs, args); err != nil {
 		return nil, err
 	}
-	cfg, err := fixturemigrate.LoadConfig(*configPath)
+	p, err := fixturemigrate.LoadProject(*configPath)
 	if err != nil {
 		set := false
 		fs.Visit(func(f *flag.Flag) { set = set || f.Name == "config" })
@@ -260,22 +261,13 @@ func common(o streams, fs *flag.FlagSet, args []string) (*setup, error) {
 	// Everything that asks whether a database is configured, and connect,
 	// read it from the configuration, so -dsn is put there.
 	if dsn != nil && *dsn != "" {
-		cfg.Database = *dsn
+		p.Config.Database = *dsn
 	}
-	s := &setup{cfg: cfg, root: filepath.Dir(*configPath)}
-	for _, f := range cfg.Fixtures {
-		s.fixturePaths = append(s.fixturePaths, filepath.Join(s.root, f))
-	}
-	if cfg.Out != "" {
-		s.outDir = filepath.Join(s.root, cfg.Out)
-	}
-	if cfg.State != "" {
-		s.statePath = filepath.Join(s.root, cfg.State)
-	}
-	return s, nil
+	return &setup{p: p, cfg: p.Config, fixturePaths: p.FixturePaths(), outDir: p.OutDir(),
+		statePath: p.StatePath()}, nil
 }
 
-// connect opens the configured database.
+// connect opens the configured database, and fails at once when it cannot.
 func (s *setup) connect(ctx context.Context) (*bun.DB, error) {
 	dsn, err := resolveDSN(s.cfg.Database)
 	if err != nil {
@@ -284,162 +276,10 @@ func (s *setup) connect(ctx context.Context) (*bun.DB, error) {
 	return openDB(ctx, dsn)
 }
 
-// snapshotOf resolves fixture files the way dbfixture loads them: in order,
-// one scope of anchors.
-func (s *setup) snapshotOf(files []fixturemigrate.FixtureFile, source string) (*fixturemigrate.Snapshot, error) {
-	doc, err := fixturemigrate.ParseFiles(files)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", source, err)
-	}
-	return fixturemigrate.FixtureSnapshot(s.cfg, doc, source)
-}
-
-// readFixture reads the fixture files, as bytes for the state file and as one
-// snapshot for everything else.
-func (s *setup) readFixture() ([]fixturemigrate.FixtureFile, *fixturemigrate.Snapshot, error) {
-	if len(s.fixturePaths) == 0 {
-		return nil, nil, fmt.Errorf("no fixture file in the configuration")
-	}
-	files := make([]fixturemigrate.FixtureFile, 0, len(s.fixturePaths))
-	for i, path := range s.fixturePaths {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil, nil, err
-		}
-		files = append(files, fixturemigrate.FixtureFile{Path: s.cfg.Fixtures[i], Data: data})
-	}
-	snap, err := s.snapshotOf(files, s.cfg.FixtureLabel())
-	return files, snap, err
-}
-
-// gitFiles reads the fixture files as of a revision. A file the revision does
-// not have yet is empty there: at that revision, nothing loaded it.
-func (s *setup) gitFiles(rev string) ([]fixturemigrate.FixtureFile, error) {
-	files := make([]fixturemigrate.FixtureFile, 0, len(s.fixturePaths))
-	for i, path := range s.fixturePaths {
-		data, err := gitShow(path, rev)
-		if err != nil {
-			if missingAt(err) {
-				data = nil
-			} else {
-				return nil, err
-			}
-		}
-		files = append(files, fixturemigrate.FixtureFile{Path: s.cfg.Fixtures[i], Data: data})
-	}
-	return files, nil
-}
-
-// missingAt reports git's answer for a path the revision does not have.
-func missingAt(err error) bool {
-	msg := err.Error()
-	return strings.Contains(msg, "exists on disk, but not in") || strings.Contains(msg, "does not exist in")
-}
-
-// canonical has PostgreSQL respell every value of the snapshots as the columns
-// hold them, so they compare with each other and with the database the way
-// the database compares values. Findings of all but the first snapshot are
-// dropped: they are about base states, which are history.
-func canonical(o streams, db bun.IDB, cfg *fixturemigrate.Config, tables map[string]*dbschema.Table,
-	snaps ...*fixturemigrate.Snapshot) error {
-
-	for i, snap := range snaps {
-		before := len(snap.Findings)
-		if err := fixturemigrate.Canonicalize(o.ctx, db, cfg, snap, tables); err != nil {
-			return err
-		}
-		if i > 0 {
-			snap.Findings = snap.Findings[:before]
-		}
-	}
-	return nil
-}
-
-// lint checks the fixture file against what the database says about its own
-// columns. A lint that could not run is never reported as a lint that found
-// nothing: the connection error comes back as an error.
-func lint(o streams, cfg *fixturemigrate.Config, snap *fixturemigrate.Snapshot, tables map[string]*dbschema.Table,
-	before int) error {
-
-	fixturemigrate.LintColumns(cfg, snap, tables)
-	fixturemigrate.LintZeroDefaults(cfg, snap, tables)
-	fixturemigrate.LintNullDefaults(cfg, snap, tables)
-	mode, findings := cfg.Worst(snap.Findings[before:])
-	if len(findings) == 0 {
-		return nil
-	}
-	for _, f := range findings {
-		fmt.Fprintln(o.stderr, string(f.Kind)+":", f.String())
-	}
-	if mode == fixturemigrate.ModeError {
-		return exitError{2, fmt.Sprintf("%s in the fixture file, nothing written", plural(len(findings), "problem"))}
-	}
-	return nil
-}
-
-// databaseSnapshot reads the database, limited to the columns the fixture file
-// writes. A column no fixture row mentions is not master data, so a difference
-// in it is not drift. A column the table does not have is not read: the lint
-// reports it as an unknown column, which is a finding, not a query that fails.
-func databaseSnapshot(ctx context.Context, db bun.IDB, cfg *fixturemigrate.Config,
-	tables map[string]*dbschema.Table, head *fixturemigrate.Snapshot) (*fixturemigrate.Snapshot, error) {
-
-	if err := checkModels(cfg, tables); err != nil {
-		return nil, err
-	}
-	columns := map[string][]string{}
-	for model, cols := range head.Columns {
-		m := cfg.Models[model]
-		table := tables[cfg.QualifiedTable(m)]
-		columns[model] = []string{}
-		for _, col := range cols {
-			if _, ok := table.Column(col); ok || table == nil {
-				columns[model] = append(columns[model], col)
-			}
-		}
-	}
-	return fixturemigrate.DatabaseSnapshot(ctx, db, cfg, tables, fixturemigrate.SnapshotOptions{
-		Columns: columns, Order: head.Order})
-}
-
-// checkModels says, before a query names one, that a column the
-// configuration makes a model's key or a reference is not in its table, which
-// PostgreSQL would otherwise say from inside a query nobody wrote. A model
-// whose table is missing is left to the snapshot, which says what it is.
-func checkModels(cfg *fixturemigrate.Config, tables map[string]*dbschema.Table) error {
-	for _, name := range cfg.ModelNames() {
-		m := cfg.Models[name]
-		table := tables[cfg.QualifiedTable(m)]
-		if table == nil {
-			continue
-		}
-		key := append([]string{}, m.Key...)
-		for _, group := range m.KeyAnyOf {
-			key = append(key, group...)
-		}
-		for _, col := range key {
-			if _, ok := table.Column(col); !ok {
-				return fmt.Errorf("model %q: its key is [%s], and %s has no column %s. Set key to the columns that "+
-					"tell two of its rows apart, those of a unique index on the table; a table with none is no master "+
-					"data this tool can migrate", name, strings.Join(key, ", "), table.Qualified(), col)
-			}
-		}
-		refs := make([]string, 0, len(m.References))
-		for col := range m.References {
-			refs = append(refs, col)
-		}
-		sort.Strings(refs)
-		for _, col := range refs {
-			if slices.Contains(m.Ignore, col) || slices.Contains(m.Derived, col) {
-				continue
-			}
-			if _, ok := table.Column(col); !ok {
-				return fmt.Errorf("model %q: references names %s, and %s has no such column; fix the name, or take "+
-					"it out of references", name, col, table.Qualified())
-			}
-		}
-	}
-	return nil
+// database is the configured database, connected when the library first
+// queries it; see lazyDB.
+func (s *setup) database() *bun.DB {
+	return lazyDB(s.cfg.Database)
 }
 
 // export writes the fixture files from the database.
@@ -449,6 +289,7 @@ func export(o streams, args []string) error {
 		out        = fs.String("o", "", "write here instead of the fixture file of the configuration (one fixture file only)")
 		stdout     = fs.Bool("stdout", false, "write to standard output")
 		allColumns = fs.Bool("all-columns", false, "write every column, not only those the fixture files already use")
+		asJSON     = fs.Bool("json", false, "write what was written as JSON")
 	)
 	s, err := common(o, fs, args)
 	if err != nil {
@@ -458,93 +299,49 @@ func export(o streams, args []string) error {
 	if several && *out != "" {
 		return fmt.Errorf("-o writes one file; with several fixture files, export writes each of them in place")
 	}
-	// With several files, each model goes back into the file that holds it.
-	var current []fixturemigrate.FixtureFile
-	for i, path := range s.fixturePaths {
-		data, err := os.ReadFile(path)
-		if err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		current = append(current, fixturemigrate.FixtureFile{Path: s.cfg.Fixtures[i], Data: data})
+	if *asJSON && *stdout {
+		return fmt.Errorf("-json and -stdout both write to standard output; pass one of them")
 	}
-	// What the files hold now decides which columns and ids the export
-	// writes. Files it cannot read are being replaced, as they are.
-	head, err := s.snapshotOf(current, s.cfg.FixtureLabel())
-	if err != nil {
-		fmt.Fprintf(o.stderr, "note: every column and id is exported, because the fixture files do not read: %v\n", err)
-		head = nil
-	}
-	db, err := s.connect(o.ctx)
-	if err != nil {
-		return err
-	}
+	db := s.database()
 	defer db.Close()
-	var outputs [][]byte
-	var mode fixturemigrate.Mode
-	var findings []fixturemigrate.Finding
-	err = readOnly(o.ctx, db, func(tx bun.Tx) error {
-		tables, err := dbschema.Load(o.ctx, tx, s.cfg.Schemas()...)
-		if err != nil {
-			return err
-		}
-		if err := checkModels(s.cfg, tables); err != nil {
-			return err
-		}
-		var opts fixturemigrate.SnapshotOptions
-		if !*allColumns {
-			opts.Columns = exportColumns(s.cfg, tables, head)
-		}
-		snap, err := fixturemigrate.DatabaseSnapshot(o.ctx, tx, s.cfg, tables, opts)
-		if err != nil {
-			return err
-		}
-		if err := fixturemigrate.KeepOwned(o.ctx, tx, s.cfg, tables, head, snap); err != nil {
-			return err
-		}
-		fixturemigrate.LintZeroDefaults(s.cfg, snap, tables)
-		fixturemigrate.LintNullDefaults(s.cfg, snap, tables)
-		mode, findings = s.cfg.Worst(snap.Findings)
-		dropIDs(s.cfg, tables, head, snap)
-		// No time, nor anything else that differs between two exports of
-		// one database: CI diffs an export against the committed file, and
-		// a header that always changes is a diff that always fails.
-		header := []string{
-			"Exported by bun-fixture-migrate from a live database.",
-			"Models are in dependency order; references name the row they point at, not its id.",
-		}
-		for _, f := range findings {
-			header = append(header, "", string(f.Kind)+": "+f.String())
-		}
-		if several {
-			outputs, err = fixturemigrate.ExportFiles(s.cfg, snap, tables, header, current)
-			return err
-		}
-		data, err := fixturemigrate.Export(s.cfg, snap, tables, header)
-		outputs = [][]byte{data}
+	exp, err := s.p.Export(o.ctx, db, fixturemigrate.ExportOptions{AllColumns: *allColumns})
+	if exp == nil {
 		return err
-	})
+	}
+	if !*asJSON {
+		for _, note := range exp.Notes {
+			fmt.Fprintln(o.stderr, "note:", note)
+		}
+	}
+	if err != nil && !errors.Is(err, fixturemigrate.ErrRefused) {
+		return err
+	}
+	if !*asJSON {
+		for _, f := range exp.Findings {
+			fmt.Fprintln(o.stderr, string(f.Kind)+":", f.String())
+		}
+		// An export is written from the database, not edited into the file
+		// it replaces: what the file said in comments is gone from it.
+		// Written elsewhere, with -o or to standard output, it replaces
+		// nothing.
+		for i, n := range exp.DroppedComments {
+			if n > 0 && *out == "" && !*stdout {
+				fmt.Fprintf(o.stderr, "note: the export does not keep the comments of %s: %s not in it; "+
+					"put back the ones to keep before committing\n", s.fixturePaths[i], plural(n, "comment line"))
+			}
+		}
+	}
 	if err != nil {
-		return err
-	}
-	for _, f := range findings {
-		fmt.Fprintln(o.stderr, string(f.Kind)+":", f.String())
-	}
-	// An export is written from the database, not edited into the file it
-	// replaces: what the file said in comments is gone from it. Written
-	// elsewhere, with -o or to standard output, it replaces nothing.
-	for i, data := range outputs {
-		if n := droppedComments(current[i].Data, data); n > 0 && *out == "" && !*stdout {
-			fmt.Fprintf(o.stderr, "note: the export does not keep the comments of %s: %s not in it; "+
-				"put back the ones to keep before committing\n", s.fixturePaths[i], plural(n, "comment line"))
+		if *asJSON {
+			if werr := writeJSON(o.stdout, exp); werr != nil {
+				return werr
+			}
 		}
-	}
-	if mode == fixturemigrate.ModeError {
-		return exitError{2, fmt.Sprintf(
-			"%s, nothing written: this export would not reproduce the database it was taken from. "+
-				"Fix them, or set the policy to warn to write it anyway", plural(len(findings), "problem"))}
+		return err
 	}
 	if *stdout {
-		for i, data := range outputs {
+		for i, f := range exp.Files {
+			data := f.Data
 			if several {
 				data = append([]byte("# ==> "+s.cfg.Fixtures[i]+" <==\n"), data...)
 			}
@@ -554,107 +351,29 @@ func export(o streams, args []string) error {
 		}
 		return nil
 	}
-	targets := s.fixturePaths
-	if *out != "" {
-		targets = []string{*out}
-	}
-	if len(targets) == 0 {
-		return fmt.Errorf("no fixture file in the configuration and no -o")
-	}
-	for i, target := range targets {
-		if err := fixturemigrate.WriteFileAtomic(target, outputs[i], 0o644); err != nil {
+	switch {
+	case *out != "":
+		if err := fixturemigrate.WriteFileAtomic(*out, exp.Files[0].Data, 0o644); err != nil {
 			return err
 		}
-		fmt.Fprintln(o.stdout, "wrote", target)
+		exp.Written = append(exp.Written, *out)
+	case len(s.fixturePaths) == 0:
+		return fmt.Errorf("no fixture file in the configuration and no -o")
+	default:
+		if _, err := exp.Write(); err != nil {
+			for _, path := range exp.Written {
+				fmt.Fprintln(o.stdout, "wrote", path)
+			}
+			return err
+		}
+	}
+	if *asJSON {
+		return writeJSON(o.stdout, exp)
+	}
+	for _, path := range exp.Written {
+		fmt.Fprintln(o.stdout, "wrote", path)
 	}
 	return nil
-}
-
-// droppedComments counts the comment lines of a fixture file that an export of
-// it does not have. An export writes the file anew from the database, so a
-// comment, whole-line or after a value, is not carried over.
-func droppedComments(old, exported []byte) int {
-	kept := map[string]bool{}
-	for _, line := range strings.Split(string(exported), "\n") {
-		kept[strings.TrimSpace(line)] = true
-	}
-	n := 0
-	for _, line := range strings.Split(string(old), "\n") {
-		line = strings.TrimSpace(line)
-		if !kept[line] && (strings.HasPrefix(line, "#") || strings.Contains(line, " #")) {
-			n++
-		}
-	}
-	return n
-}
-
-// exportColumns is the columns an export writes of each model the fixture
-// files hold: those the files use, and the ref column, which references to the
-// model name rows by; DatabaseSnapshot adds the key. A column the files never
-// wrote is not master data, and exported it would be a difference generate
-// refuses, a column written on one side and left out on the other. A model
-// the files do not hold yet is exported whole.
-func exportColumns(cfg *fixturemigrate.Config, tables map[string]*dbschema.Table,
-	head *fixturemigrate.Snapshot) map[string][]string {
-
-	if head == nil {
-		return nil
-	}
-	out := map[string][]string{}
-	for model, cols := range head.Columns {
-		m := cfg.Models[model]
-		table := tables[cfg.QualifiedTable(m)]
-		if len(cols) == 0 || table == nil {
-			continue
-		}
-		out[model] = append([]string{}, cols...)
-		if _, ok := table.Column(m.Ref); ok {
-			out[model] = append(out[model], m.Ref)
-		}
-	}
-	return out
-}
-
-// dropIDs takes the ids out of the export of every model whose ids the
-// fixture files leave to the database. The ids of the database exported from
-// mean nothing in another: written into a file that had none, they are an id
-// change of every row, and a delete guarded on one of them misses its row
-// everywhere else. A model the files do not hold yet keeps its ids when they
-// come from a sequence or nothing makes them up, and loses them when a default
-// such as gen_random_uuid() does.
-func dropIDs(cfg *fixturemigrate.Config, tables map[string]*dbschema.Table, head *fixturemigrate.Snapshot,
-	snap *fixturemigrate.Snapshot) {
-
-	inFiles := map[string]bool{}
-	if head != nil {
-		for _, model := range head.Order {
-			inFiles[model] = true
-		}
-	}
-	for model, entries := range snap.Entries {
-		m := cfg.Models[model]
-		table := tables[cfg.QualifiedTable(m)]
-		if table == nil {
-			continue
-		}
-		id, ok := table.Column(m.ID)
-		if !ok || id.Default == "" && !id.Identity {
-			// Without an id, dbfixture could not insert the row at all.
-			continue
-		}
-		keep := !inFiles[model] && id.Serial()
-		if head != nil {
-			for _, e := range head.Entries[model] {
-				keep = keep || e.ID != ""
-			}
-		}
-		if keep {
-			continue
-		}
-		for _, e := range entries {
-			e.ID = ""
-		}
-	}
 }
 
 // check reports the drift between the database and the fixture file.
@@ -665,53 +384,26 @@ func check(o streams, args []string) error {
 	if err != nil {
 		return err
 	}
-	_, head, err := s.readFixture()
-	if err != nil {
-		return err
-	}
-	db, err := s.connect(o.ctx)
-	if err != nil {
-		return err
-	}
+	db := s.database()
 	defer db.Close()
-	var res *fixturemigrate.CheckResult
-	err = readOnly(o.ctx, db, func(tx bun.Tx) error {
-		tables, err := dbschema.Load(o.ctx, tx, s.cfg.Schemas()...)
-		if err != nil {
-			return err
-		}
-		if err := canonical(o, tx, s.cfg, tables, head); err != nil {
-			return err
-		}
-		fixturemigrate.LintColumns(s.cfg, head, tables)
-		fixturemigrate.LintZeroDefaults(s.cfg, head, tables)
-		fixturemigrate.LintNullDefaults(s.cfg, head, tables)
-		database, err := databaseSnapshot(o.ctx, tx, s.cfg, tables, head)
-		if err != nil {
-			return err
-		}
-		res, err = fixturemigrate.Check(s.cfg, database, head)
-		return err
-	})
+	report, err := s.p.Check(o.ctx, db)
 	if err != nil {
 		return err
 	}
-	_, res.Findings = s.cfg.Worst(res.Findings)
-	agree := res.Agree(s.cfg)
 	if *asJSON {
-		if err := writeJSON(o.stdout, checkJSON(s.cfg, res)); err != nil {
+		if err := writeJSON(o.stdout, report); err != nil {
 			return err
 		}
 	} else {
-		for _, line := range res.Lines() {
+		for _, line := range report.Lines() {
 			fmt.Fprintln(o.stdout, line)
 		}
-		if agree && res.Drifted() {
+		if report.Agree && report.Drifted() {
 			fmt.Fprintf(o.stdout, "\nthe database and %s agree; the policy makes the findings above warnings\n",
 				s.cfg.FixtureLabel())
 		}
 	}
-	if !agree {
+	if !report.Agree {
 		return exitError{3, "the database and " + s.cfg.FixtureLabel() + " do not agree"}
 	}
 	return nil
@@ -750,7 +442,7 @@ func scaffold(o streams, args []string) error {
 	defer db.Close()
 	var tables map[string]*dbschema.Table
 	opts := fixturemigrate.ScaffoldOptions{MigrationsTable: *migrations, MigrationLocksTable: *locks}
-	err = readOnly(o.ctx, db, func(tx bun.Tx) error {
+	err = fixturemigrate.ReadOnly(o.ctx, db, func(tx bun.Tx) error {
 		if tables, err = dbschema.Load(o.ctx, tx, *schema); err != nil {
 			return err
 		}
@@ -819,52 +511,4 @@ func writeOut(w io.Writer, data []byte) error {
 		return fmt.Errorf("write to standard output: %w", err)
 	}
 	return nil
-}
-
-// gitShow reads a file as of a revision. The path is resolved inside the
-// repository the file itself belongs to, so it does not matter where the
-// command was started.
-func gitShow(path, rev string) ([]byte, error) {
-	dir := filepath.Dir(path)
-	top, err := git(dir, "rev-parse", "--show-toplevel")
-	if err != nil {
-		return nil, fmt.Errorf("%s is not in a git repository, pass -old instead: %w", path, err)
-	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return nil, err
-	}
-	// Resolve symlinks on both sides: a temporary directory on macOS is a
-	// symlink, and git reports the resolved top level.
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-		abs = resolved
-	}
-	topDir := strings.TrimSpace(string(top))
-	if resolved, err := filepath.EvalSymlinks(topDir); err == nil {
-		topDir = resolved
-	}
-	rel, err := filepath.Rel(topDir, abs)
-	if err != nil {
-		return nil, err
-	}
-	data, err := git(dir, "show", rev+":"+filepath.ToSlash(rel))
-	if err != nil {
-		return nil, fmt.Errorf("git show %s:%s: %w", rev, filepath.ToSlash(rel), err)
-	}
-	return data, nil
-}
-
-func git(dir string, args ...string) ([]byte, error) {
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
-		// git ends a sentence with a period, which a message that goes on
-		// after it would double.
-		if msg := strings.TrimSuffix(strings.TrimSpace(stderr.String()), "."); msg != "" {
-			return nil, errors.New(oneLine(msg))
-		}
-		return nil, err
-	}
-	return stdout.Bytes(), nil
 }

@@ -12,6 +12,7 @@ complete project for the most common one.
 - [Several fixture files](#several-fixture-files)
 - [When production data is edited in production](#when-production-data-is-edited-in-production)
 - [Tests and development servers](#tests-and-development-servers)
+- [Use from Go](#use-from-go)
 - [Drivers](#drivers)
 - [How model fields meet the fixture file](#how-model-fields-meet-the-fixture-file)
 
@@ -122,7 +123,7 @@ Four details matter:
 | `WithLocksTableName` | set `migration_locks_table` to the same name; `status` reads it to report a lock left behind |
 | `WithUpsert(true)` and `RunMigration` | re-running an applied fixture migration finds its changes made and reports them `unchanged` |
 | `BeforeMigration` / `AfterMigration` | run around the migration as usual |
-| `Rollback` | runs the generated down function, which reverts the change set with the same guards |
+| `Rollback` | runs the generated down function, which reverts the change set with the same guards: with an `audit_table`, only the changes the migration made in that database |
 
 The record removal only happens when `Apply` runs under bun's migrator, on the migrator's own
 `*bun.DB`, and only to the rows that, before the change set ran, carried the migration's name, had
@@ -155,9 +156,10 @@ applying the same set, one of them outside the migrator's lock, cannot both inse
 finds every change made and reports `unchanged`. The seed step needs the migrator's lock too: hold
 it around the seed, as above.
 
-**By hand, in an emergency.** Every generated migration is a plain Go value; `plan -file` shows
-what one does against any database, applied or not, and `Apply` runs it from a small program. Do
-not edit the rows by hand instead: the next fixture migration's guards compare against the values
+**By hand, in an emergency.** `apply -file` shows what one generated migration does against any
+database, applied or not, and with `-yes -record` runs it and records it as bun's migrator would, in
+one transaction; see [the runbook](production.md#running-a-migration-by-hand). Do not edit the rows
+by hand instead: the next fixture migration's guards compare against the values
 the state file says the database holds, and a hand edit shows up there as a changed row.
 
 ## SQL migrations next to fixture migrations
@@ -259,19 +261,131 @@ if _, err := fixtureapply.SyncSequences(ctx, db, "currencies", "plans"); err != 
 from Go:
 
 ```go
-cfg, err := fixturemigrate.LoadConfig("fixture-migrate.yml")
-data, err := os.ReadFile("fixtures/fixture.yml")
-res, err := fixturemigrate.Sync(ctx, db, cfg,
-	[]fixturemigrate.FixtureFile{{Path: "fixtures/fixture.yml", Data: data}},
-	fixturemigrate.SyncOptions{})
-if errors.Is(err, fixturemigrate.ErrSyncRefused) {
-	// res.Findings and res.Diff.Refusals say why
+project, err := fixturemigrate.LoadProject("fixture-migrate.yml")
+report, err := project.Sync(ctx, db, fixturemigrate.SyncOptions{})
+if errors.Is(err, fixturemigrate.ErrRefused) {
+	// report.Findings and report.Diff.Refusals say why
 }
 ```
 
 `Sync` compares and applies in one `REPEATABLE READ` transaction with the guards and the policy of a
 generated migration, refuses what `generate` would refuse, seeds an empty database, and records
-nothing in the migrations table. `SyncOptions{DryRun: true}` rolls back and reports.
+nothing in the migrations table. `SyncOptions{DryRun: true}` rolls back and reports. A test suite
+that syncs its database once and checks it is [below](#a-test-database).
+
+## Use from Go
+
+`check`, `export`, `generate`, `baseline`, `status` and `sync` are methods of a
+`fixturemigrate.Project`, for a program that would otherwise run the binary: a test helper, a
+development server that syncs on start, an admin tool that exports production, a CI program, a job.
+A method does what its command does, with the same checks and the same refusals, and its result,
+encoded as JSON, is what the command prints with `-json`.
+
+```go
+project, err := fixturemigrate.LoadProject("fixture-migrate.yml")
+```
+
+reads the configuration and the fixture files, the paths in it relative to it, as the command does.
+`project.Config` may be changed before a method is called, as `-dsn` changes `Database`.
+
+| Method | Command | The database |
+| --- | --- | --- |
+| `Check(ctx, db)` | `check` | needed |
+| `Export(ctx, db, ExportOptions{})` | `export` | needed |
+| `Generate(ctx, db, GenerateOptions{Name: "plan prices"})` | `generate` | `nil` works offline; given one, it respells and lints as `generate` does, and is the base with `FromDB` |
+| `Baseline(ctx, db, BaselineOptions{})` | `baseline` | `nil` works offline; given one, it is asked whether a difference is only spelling |
+| `Status(ctx, db, StatusOptions{})` | `status` | `nil` works offline |
+| `Sync(ctx, db, SyncOptions{})` | `sync` | needed, a `*bun.DB` |
+
+The library never connects by itself: it uses the database the program hands it. Given a `*bun.DB`
+or a `bun.Conn`, a method reads in a `REPEATABLE READ, READ ONLY` transaction of its own, as the
+command does. Given a `bun.Tx`, it reads in that transaction, under a savepoint it rolls back: it
+sees what the transaction wrote, and leaves the transaction and its settings as they were.
+
+`Generate`, `Baseline` and `Export` write nothing. Their result says what would be written, and its
+`Write` writes it:
+
+```go
+g, err := project.Generate(ctx, nil, fixturemigrate.GenerateOptions{Name: "plan prices"})
+var refused *fixturemigrate.RefusedError
+switch {
+case errors.As(err, &refused):
+	// What the command exits 2 on. refused.Message says what to do; its
+	// Refusals, Findings and Problems say what was refused.
+case err != nil:
+	// What the command exits 1 on: it could not run.
+default:
+	fmt.Println(string(g.Source))
+	_, err = g.Write() // the migration and the state file
+}
+```
+
+`errors.Is` tells a refusal's kind: `ErrFindings` for a finding the policy makes an error,
+`ErrLineage` for a migration the state file's history does not include, `ErrUnmigrated` for
+changes `baseline` would record that no migration makes. A refusal comes with the method's result
+all the same. The examples on [pkg.go.dev](https://pkg.go.dev/github.com/RELAXccc/bun-fixture-migrate)
+show each method, and [the reference](reference.md#the-project) lists them.
+
+### A test database
+
+A test suite brings its database to the fixture files once, in `TestMain`, after the schema is in
+place, and a test fails when the two disagree, which a test that writes master data and does not
+clean up shows:
+
+```go
+var (
+	testDB  *bun.DB
+	project *fixturemigrate.Project
+)
+
+func TestMain(m *testing.M) {
+	ctx := context.Background()
+	testDB = bun.NewDB(sql.OpenDB(pgdriver.NewConnector(
+		pgdriver.WithDSN(os.Getenv("TEST_DATABASE_URL")))), pgdialect.New())
+	var err error
+	// go test runs in the package's directory.
+	if project, err = fixturemigrate.LoadProject("../../fixture-migrate.yml"); err != nil {
+		log.Fatal(err)
+	}
+	// The schema is in place: the migrator ran, or the tables were created.
+	// Sync seeds an empty database and puts back what an earlier run changed.
+	if _, err := project.Sync(ctx, testDB, fixturemigrate.SyncOptions{}); err != nil {
+		log.Fatal(err)
+	}
+	code := m.Run()
+	testDB.Close()
+	os.Exit(code)
+}
+
+func TestTheDatabaseHoldsTheFixtureFiles(t *testing.T) {
+	report, err := project.Check(context.Background(), testDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Agree {
+		t.Errorf("the test database and the fixture files disagree:\n%s",
+			strings.Join(report.Lines(), "\n"))
+	}
+}
+```
+
+A test that works in a transaction it rolls back passes that `bun.Tx` to `Check`, which then sees
+the test's own writes. `go test ./...` runs packages at once: packages that share one test database
+each sync it, and two syncs that change the same rows at once fail one of them, so give each package
+a database of its own, or run them one after another with `go test -p 1`.
+
+### A development server, an admin tool, a job
+
+A development server calls `project.Sync(ctx, db, fixturemigrate.SyncOptions{Logf: log.Printf})`
+before it serves: a developer's database follows the fixture files without migrations. Sync is not
+for a database that is deployed to; that one gets the migrations, which it records.
+
+An admin tool that takes production's edits into the fixture files calls `Export` with a read-only
+role's `*bun.DB` and `Write`s the result, then `Generate`s the migration, as
+[above](#when-production-data-is-edited-in-production). A Kubernetes job that checks production on a
+schedule calls `Check` and exits non-zero unless the report's `Agree`. A CI program calls
+`Status(ctx, nil, fixturemigrate.StatusOptions{})` as `status -offline` and fails on the report's
+`Failures`.
 
 ## Drivers
 

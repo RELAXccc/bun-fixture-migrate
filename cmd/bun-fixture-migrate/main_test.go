@@ -273,8 +273,8 @@ func TestCommandHelpIsNotAFailure(t *testing.T) {
 
 // The base revision comes out of git, and it comes out of the repository the
 // fixture file belongs to rather than the working directory the command was
-// started in.
-func TestGitShowReadsTheFileAsOfARevision(t *testing.T) {
+// started in. (The library's tests read git directly.)
+func TestGenerateReadsTheBaseAsOfARevision(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git is not installed")
 	}
@@ -299,14 +299,6 @@ func TestGitShowReadsTheFileAsOfARevision(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	data, err := gitShow(fixture, "HEAD")
-	if err != nil {
-		t.Fatalf("gitShow: %v", err)
-	}
-	if string(data) != oldFixture {
-		t.Fatalf("expected the committed revision, got:\n%s", data)
-	}
-
 	code, stdout, stderr := call(t, "generate", "-config", cfg, "-name", "prices", "-dry-run")
 	if code != 0 {
 		t.Fatalf("exit %d\n%s%s", code, stdout, stderr)
@@ -314,23 +306,9 @@ func TestGitShowReadsTheFileAsOfARevision(t *testing.T) {
 	if !strings.Contains(stdout, `fixturechange.Lit("2500")`) {
 		t.Fatalf("the diff against HEAD is the price change:\n%s", stdout)
 	}
-	if _, err := gitShow(fixture, "no-such-revision"); err == nil {
-		t.Fatal("a revision that does not exist has to be an error")
-	}
-}
-
-func TestGitShowOutsideARepository(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git is not installed")
-	}
-	// A temporary directory can sit inside a repository; one that does not
-	// exist cannot.
-	_, err := gitShow(filepath.Join(t.TempDir(), "nowhere", "fixture.yml"), "HEAD")
-	if err == nil {
-		t.Fatal("expected an error")
-	}
-	if !strings.Contains(err.Error(), "pass -old") {
-		t.Fatalf("the message has to name the way out: %v", err)
+	code, stdout, stderr = call(t, "generate", "-config", cfg, "-name", "prices", "-dry-run", "-base", "no-such-revision")
+	if code != 1 || !strings.Contains(stderr, "no-such-revision") {
+		t.Fatalf("a revision that does not exist has to be an error: exit %d\n%s%s", code, stdout, stderr)
 	}
 }
 

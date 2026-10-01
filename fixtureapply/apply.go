@@ -37,6 +37,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 	"github.com/RELAXccc/bun-fixture-migrate/internal/pgerr"
@@ -71,6 +72,9 @@ import (
 // Two replicas starting together are best kept apart by bun's Lock, or by
 // building the migrator WithUpsert(true), which keeps one record per name;
 // either way only one record of a run is ever there to take back.
+//
+// A set with an AuditTable records, last in the transaction, what became of
+// each of its changes; see Set.AuditTable and Revert.
 func Apply(ctx context.Context, db bun.IDB, set fixturechange.Set, opts ...Option) error {
 	o := newOptions(opts)
 	if o.migration == "" {
@@ -96,12 +100,22 @@ const advisoryLock int64 = 0x62666d0001
 // insert becomes a delete guarded by the values it wrote, an update swaps old
 // and new, a delete becomes an insert of the row it removed.
 //
-// It assumes Apply made every change of the set on this database, because
-// nothing records which ones it made. A change Apply found already made -- the
-// row already held the new values, or was already there -- is reverted all
-// the same: the update writes the old value, which this database may never
-// have held, and the insert's row is deleted. Where a row does not hold what
-// the migration writes, the change is not reverted and its outcome says so.
+// With an AuditTable, it reverts only the changes Apply made in this
+// database: those an 'up' row of the set after its last 'down' row records as
+// applied, which is the newest such row and, after a Revert that failed, the
+// ones before it. A change Apply found made already (unchanged) or passed
+// over (skipped) is left as it is, its outcome StatusUnchanged with a message
+// saying why. Without the table, or without such a row, it says so in the log
+// and reverts every change, as it does for a set without an AuditTable.
+//
+// That is: it assumes Apply made every change of the set on this database. A
+// change Apply found already made -- the row already held the new values, or
+// was already there -- is reverted all the same: the update writes the old
+// value, which this database may never have held, and the insert's row is
+// deleted. A change Apply skipped is inverted too: a delete it skipped because
+// somebody had removed the row already puts the row back. Where a row does
+// not hold what the migration writes, the change is not reverted and its
+// outcome says so.
 //
 // It takes no record back. When it fails under a migrator that unrecords
 // before running (bun's default), the migration is left looking unapplied
@@ -129,6 +143,15 @@ func inCallersTx(db bun.IDB) bool {
 func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o options) error {
 	if err := Validate(set); err != nil {
 		return err
+	}
+	// What became of every change, for the audit table.
+	var outcomes []Outcome
+	if set.AuditTable != "" {
+		report := o.report
+		o.report = func(out Outcome) {
+			outcomes = append(outcomes, out)
+			report(out)
+		}
 	}
 	restore, lockTimeout, err := session(ctx, tx)
 	if err != nil {
@@ -176,7 +199,15 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 			o.log(ctx, slog.LevelInfo, "fixture change set not run, the database is not seeded", out,
 				set.Name+": "+msg)
 			o.report(out)
-			return restore(ctx)
+			return finish(ctx, tx, set, revert, restore, outcomes)
+		}
+	}
+	// Revert undoes what the last Apply here did, which the audit table
+	// says, read under the advisory lock so no other run comes in between.
+	var base Applies
+	if revert && set.AuditTable != "" {
+		if base, err = revertBase(ctx, tx, set, o); err != nil {
+			return err
 		}
 	}
 
@@ -199,6 +230,15 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 		}
 		where := fmt.Sprintf("%s: %s %s %s", set.Name, c.Model, keyLabel(c.Key), c.Kind)
 		out := Outcome{Set: set.Name, Index: i, Model: c.Model, Kind: c.Kind, Key: keyLabel(c.Key)}
+		if base != nil {
+			if made, done, row := base.Made(i, set.Changes[i]); !made {
+				out.Status, out.Message = StatusUnchanged, notMade(base, done, row)
+				o.log(ctx, slog.LevelInfo, "fixture change not reverted, the migration did not make it here", out,
+					where+": "+out.Message)
+				o.report(out)
+				continue
+			}
+		}
 		res, err := r.exec(ctx, c)
 		if err != nil {
 			err = privilege(err)
@@ -225,7 +265,7 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 		case res.problem == problemBenign:
 			out.Status = StatusUnchanged
 			o.log(ctx, slog.LevelInfo, "fixture change already made", out, where+": "+res.message)
-		case modeFor(set.Policy, res.problem) == fixturechange.ModeError:
+		case modeFor(set.PolicyFor(c.Model), res.problem) == fixturechange.ModeError:
 			out.Status, out.Problem = StatusFailed, res.problem.exported()
 			o.report(out)
 			return &ChangeError{Outcome: out}
@@ -238,7 +278,92 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 	if err := r.syncSequences(ctx, o); err != nil {
 		return err
 	}
-	return restore(ctx)
+	return finish(ctx, tx, set, revert, restore, outcomes)
+}
+
+// finish ends a run that succeeded: it checks the deferred constraints and
+// puts back the session's settings, and then, last of all in the transaction,
+// writes the run's row into the set's audit table, if it has one. A run that
+// fails before this point writes no row; one that fails here rolls back.
+func finish(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, restore func(context.Context) error,
+	outcomes []Outcome) error {
+
+	if err := restore(ctx); err != nil {
+		return err
+	}
+	if set.AuditTable == "" {
+		return nil
+	}
+	return writeAudit(ctx, tx, set, revert, outcomes)
+}
+
+// revertBase is the audit rows of the runs of Apply a Revert undoes, and says
+// in the log what Revert does with them, or without them.
+func revertBase(ctx context.Context, tx bun.IDB, set fixturechange.Set, o options) (Applies, error) {
+	base, err := ApplyRecords(ctx, tx, set)
+	if pgerr.State(err) == pgerr.InsufficientPrivilege {
+		return nil, fmt.Errorf("%s: the role running the migration may not read the audit table %s, which says what "+
+			"to revert, so nothing was changed: grant it SELECT and INSERT on the table: %w", set.Name, set.AuditTable, err)
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := Outcome{Set: set.Name, Index: -1}
+	if len(base) == 0 {
+		out.Message = fmt.Sprintf("%s holds no Apply of this change set that was not reverted since, so every change "+
+			"is reverted, as if the migration had made them all in this database", set.AuditTable)
+		o.log(ctx, slog.LevelWarn, "no audit row of the change set, every change is reverted", out,
+			set.Name+": "+out.Message)
+		return nil, nil
+	}
+	made := 0
+	for i, c := range set.Changes {
+		if ok, _, _ := base.Made(i, c); ok {
+			made++
+		}
+	}
+	out.Message = fmt.Sprintf("reverts the %s that the Apply of %s (row %d of %s) and any before it since the last "+
+		"Revert made in this database; the %s they found made or skipped %s left alone", plural(made, "change"),
+		base[0].AppliedAt.UTC().Format(time.RFC3339), base[0].ID, set.AuditTable,
+		plural(len(set.Changes)-made, "other change"), isAre(len(set.Changes)-made))
+	o.log(ctx, slog.LevelInfo, "the change set is reverted as its audit rows say", out, set.Name+": "+out.Message)
+	if base[0].SetSHA256 != SetSHA256(set) {
+		out.Message = fmt.Sprintf("the change set was edited after it ran here: it is not the one row %d of %s "+
+			"recorded, so each change is matched to what that run did by its model, key and kind, and one the run "+
+			"did not have is not reverted", base[0].ID, set.AuditTable)
+		o.log(ctx, slog.LevelWarn, "the change set was edited after it ran here", out, set.Name+": "+out.Message)
+	}
+	return base, nil
+}
+
+// notMade says why Revert leaves a change alone: no run of Apply in this
+// database made it.
+func notMade(base Applies, done AuditOutcome, row *AuditRecord) string {
+	if row == nil {
+		return fmt.Sprintf("not reverted: the change set did not hold this change when it ran here, the Apply of %s "+
+			"(row %d)", base[0].AppliedAt.UTC().Format(time.RFC3339), base[0].ID)
+	}
+	when := fmt.Sprintf("the Apply of %s (row %d)", row.AppliedAt.UTC().Format(time.RFC3339), row.ID)
+	what := string(done.Status)
+	if done.Problem != "" {
+		what += " [" + string(done.Problem) + "]"
+	}
+	return fmt.Sprintf("not reverted: the migration did not make it in this database, where %s found it %s, so the "+
+		"row is left as it is", when, what)
+}
+
+func plural(n int, word string) string {
+	if n == 1 {
+		return "1 " + word
+	}
+	return fmt.Sprintf("%d %ss", n, word)
+}
+
+func isAre(n int) string {
+	if n == 1 {
+		return "is"
+	}
+	return "are"
 }
 
 // session makes a literal mean in the migration what it meant to dbfixture.
@@ -463,10 +588,11 @@ func (p problem) exported() Problem {
 	return ""
 }
 
-// modeFor is what the change set's policy says about one problem. An unset
-// policy field is the strict reading: a change that could not be made fails the
-// migration rather than being recorded as done. A benign outcome, where the
-// database already holds what the change wanted, is never an error.
+// modeFor is what a policy, the one the change's model runs under, says about
+// one problem. An unset policy field is the strict reading: a change that could
+// not be made fails the migration rather than being recorded as done. A benign
+// outcome, where the database already holds what the change wanted, is never an
+// error.
 func modeFor(p fixturechange.Policy, pr problem) fixturechange.Mode {
 	switch pr {
 	case problemBenign:
