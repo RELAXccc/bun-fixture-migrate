@@ -323,9 +323,10 @@ func TestReviewAModelWithoutABlockHasNoRows(t *testing.T) {
 		if len(res.Changes) != 1 || res.Changes[0].Model != "RvSize" || res.Changes[0].Kind != "delete" {
 			t.Fatalf("expected the size to be in the database only:\n%s", strings.Join(lines, "\n"))
 		}
-		// Read by its key alone, as a column no file writes is no master data.
-		if _, ok := res.Changes[0].Old["rank"]; ok {
-			t.Fatalf("the delete is guarded by a column no file writes: %+v", res.Changes[0].Old)
+		// Read whole, as a model whose block holds no row is, so the delete
+		// can be reverted.
+		if res.Changes[0].Old["rank"].Lit != "1" {
+			t.Fatalf("the delete is not guarded by the row: %+v", res.Changes[0].Old)
 		}
 	})
 	// generate says the same of the block that left the files.

@@ -244,7 +244,8 @@ fixture row writes is not master data, and a difference in it is not drift.
 
 Every configured model is compared, though. A model the files hold no block of has no rows in a fresh
 seed, so `check` reports its rows as in the database only and `sync` deletes them, under the model's
-`deletes`, as `generate` does when a block leaves the files. Its rows are read by their key alone.
+`deletes`, as `generate` does when a block leaves the files. Its rows are read whole, as those of a
+block that holds no row are.
 
 ## What it refuses
 
