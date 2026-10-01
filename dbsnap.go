@@ -243,10 +243,13 @@ func selectQuery(cfg *Config, m *Model, table *dbschema.Table, cols []string) (s
 	if m.Where != "" {
 		query += " WHERE (" + m.Where + ")"
 	}
+	// The id and the key are ordered by as the table holds them, which is
+	// why they are qualified: a bare "id" would name the output column of
+	// the same name, the id's text, and put 10 before 9.
 	var orderBy []string
 	ordered := map[string]bool{}
 	if hasID {
-		orderBy = append(orderBy, idQuoted)
+		orderBy = append(orderBy, qualified+"."+idQuoted)
 		ordered[m.ID] = true
 	}
 	for _, col := range m.keyColumns() {
@@ -255,7 +258,7 @@ func selectQuery(cfg *Config, m *Model, table *dbschema.Table, cols []string) (s
 			return "", false, fmt.Errorf("key column %w", err)
 		}
 		if !ordered[col] {
-			orderBy = append(orderBy, q)
+			orderBy = append(orderBy, qualified+"."+q)
 			ordered[col] = true
 		}
 	}

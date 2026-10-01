@@ -326,14 +326,17 @@ func TestVariantATreeWhoseParentsCameLater(t *testing.T) {
   rows:
     - {_id: root, id: 2, name: root, parent_id: ~}
     - {_id: leaf, id: 1, name: leaf, parent_id: '{{ $.VCategory.root.ID }}'}
+    - {_id: tools, id: 9, name: tools, parent_id: ~}
+    - {_id: api, id: 10, name: api, parent_id: '{{ $.VCategory.tools.ID }}'}
 `,
 		next: `- model: VCategory
   rows:
     - {_id: root, id: 2, name: root, parent_id: ~}
-    - {_id: top, id: 9, name: top, parent_id: ~}
-    - {_id: branch, id: 5, name: branch, parent_id: '{{ $.VCategory.top.ID }}'}
+    - {_id: tools, id: 9, name: tools, parent_id: ~}
+    - {_id: branch, id: 5, name: branch, parent_id: '{{ $.VCategory.tools.ID }}'}
     - {_id: leaf, id: 1, name: leaf, parent_id: '{{ $.VCategory.branch.ID }}'}
     - {_id: twig, id: 3, name: twig, parent_id: '{{ $.VCategory.leaf.ID }}'}
+    - {_id: api, id: 10, name: api, parent_id: '{{ $.VCategory.tools.ID }}'}
 `,
 		dump: []string{"v_categories"},
 	}.run(t)

@@ -478,6 +478,23 @@ func TestARefValueTwoRowsShareIsReported(t *testing.T) {
 	}
 }
 
+// Rows are read in the order of their ids as numbers: 9 before 10. The id is
+// selected as text, and an ORDER BY naming it bare sorted that text, 10
+// before 9, which put a child before its parent in an export and changed the
+// order of every exported file once ids reached two digits.
+func TestTheDatabaseIsReadInTheOrderOfItsIDs(t *testing.T) {
+	db := itemDB(t)
+	run(t, db, "INSERT INTO regions (id, code, name) VALUES (10, 'X', 'ten'), (9, 'N', 'nine'), (2, 'B', 'two'), (1, 'A', 'one')")
+	snap := databaseSnapshot(t, db, itemConfig(t), fixturemigrate.SnapshotOptions{})
+	var ids []string
+	for _, e := range snap.Entries["Region"] {
+		ids = append(ids, e.ID)
+	}
+	if got := strings.Join(ids, ","); got != "1,2,9,10" {
+		t.Fatalf("read in the order %s", got)
+	}
+}
+
 // itemState renders the two tables by their natural keys, so two databases
 // seeded in different ways can be compared.
 func itemState(t *testing.T, db *bun.DB) string {

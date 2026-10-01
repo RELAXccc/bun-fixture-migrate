@@ -64,7 +64,7 @@ func TestSelectQuery(t *testing.T) {
 		t.Fatal(err)
 	}
 	const want = `SELECT ("id")::text, ("name")::text, ("price_cents")::text ` +
-		`FROM "public"."plans" WHERE (archived_at IS NULL) ORDER BY "id", "name"`
+		`FROM "public"."plans" WHERE (archived_at IS NULL) ORDER BY "public"."plans"."id", "public"."plans"."name"`
 	if query != want {
 		t.Fatalf("selectQuery =\n%s\nwant\n%s", query, want)
 	}
@@ -233,7 +233,7 @@ func TestSelectQueryOrdersEveryRowWithoutAnID(t *testing.T) {
 	if hasID {
 		t.Fatal("the table has no id")
 	}
-	if !strings.HasSuffix(query, `ORDER BY "plan_id", "addon_id", 2, 4`) {
+	if !strings.HasSuffix(query, `ORDER BY "public"."limits"."plan_id", "public"."limits"."addon_id", 2, 4`) {
 		t.Fatalf("expected the key_any_of columns, then the rest by position: %s", query)
 	}
 }
