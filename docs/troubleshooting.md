@@ -133,10 +133,67 @@ or warnings.
 | `null against a default` | `~` into a column with a default; a nil pointer or `nullzero` field writes `DEFAULT`. In a `json` or `jsonb` column, `~` is the JSON null to a map field and NULL to a pointer | leave the column out, write the value, or `policy.null_default` if your models use `sql.Null*` types or pointers |
 | `invalid value` | the column cannot take the value as `dbfixture` writes it: PostgreSQL cannot cast it (`abc` into an integer, `2026-02-30` into a date, an enum label that does not exist, a domain's `CHECK`), it is too long for the column, a single-column `CHECK` refuses it, an integer column gets a fraction; or a `time.Time` and a string field, or two servers, would store two values. The message names them | fix the value; [dates and times](fixture-files.md#dates-and-times) |
 | `unknown column` | the table has no such column | fix the name, or `ignore` it |
-| `duplicate key` | two rows share a natural key, or two keys are one value to the key's type, `Go` and `GO` in `citext` | fix the rows, and give the table a unique index on the key |
+| `duplicate key` | two rows share a natural key, or two keys are one value to the key's type, `Go` and `GO` in `citext`, or to a unique index stricter than the key, `Ann@` and `ann@` under `lower(email)` | fix the rows, and give the table a unique index on the key; where it has one that let the second row in, the message names it and says what to change, below |
+| `unbacked key` | no unique index or constraint makes the natural key unique among the model's rows; see [unbacked keys](#unbacked-keys) | add the index the message names, or set `policy.key_index` |
 
 A generated column, or an explicit id in an `IDENTITY ALWAYS` column, is reported the same way:
 PostgreSQL refuses to write either.
+
+### Unbacked keys
+
+`check`, `generate`, `status` and `sync` read the table's unique indexes and constraints and say,
+for every natural key and every `ref` column another model references, whether one makes it unique
+among the model's rows. Without one, the application, an admin UI or a race with the migration's
+own insert adds a second row with the key, and every change to it fails from then on. They are
+warnings under the default `policy.key_index: warn`, errors under `error` (exit 3 for `check`, 2 for
+`generate` and `sync`), and a model can set its own. The message says which; each ends with what to
+do:
+
+**`no unique index or constraint backs key [plan_id, code]: … CREATE UNIQUE INDEX ON features
+(plan_id, code)`.** There is none. Create the one it names: with `NULLS NOT DISTINCT` (PostgreSQL 15
+and later) or over `COALESCE` before 15 where a key column is nullable, and with the model's
+`where` as its predicate when it has one. On a live table, `CREATE UNIQUE INDEX CONCURRENTLY`, in a
+migration of its own that runs outside a transaction. For a `ref` column it says every reference
+then fails to resolve: two rows hold the name a reference looks up.
+
+**`UNIQUE (code, plan_id) is over more columns than key [code], so two rows may share code`.** The
+index allows two rows with one `code` and two plans. Either the key is wrong, and `key: [code,
+plan_id]` is what tells two rows apart, or the table needs the index on `code` the message names.
+
+**`parent_id is nullable and UNIQUE (parent_id, code) holds NULLs distinct, so any number of rows may
+hold the same code with parent_id NULL`.** A unique index never refuses a row with a NULL in it, and
+the tool looks a NULL up as NULL, so two root categories called `root` are one key to the tool and
+two rows to the index. Recreate it `NULLS NOT DISTINCT` (PostgreSQL 15 and later), index
+`(COALESCE(parent_id, 0), code)` in its place before 15, or make the column `NOT NULL`. **`lower(email)
+is NULL where email is`** is the same for an expression index.
+
+**`UNIQUE (code) WHERE deleted_at IS NULL holds only where deleted_at IS NULL, and this model reads
+every row`** (or `the rows this model reads, where …, are not all within it`). A partial index backs
+the key only among the rows its predicate holds for. If only those rows are master data, give the
+model a `where` that says so, such as the predicate itself; if every row is, the table needs an index
+over every row. A predicate the `where` repeats is taken as implied; otherwise PostgreSQL's planner
+decides, so `status = 'active'` implies `status <> 'retired'`.
+
+**`cannot tell whether UNIQUE … backs key […]: the planner chose … for the lookup instead`** (or
+`PostgreSQL's planner could not be asked`, or `could not evaluate`). The lint could not decide, and
+says so as a warning whatever `key_index` is. Repeat the index's predicate in the model's `where` if
+it holds, or create the index the message names.
+
+**`unique index k_invalid_code is invalid, left by a CREATE INDEX CONCURRENTLY that failed, and backs
+nothing`.** The index build failed, usually on the very duplicates it was to keep out, and the index
+stayed behind refusing nothing. Find and remove the duplicates (`check` lists them as `duplicate
+key`), then `REINDEX INDEX CONCURRENTLY` it, or drop it and create it again.
+
+**`UNIQUE (lower(email)) holds the natural keys email=ann@example.com and email=Ann@example.com
+equal, so dbfixture cannot load these 2 rows`** (a `duplicate key`). An index stricter than the key
+holds two keys of the fixture files equal: dbfixture fails loading them, and a migration fails on
+the second insert. Make the rows differ as the index compares them, or drop one.
+
+**The duplicate-key messages name an index that let the second row in**: `UNIQUE (parent_id, code)
+holds NULLs distinct, and lets in a second row with parent_id NULL`, `UNIQUE (code) WHERE deleted_at
+IS NULL holds only where deleted_at IS NULL, and lets in the rows outside it`, or an invalid index.
+Remove the extra rows, then fix the index as above; only a table without one is asked to `give the
+table a unique index`.
 
 ## Refusals
 
@@ -271,6 +328,11 @@ declares.
 
 ## Planning
 
+**`note: Feature: no unique index or constraint backs key [code, plan_id]: …`.** A key a change of the
+migration looks a row up by is not backed by a unique index, as the database stands when the
+migration would run: a duplicate the application adds before the deploy makes the change fail. It
+changes nothing about the plan's result; see [unbacked keys](#unbacked-keys).
+
 **`could not be planned` / `inconclusive`.** The plan itself failed: a row lock held longer than
 `-lock-timeout`, a statement timeout, a lost connection, or something a single transaction cannot
 do, which the note under it names. Nothing is known about the migration. Try again, or raise
@@ -382,7 +444,7 @@ Messages a generated migration returns through bun's migrator:
 | `The role running the migration lacks a privilege, or a row-level security policy applies to it` | error: PostgreSQL refused a statement, or a row a trigger wrote did not pass a policy's check | grant what is missing, or run migrations as the tables' owner or a role with `BYPASSRLS` |
 | `exists, but under id 7 and not 3` | id drift | [a migration failed](production.md#a-fixture-migration-failed-during-a-deploy) |
 | `2 rows of features point at plans name=pro through ...` | referenced | [a migration failed](production.md#a-fixture-migration-failed-during-a-deploy) |
-| `rows of plans hold name=team` | duplicate key: more than one row has the natural key, none is touched | remove the extra rows and add a unique index on the key |
+| `rows of plans hold name=team` | duplicate key: more than one row has the natural key, none is touched | remove the extra rows and add a unique index on the key; `check` names an index that let them in and what is wrong with it, see [unbacked keys](#unbacked-keys) |
 | `held a lock on a row of plans for longer than the lock timeout` | lock timeout: nothing was changed | the next deploy runs it again; find the long transaction |
 | `checking the constraints PostgreSQL defers waited for a lock another session held` | lock timeout, while the `DEFERRABLE` constraints were checked at the end of the set: a foreign key's check locks the row it points at | the next deploy runs it again; find the long transaction |
 | `does not hold the model's where` | error: the row a change writes would not be master data | the fixture row and the model's `where` disagree; fix one |
