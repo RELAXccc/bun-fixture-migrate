@@ -532,23 +532,31 @@ type RvSpell struct {
 	Price         float64        `bun:"price"`
 	Ratio         float64        `bun:"ratio"`
 	Big           int64          `bun:"big"`
+	At            time.Time      `bun:"at"`
+	Local         time.Time      `bun:"local"`
+	Day           time.Time      `bun:"day,type:date"`
+	Ats           []time.Time    `bun:"ats,array"`
 }
 
 // One fixture edit is one migration, whether generate read the column types
 // from the database or not: the literals of a change are spelled the same
 // either way. Before, a jsonb document came out compact with its keys sorted
-// without the database and in jsonb's own spelling with it.
+// without the database and in jsonb's own spelling with it, and a timestamp
+// in RFC 3339 without it and as 2026-01-01 10:00:00+00 with it.
 func TestReviewAChangeIsSpelledTheSameWithAndWithoutTheDatabase(t *testing.T) {
 	l := newLab(t, map[string]*fixturemigrate.Model{"RvSpell": {Table: "rv_spell", Key: []string{"name"}}}, "rv_spell",
 		[]string{"DROP TABLE IF EXISTS rv_spell", "CREATE TABLE rv_spell (id bigint PRIMARY KEY, name text NOT NULL UNIQUE, " +
-			"doc jsonb, raw json, list jsonb, ints int[], words text[], nums numeric[], price numeric(10,2), ratio float8, big bigint)"},
+			"doc jsonb, raw json, list jsonb, ints int[], words text[], nums numeric[], price numeric(10,2), ratio float8, big bigint, " +
+			"at timestamptz, local timestamp, day date, ats timestamptz[])"},
 		`SELECT ''`, (*RvSpell)(nil))
 	v1 := "- model: RvSpell\n  rows:\n    - {id: 1, name: a, doc: {k: 1}, raw: {k: 1}, list: [1], ints: [1], words: [a], " +
-		"nums: [1], price: 1, ratio: 1, big: 1}\n"
+		"nums: [1], price: 1, ratio: 1, big: 1, at: 2020-01-01T00:00:00Z, local: 2020-01-01T00:00:00Z, day: 2020-01-01, " +
+		"ats: [2020-01-01T00:00:00Z]}\n"
 	v2 := "- model: RvSpell\n  rows:\n    - {id: 1, name: a, doc: {zeta: 1.50, at: 2026-01-01T10:00:00+02:00, big: 1e21, " +
 		"nested: {b: [1, 2.0], a: \"<x>\"}, \"long key\": true}, raw: {b: 1, a: [x, 1.0]}, list: [{b: 1, a: 2}, \"s\", 1.5], " +
-		"ints: [3, 2, 1], words: [\"b c\", \"a\", \"d\\\"e\"], nums: [1.5, 2, 0.001], price: 12.5, ratio: 0.1, big: 9007199254740993}\n" +
-		"    - {id: 2, name: b, doc: {}, raw: {}, list: [], ints: [], words: [], nums: [], price: 0.5, ratio: 0.0000001, big: -5}\n"
+		"ints: [3, 2, 1], words: [\"b c\", \"a\", \"d\\\"e\"], nums: [1.5, 2, 0.001], price: 12.5, ratio: 0.1, big: 9007199254740993, " +
+		"at: 2026-01-01T10:00:00.5Z, local: 2026-01-01T10:00:00Z, day: 2026-03-04, ats: [2026-01-01T10:00:00Z, 2026-01-02T00:00:00.123456Z]}\n" +
+		"    - {id: 2, name: b, doc: {}, raw: {}, list: [], ints: [], words: [], nums: [], price: 0.5, ratio: 0.0000001, big: -5, at: 2026-06-01T00:00:00Z, local: 2026-06-01T00:00:00Z, day: 2026-06-01, ats: []}\n"
 	offline, err := fixturemigrate.Compute(l.cfg, fixtureSnapshot(t, l.cfg, v1, "old"), fixtureSnapshot(t, l.cfg, v2, "new"))
 	if err != nil || len(offline.Refusals) != 0 {
 		t.Fatalf("%v %+v", err, offline.Refusals)

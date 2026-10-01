@@ -95,6 +95,10 @@ PostgreSQL's: `1.50` equals `1.5` in a `numeric` column and not in a `text` one,
 instant are one timestamp, and key order in a `jsonb` document does not matter. A value the column
 cannot hold is an `invalid value` finding before anything is generated.
 
+A migration spells every value the same whether `generate` read the database or not, as the
+file's own unquoted value reads without one: a number canonically, a timestamp in RFC 3339 in UTC, a
+JSON document or an array compact with the keys sorted. One edit of the file is one migration.
+
 **At run time** a migration compares through the column's type too: `json` through `jsonb`, arrays
 as their type, and the few types without an equality operator (`point`, `xml`) through their text.
 
@@ -137,7 +141,7 @@ encodes. So `[2026-01-01T10:00:00+02:00]` is `["2026-01-01T10:00:00+02:00"]` the
 `timestamptz[]` column holds that instant. Two documents are compared as `jsonb` compares them, with
 every number written canonically, so `{"a": 1.0}` written by SQL and `{a: 1}` in the file agree. A
 migration writes a document, and an array, in one spelling, compact with the keys sorted, whether
-`generate` read the database or not, so one edit of the file is one migration. A
+`generate` read the database or not. A
 YAML merge key `<<` inside a mapping is merged as yaml.v3 merges it: a key the mapping writes itself
 wins over a merged one, and of several mappings merged, the first.
 

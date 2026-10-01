@@ -93,19 +93,11 @@ func exportTimestamp(typ, text string) (string, bool) {
 		if t, err := time.Parse("2006-01-02", text); err == nil {
 			return t.Format("2006-01-02"), true
 		}
-	case "timestamp":
+	case "timestamp", "timestamptz":
 		// Written in RFC 3339 with a Z, which is how a YAML timestamp without
 		// a zone resolves anyway: then the value reads back as written, and
 		// nothing has to ask the column's type what 2026-01-01 10:00:00 is.
-		if t, err := time.Parse("2006-01-02 15:04:05.999999999", text); err == nil {
-			return t.UTC().Format(time.RFC3339Nano), true
-		}
-	case "timestamptz":
-		for _, layout := range []string{"2006-01-02 15:04:05.999999999Z07", "2006-01-02 15:04:05.999999999Z07:00"} {
-			if t, err := time.Parse(layout, text); err == nil {
-				return t.UTC().Format(time.RFC3339Nano), true
-			}
-		}
+		return instantText(text)
 	}
 	return "", false
 }
@@ -217,16 +209,95 @@ func numericType(typ string) bool {
 // columnText is how a value of a column is compared and written once
 // PostgreSQL has spelled it: a number canonically, the numbers inside JSON and
 // inside an array canonically, anything else as it is.
+//
+// A timestamp is written in RFC 3339, in UTC, which is how the fixture file's
+// own unquoted timestamp reads without the database: a migration writes the
+// same text whether generate read the column's type or not. So is one inside
+// an array, which to_jsonb writes with "+00:00", or with no zone at all for a
+// timestamp without one.
 func columnText(c dbschema.Column, text string) string {
 	switch {
 	case numericType(c.Type):
 		if s, ok := canonicalDecimal(text); ok {
 			return s
 		}
-	case c.Type == "json" || c.Type == "jsonb" || c.Category == "A":
+	case c.Type == "timestamp" || c.Type == "timestamptz":
+		if s, ok := instantText(text); ok {
+			return s
+		}
+	case c.Type == "json" || c.Type == "jsonb":
 		return normalJSON(text)
+	case c.Category == "A":
+		text = normalJSON(text)
+		if c.ElemType == "timestamp" || c.ElemType == "timestamptz" {
+			return instantsInJSON(text)
+		}
+		return text
 	}
 	return text
+}
+
+// instantLayouts are the spellings PostgreSQL writes a timestamp in: its own
+// text in the ISO DateStyle, and to_jsonb's ISO 8601, with a zone or without.
+var instantLayouts = []string{
+	"2006-01-02 15:04:05.999999999Z07",
+	"2006-01-02 15:04:05.999999999Z07:00",
+	"2006-01-02 15:04:05.999999999Z07:00:00",
+	"2006-01-02 15:04:05.999999999",
+	"2006-01-02T15:04:05.999999999Z07:00",
+	"2006-01-02T15:04:05.999999999",
+}
+
+// instantText writes a timestamp PostgreSQL wrote in RFC 3339 in UTC, and
+// false for anything else, such as infinity or a year before Christ.
+func instantText(text string) (string, bool) {
+	for _, layout := range instantLayouts {
+		if t, err := time.Parse(layout, text); err == nil {
+			return t.UTC().Format(time.RFC3339Nano), true
+		}
+	}
+	return "", false
+}
+
+// instantsInJSON writes every string of a JSON array that is a timestamp in
+// RFC 3339 in UTC; see columnText.
+func instantsInJSON(text string) string {
+	var v any
+	if err := json.Unmarshal([]byte(text), &v); err != nil {
+		return text
+	}
+	changed := false
+	var walk func(v any) any
+	walk = func(v any) any {
+		switch v := v.(type) {
+		case []any:
+			for i, e := range v {
+				v[i] = walk(e)
+			}
+		case string:
+			if s, ok := instantText(v); ok && s != v {
+				changed = true
+				return s
+			}
+		}
+		return v
+	}
+	v = walk(v)
+	if !changed {
+		return text
+	}
+	return normalJSON(mustJSON(v))
+}
+
+// mustJSON is a value decoded from JSON, encoded again.
+func mustJSON(v any) string {
+	var b strings.Builder
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return ""
+	}
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 // sameScalar reports whether two texts are the same value when either could
