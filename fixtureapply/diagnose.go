@@ -36,12 +36,25 @@ func (r *runner) diagnose(ctx context.Context, c fixturechange.Change, t fixture
 		return duplicate(t, c, byKey), nil
 	}
 	if byKey == 0 && c.Kind == fixturechange.Delete {
+		// A row soft-deleted already: a second run, or a replica that came
+		// second.
+		if at, err := r.deletedSince(ctx, c.Model, table, c.Key); err != nil || at != "" {
+			return outcome{problem: problemBenign, message: "the row is already soft-deleted, since " + at +
+				", nothing to delete"}, err
+		}
 		return r.diagnoseGone(ctx, c, t)
 	}
 	if byKey == 0 {
 		note, err := r.unresolved(ctx, c.Key)
 		if err != nil {
 			return outcome{}, err
+		}
+		at, err := r.deletedSince(ctx, c.Model, table, c.Key)
+		if err != nil {
+			return outcome{}, err
+		}
+		if at != "" {
+			note += fmt.Sprintf(" It is soft-deleted, since %s, and the fixture file still holds it.", at)
 		}
 		if out, done, err := r.diagnoseMoved(ctx, c, t, table, wanted); err != nil || done {
 			return out, err

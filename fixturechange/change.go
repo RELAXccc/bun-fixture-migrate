@@ -61,6 +61,18 @@ type Table struct {
 	// the set's, so Policy{ChangedRow: ModeWarn} changes that one decision
 	// for this model and no other. Nil is the set's Policy throughout.
 	Policy *Policy
+	// SoftDelete, when set, is the column of the model's bun soft_delete
+	// field: a row is live while it is NULL. Every statement, natural-key
+	// lookup and reference sees live rows only. A Delete sets it to now()
+	// instead of deleting the row; an Insert first restores the newest
+	// soft-deleted row that holds the change's values. A change never writes
+	// or compares the column itself.
+	//
+	// A set without it deletes rows as it always did, so a model that gains
+	// a soft_delete keeps the hard deletes of the migrations generated
+	// before. An older fixtureapply does not compile a set that has it, which
+	// is why it needs no Format of its own.
+	SoftDelete string
 }
 
 // Tables maps a model name to its table.

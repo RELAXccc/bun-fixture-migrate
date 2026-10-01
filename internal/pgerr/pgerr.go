@@ -57,4 +57,6 @@ const (
 	UndefinedColumn = "42703"
 	// InvalidSchemaName is a schema that does not exist.
 	InvalidSchemaName = "3F000"
+	// UniqueViolation is a row a unique index or constraint refuses.
+	UniqueViolation = "23505"
 )

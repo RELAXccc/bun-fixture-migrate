@@ -86,6 +86,9 @@ func Validate(set fixturechange.Set) error {
 				return fmt.Errorf("model %q: %w", model, err)
 			}
 		}
+		if err := validateSoftDelete(model, t); err != nil {
+			return err
+		}
 	}
 	if set.SeedGuardTable != "" {
 		if _, err := quoteIdent(set.SeedGuardTable); err != nil {
@@ -112,6 +115,14 @@ func Validate(set fixturechange.Set) error {
 		}
 		if len(c.Key) == 0 {
 			return fmt.Errorf("change %d (%s): no key", i, c.Model)
+		}
+		if col := set.Tables[c.Model].SoftDelete; col != "" {
+			for _, values := range []fixturechange.Values{c.Key, c.Old, c.New} {
+				if _, ok := values[col]; ok {
+					return fmt.Errorf("change %d (%s): names %s, the model's soft delete column, which a change "+
+						"never writes or compares: it says whether the row is live", i, c.Model, col)
+				}
+			}
 		}
 		for _, values := range []fixturechange.Values{c.Key, c.Old, c.New} {
 			for _, col := range sortedColumns(values) {
@@ -179,6 +190,29 @@ func Validate(set fixturechange.Set) error {
 		default:
 			return fmt.Errorf("change %d (%s): unknown kind %q", i, c.Model, c.Kind)
 		}
+	}
+	return nil
+}
+
+// validateSoftDelete checks a table's SoftDelete: a plain column, which is
+// neither the id nor the key a reference matches on, of a table whose deletes
+// reach no other row.
+func validateSoftDelete(model string, t fixturechange.Table) error {
+	if t.SoftDelete == "" {
+		return nil
+	}
+	if !identPattern.MatchString(t.SoftDelete) {
+		return fmt.Errorf("model %q: soft delete column %q is not a plain SQL identifier", model, t.SoftDelete)
+	}
+	switch {
+	case t.SoftDelete == t.ID:
+		return fmt.Errorf("model %q: the soft delete column is the id column, %s", model, t.ID)
+	case t.SoftDelete == t.Key:
+		return fmt.Errorf("model %q: the soft delete column is the key column, %s, which references name rows by",
+			model, t.Key)
+	case t.Cascade:
+		return fmt.Errorf("model %q: Cascade and SoftDelete are both set, and a soft delete reaches no row "+
+			"through a foreign key", model)
 	}
 	return nil
 }
