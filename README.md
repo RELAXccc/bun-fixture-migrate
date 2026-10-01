@@ -211,16 +211,18 @@ production was not in the state it expected is lost for good: fix the data, depl
 `migrate` has nothing to do.
 
 A generated migration fails on purpose whenever it cannot do what it says (below), so it has to
-handle this. When `fixtureapply.Apply` fails under bun's migrator, it deletes the record the migrator
-made of it a moment before: the newest row of `bun_migrations`, only if it carries this migration's
-name and was written within the hour, and only through the migrator's own `*bun.DB`. The error says
-so:
+handle this. Under bun's migrator, `fixtureapply.Apply` first looks for the record the migrator made
+of it a moment before: the newest row of `bun_migrations`, if it carries this migration's name and
+was written in the last minute. If the change set fails, it deletes that row, and only that row,
+through the migrator's own `*bun.DB`. A record another replica writes while this one runs is not the
+row it found, and is left alone. The error says so:
 
 ```
 migrate: 20260921120000: up: …: no row of items has name=anvil. …
 
-bun had recorded migration 20260921120000 as applied before running it (the migrator was not built
-WithMarkAppliedOnSuccess(true)); that record was removed, so the migration runs again once this is fixed
+bun had recorded migration 20260921120000 as applied before running it, as its migrator
+does unless built WithMarkAppliedOnSuccess(true); that record was removed, so the migration runs again
+once this is fixed
 ```
 
 It reads the name off the call stack exactly as bun's `Register` does, from the migration's file

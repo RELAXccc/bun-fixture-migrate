@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
 	"github.com/RELAXccc/bun-fixture-migrate/fixtureapply"
@@ -250,9 +251,9 @@ func TestOnlyTheMigratorsFreshRecordIsTakenBack(t *testing.T) {
 			[]string{"INSERT INTO bun_migrations (name, group_id) VALUES ('" + name + "', 1)",
 				"INSERT INTO bun_migrations (name, group_id) VALUES ('20260922000000', 2)"},
 			func() bun.IDB { return db }},
-		{"it was written more than an hour ago",
+		{"it was not written just before this run",
 			[]string{"INSERT INTO bun_migrations (name, group_id, migrated_at) VALUES ('" + name +
-				"', 1, now() - interval '2 hours')"},
+				"', 1, now() - interval '2 minutes')"},
 			func() bun.IDB { return db }},
 	} {
 		reset(c.rows...)
@@ -288,6 +289,65 @@ func TestOnlyTheMigratorsFreshRecordIsTakenBack(t *testing.T) {
 	}
 	if err := apply(db); err == nil || strings.Contains(err.Error(), "bun_migrations") {
 		t.Fatalf("expected the plain failure, got %v", err)
+	}
+}
+
+// Two replicas start at once, under a migrator that records on success and
+// without bun's Lock. The first applies the change set and records it while
+// the second waits for the advisory lock; the second then fails. The record it
+// finds afterwards is the first one's, made after the change set was applied,
+// and taking it back would leave the migration pending with its changes made:
+// every later start would run it again. Only a record that was there before
+// this run began is bun's record of this run.
+func TestAnotherReplicasRecordIsNotTakenBack(t *testing.T) {
+	db := testDB(t)
+	seed(t, db)
+	ctx := context.Background()
+	const name = "20260921120000"
+	failing := fixturechange.Set{
+		Name:   name + "_fixture_x",
+		Tables: tables(),
+		Changes: []fixturechange.Change{{Model: "Plan", Kind: fixturechange.Update,
+			Key: fixturechange.Values{"name": fixturechange.Lit("gone")},
+			Old: fixturechange.Values{"price_cents": fixturechange.Lit("1")},
+			New: fixturechange.Values{"price_cents": fixturechange.Lit("2")}}},
+	}
+	run(t, db, "DROP TABLE IF EXISTS bun_migrations",
+		"CREATE TABLE bun_migrations (id bigserial PRIMARY KEY, name varchar, group_id bigint, "+
+			"migrated_at timestamptz NOT NULL DEFAULT current_timestamp)")
+
+	first, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Rollback()
+	if _, err := first.ExecContext(ctx, "SELECT pg_advisory_xact_lock(?)", int64(0x62666d0001)); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- fixtureapply.Apply(ctx, db, failing, quiet(), fixtureapply.WithMigrationName(name))
+	}()
+	for i := 0; ; i++ {
+		if scan[int64](t, db, "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted") > 0 {
+			break
+		}
+		if i == 100 {
+			t.Fatal("the second replica never waited for the lock")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// The first replica's migrator records the migration as it finishes.
+	run(t, db, "INSERT INTO bun_migrations (name, group_id) VALUES ('"+name+"', 1)")
+	if err := first.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	err = <-done
+	if err == nil || strings.Contains(err.Error(), "record was removed") {
+		t.Fatalf("expected the failure alone, got %v", err)
+	}
+	if got := scan[int64](t, db, "SELECT count(*) FROM bun_migrations WHERE name = ?", name); got != 1 {
+		t.Fatalf("the first replica's record has to stay, %d left", got)
 	}
 }
 

@@ -165,9 +165,9 @@ Messages a generated migration returns through bun's migrator:
 | `plans is empty, nothing to do` | not a problem: the database is not seeded yet | [a new environment](production.md#a-new-environment) |
 | `wait for another change set to finish` | the advisory lock wait was cancelled | another process was applying a change set; retry |
 
-**`bun may have recorded X as applied before running it, and the record could not be removed`.** The
+**`bun had recorded X as applied before running it, and the record could not be removed`.** The
 migration failed and rolled back, but its record in the migrations table is still there. Delete the
-row named in the message before the next deploy, or the migration will not run again. With
+row with the id the message names before the next deploy, or the migration will not run again. With
 `WithMarkAppliedOnSuccess(true)` this cannot happen.
 
 **A migration succeeds on one database and fails on another.** Ids and hand edits differ between

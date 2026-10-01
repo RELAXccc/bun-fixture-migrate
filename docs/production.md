@@ -57,8 +57,9 @@ row back, or drop this change from the migration
 Under a migrator built without `WithMarkAppliedOnSuccess(true)` it goes on:
 
 ```
-bun had recorded migration 20260930165255 as applied before running it (the migrator was not built
-WithMarkAppliedOnSuccess(true)); that record was removed, so the migration runs again once this is fixed
+bun had recorded migration 20260930165255 as applied before running it, as its migrator
+does unless built WithMarkAppliedOnSuccess(true); that record was removed, so the migration runs again
+once this is fixed
 ```
 
 **What happened.** The migration found the database in a state it was not generated against, and the

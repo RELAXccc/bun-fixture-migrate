@@ -52,28 +52,30 @@ import (
 // it fails, and a recorded migration never runs again. Fix the database,
 // deploy once more, and nothing happens.
 //
-// So a failing Apply that finds itself running under bun's migrator deletes
-// that record: the newest row of the migrations table, if it carries this
-// migration's name and was written within the hour. Nothing older and nothing
-// else. When the migrator records on success there is normally no such row
-// and nothing is deleted; the exceptions are two migrations sharing one name,
-// which bun cannot run correctly anyway and the status command reports, and
-// RunMigration re-running the newest migration within the hour of its first
-// run, after which the next migrate runs it again and finds its changes made.
-// The error says whether a record was deleted. The name is the one bun derived
-// from the migration's file name; see WithMigrationName.
+// So Apply, running under bun's migrator, first looks for that record: the
+// newest row of the migrations table, if it carries this migration's name and
+// was written in the last minute, which is what bun's default mode has just
+// done. If the change set then fails, that row and no other is deleted. A
+// migrator that records on success has made no such row, and a record another
+// process writes while this one runs is not the row found before it ran, so
+// neither is touched. The one exception is RunMigration re-running the newest
+// migration, whose record bun updates in place; after a failure the next
+// migrate runs it again and finds its changes made. The error says whether a
+// record was deleted. The name is the one bun derived from the migration's
+// file name; see WithMigrationName.
 func Apply(ctx context.Context, db bun.IDB, set fixturechange.Set, opts ...Option) error {
 	o := newOptions(opts)
+	if o.migration == "" {
+		o.migration = migrationFromStack()
+	}
+	rec := findRecord(ctx, db, set, o)
 	err := db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		return run(ctx, tx, set, false, o)
 	})
 	if err == nil {
 		return nil
 	}
-	if o.migration == "" {
-		o.migration = migrationFromStack()
-	}
-	return unrecord(ctx, db, set, o, err)
+	return unrecord(ctx, db, set, o, rec, err)
 }
 
 // advisoryLock is the key of the transaction-scoped advisory lock every change
