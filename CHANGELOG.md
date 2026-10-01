@@ -134,7 +134,7 @@ master and PostgreSQL 12 to 18.
 - **A property test** of random models, ownership modes, soft deletes and edits, checking that
   apply after generate equals the files, and that revert, check and export agree.
 - **Long-running examples,** replayed release by release against bun's migrator: `examples/saas`
-  (13 releases), and a commerce back office in `examples/commerce`.
+  (13 releases), and a shop's back office in three schemas in `examples/commerce` (12 releases).
 - **CI:**
   - unit tests on Go 1.24, 1.26 and stable;
   - PostgreSQL 12–18 (19 beta allowed to fail);

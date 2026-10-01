@@ -15,7 +15,7 @@ Users want the [reference](reference.md) and the [usage guide](usage.md) instead
 | `internal/pgerr` | the library, the run time | Reads SQLSTATE and messages the same way from `pgdriver` and `pgx`. |
 | `cmd/bun-fixture-migrate` | users | The command: flags, printing, exit codes. The logic lives in the library's `Project`; the command is a thin shell around it. |
 | `dbtest` (own module) | CI | Every test that needs PostgreSQL, the real `dbfixture` and bun's real migrator. A separate module so the library's `go.mod` stays small. |
-| `examples/basic`, `examples/saas` (own modules) | CI, readers | A runnable bun project; and a SaaS back office whose master data evolves over 13 releases, replayed by `dbtest/longrun_test.go`. |
+| `examples/basic`, `examples/saas`, `examples/commerce` (own modules) | CI, readers | A runnable bun project; a SaaS back office whose master data evolves over 13 releases; and a shop's back office in three schemas over 12. Both timelines are replayed by `dbtest/longrun_test.go`, with each application's hooks in `longrun_saas_test.go` and `longrun_commerce_test.go`. |
 | `testdata/generated` | `dbtest/corpus_test.go` | Generated files frozen as earlier versions wrote them. Each must still compile, validate and run against today's run time. |
 
 `fixturechange` and `fixtureapply` are the long-lived API: they are compiled into users'
@@ -180,8 +180,8 @@ whatever version of `fixtureapply` the user has upgraded to. So:
   - flag parsing and printing in `cmd/bun-fixture-migrate`;
   - the reference's command and JSON sections.
 - **A release of a long-running example:**
-  - `examples/saas/timeline/rNN/` (or the commerce example's) holds the fixture files, schema SQL
-    and `release.yml` with the expectations;
+  - `examples/<name>/timeline/rNN/` holds the fixture files, schema SQL and `release.yml` with the
+    expectations;
   - `BFM_LONGRUN_UPDATE=1` regenerates the example's migrations and state;
   - a `known:` mark in `release.yml` records a finding the release works around, and must go when
     the finding is fixed.
@@ -194,7 +194,7 @@ whatever version of `fixtureapply` the user has upgraded to. So:
 | PostgreSQL, both drivers | `dbtest/` | `BUN_FIXTURE_MIGRATE_POSTGRES=postgres://… go test ./...` in `dbtest`, again with `BUN_FIXTURE_MIGRATE_DRIVER=pgx` |
 | Property | `dbtest/property_test.go` | Random models, modes, edits and soft deletes, checking apply ∘ generate = files, revert, check and export. `BFM_PROPERTY_ITERATIONS=2000` for a long run |
 | Corpus | `dbtest/corpus_test.go` | Every frozen generated file compiles and runs |
-| Long-running | `dbtest/longrun_test.go` | Replays each release of `examples/saas`. `BFM_LONGRUN_UNTIL=r05` stops early, `BFM_LONGRUN_KEEP=1` and `BFM_LONGRUN_WORK=dir` keep the work, `BFM_LONGRUN_UPDATE=1` rewrites the example |
+| Long-running | `dbtest/longrun_test.go` | Replays each release of `examples/saas` and `examples/commerce`. `BFM_LONGRUN_UNTIL=r05` stops early, `BFM_LONGRUN_KEEP=1` and `BFM_LONGRUN_WORK=dir` keep the work, `BFM_LONGRUN_UPDATE=1` rewrites the example |
 
 Notes for running `dbtest`:
 - CI connects with password (scram) authentication. A test role that logs in needs a `PASSWORD`,
