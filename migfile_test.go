@@ -180,6 +180,19 @@ var s = fixturechange.Set{Tables: fixturechange.Tables{"Plan": {Name: "plans", P
 import "github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 var s = fixturechange.Set{Changes: []fixturechange.Change{{Key: fixturechange.Values{"a": fixturechange.Expr("now()")}}}}
 `, "not Lit, Null or RefTo but Expr; the file may have been written by a newer version"},
+		"a part that does more than return": {`package m
+import "github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+var s = fixturechange.Set{Changes: fixturechange.Concat(part1())}
+func part1() []fixturechange.Change { x := 1; _ = x; return nil }
+`, "part1 is not a function of this file that only returns its changes"},
+		"a part from elsewhere": {`package m
+import "github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+var s = fixturechange.Set{Changes: fixturechange.Concat(other.Part())}
+`, "a part of Changes that is not a call of a function of this file"},
+		"another function": {`package m
+import "github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+var s = fixturechange.Set{Changes: append(part1())}
+`, "neither a literal nor fixturechange.Concat"},
 		"newer format": {`package m
 import "github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 var s = fixturechange.Set{Format: 2}

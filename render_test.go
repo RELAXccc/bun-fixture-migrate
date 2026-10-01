@@ -1,6 +1,7 @@
 package fixturemigrate
 
 import (
+	"fmt"
 	"go/ast"
 	"go/format"
 	"go/parser"
@@ -275,4 +276,58 @@ func FuzzRenderReadsBack(f *testing.F) {
 			t.Fatalf("reads back as\n%+v\nnot\n%+v", got.Changes, res.Changes)
 		}
 	})
+}
+
+// largeResult is a result of n updates.
+func largeResult(n int) *Result {
+	res := &Result{Tables: fixturechange.Tables{"Plan": {Name: "plans", ID: "id", Key: "name"}}}
+	for i := 0; i < n; i++ {
+		res.Changes = append(res.Changes, fixturechange.Change{Model: "Plan", Kind: fixturechange.Update,
+			Key: fixturechange.Values{"name": fixturechange.Lit(fmt.Sprintf("p%04d", i))},
+			Old: fixturechange.Values{"price": fixturechange.Lit("1")},
+			New: fixturechange.Values{"price": fixturechange.Lit(fmt.Sprint(i))}})
+	}
+	return res
+}
+
+// One literal of thousands of changes took the compiler 77 seconds and 1.3 GB
+// for 4,800 of them. More than a thousand are written as one function per
+// hundred, joined in order, and read back as the same set.
+func TestRenderWritesALargeSetInParts(t *testing.T) {
+	cfg := testConfig(t)
+	if src, err := Render(cfg, "x", "20260921120000", largeResult(largeSet)); err != nil ||
+		strings.Contains(string(src), "Concat") || RenderWarnings(largeResult(largeSet)) != nil {
+		t.Fatalf("a thousand changes are one literal: %v", err)
+	}
+	res := largeResult(largeSet + 1)
+	src, err := Render(cfg, "x", "20260921120000", res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := parser.ParseFile(token.NewFileSet(), "gen.go", src, parser.AllErrors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var funcs []string
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok {
+			funcs = append(funcs, fn.Name.Name)
+		}
+	}
+	if len(funcs) != 12 || funcs[0] != "init" || funcs[11] != "fixtureChanges20260921120000XPart11" {
+		t.Fatalf("want init and eleven parts, got %v", funcs)
+	}
+	if !strings.Contains(string(src), "// fixtureChanges20260921120000XPart11 is changes 1001 to 1001 of 1001.") {
+		t.Fatalf("each part says which changes it holds:\n%s", src[len(src)-2000:])
+	}
+	got, _, err := ReadChangeSet(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Changes, res.Changes) {
+		t.Fatal("the parts read back as other changes, or in another order")
+	}
+	if w := RenderWarnings(res); len(w) != 1 || !strings.Contains(w[0], "1001 changes in one migration") {
+		t.Fatalf("warnings %v", w)
+	}
 }

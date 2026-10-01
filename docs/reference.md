@@ -340,6 +340,11 @@ of `fixtureapply` the application uses later. Every version reads, compiles and 
 earlier ones wrote: the repository keeps one of each shape, unchanged, under `testdata/generated`,
 and its tests run them all under bun's migrator.
 
+A change set of more than a thousand changes is written as one function per hundred changes,
+joined by `fixturechange.Concat`: the Go compiler took 77 seconds and 1.3 GB over one literal of
+4,800 changes, and takes 8 seconds over the same changes in parts. `fixturemigrate.RenderWarnings`
+says so about such a set, and that it still runs in one transaction.
+
 `fixturechange.Set` has a `Format`, which a file leaves out while it is 1. A new field needs no new
 format: a file that uses one does not compile against an older `fixtureapply`, which is refusal
 enough. Only a change to what an existing field means raises it, and then an older `fixtureapply`

@@ -179,7 +179,12 @@ func ReadChangeSet(src []byte) (fixturechange.Set, bool, error) {
 	if pkg == "" {
 		return fixturechange.Set{}, false, nil
 	}
-	r := &setReader{fset: fset, pkg: pkg}
+	r := &setReader{fset: fset, pkg: pkg, funcs: map[string]*ast.FuncDecl{}}
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil {
+			r.funcs[fn.Name.Name] = fn
+		}
+	}
 	var found []*ast.CompositeLit
 	ast.Inspect(file, func(n ast.Node) bool {
 		if lit, ok := n.(*ast.CompositeLit); ok && r.isType(lit.Type, "Set") {
@@ -267,6 +272,8 @@ func (r *setReader) registers(file *ast.File, lit *ast.CompositeLit) error {
 type setReader struct {
 	fset *token.FileSet
 	pkg  string
+	// funcs are the file's functions, by name, where a large set's parts are.
+	funcs map[string]*ast.FuncDecl
 }
 
 func (r *setReader) errorf(n ast.Node, format string, args ...any) error {
@@ -434,6 +441,9 @@ func (r *setReader) mode(expr ast.Expr) (fixturechange.Mode, error) {
 }
 
 func (r *setReader) changes(expr ast.Expr) ([]fixturechange.Change, error) {
+	if call, ok := expr.(*ast.CallExpr); ok {
+		return r.parts(call)
+	}
 	lit, ok := expr.(*ast.CompositeLit)
 	if !ok {
 		return nil, r.errorf(expr, "Changes is not written out as a literal")
@@ -472,6 +482,42 @@ func (r *setReader) changes(expr ast.Expr) ([]fixturechange.Change, error) {
 			return nil, err
 		}
 		out = append(out, c)
+	}
+	return out, nil
+}
+
+// parts reads the Changes of a large set: fixturechange.Concat of calls to
+// functions of the same file, each of which returns a literal and does
+// nothing else.
+func (r *setReader) parts(call *ast.CallExpr) ([]fixturechange.Change, error) {
+	if sel, ok := call.Fun.(*ast.SelectorExpr); !ok || !r.isType(sel, "Concat") {
+		return nil, r.errorf(call, "Changes is neither a literal nor fixturechange.Concat of parts")
+	}
+	var out []fixturechange.Change
+	for _, arg := range call.Args {
+		var id *ast.Ident
+		if part, ok := arg.(*ast.CallExpr); ok && len(part.Args) == 0 {
+			id, _ = part.Fun.(*ast.Ident)
+		}
+		if id == nil {
+			return nil, r.errorf(arg, "a part of Changes that is not a call of a function of this file")
+		}
+		fn := r.funcs[id.Name]
+		if fn == nil || fn.Type.Params.NumFields() != 0 || fn.Body == nil || len(fn.Body.List) != 1 {
+			return nil, r.errorf(arg, "%s is not a function of this file that only returns its changes", id.Name)
+		}
+		ret, ok := fn.Body.List[0].(*ast.ReturnStmt)
+		if !ok || len(ret.Results) != 1 {
+			return nil, r.errorf(fn, "%s is not a function of this file that only returns its changes", id.Name)
+		}
+		if _, ok := ret.Results[0].(*ast.CompositeLit); !ok {
+			return nil, r.errorf(ret, "%s does not return its changes written out as a literal", id.Name)
+		}
+		changes, err := r.changes(ret.Results[0])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, changes...)
 	}
 	return out, nil
 }

@@ -160,6 +160,22 @@ type Set struct {
 	LockTimeout string
 }
 
+// Concat joins parts of a change set's Changes in order. A generated file of
+// more than a thousand changes writes them as one function per hundred and
+// joins them with it, because the Go compiler takes much longer over one
+// literal of thousands of changes than over the same changes in parts.
+func Concat(parts ...[]Change) []Change {
+	n := 0
+	for _, p := range parts {
+		n += len(p)
+	}
+	out := make([]Change, 0, n)
+	for _, p := range parts {
+		out = append(out, p...)
+	}
+	return out
+}
+
 // DefaultMigrationsTable is the table bun's migrator uses when it was not built
 // WithTableName.
 const DefaultMigrationsTable = "bun_migrations"
@@ -170,9 +186,10 @@ const DefaultMigrationsTable = "bun_migrations"
 // compiled against whatever version of this module the application uses
 // later, so what a set means can never quietly change. The rules:
 //
-//   - A new field needs no new format. It defaults to what a set without it
-//     always meant, and a file that sets it does not compile against an older
-//     version, which is the loudest refusal there is.
+//   - A new field, or a new function such as Concat, needs no new format. A
+//     field defaults to what a set without it always meant, and a file that
+//     uses either does not compile against an older version, which is the
+//     loudest refusal there is.
 //   - A change to what an existing field or value means needs one: the
 //     generator then writes Format into every file, and an older fixtureapply
 //     refuses the file instead of running it with the old meaning.

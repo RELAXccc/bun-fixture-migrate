@@ -172,22 +172,32 @@ func Render(cfg *Config, name, stamp string, res *Result) ([]byte, error) {
 	b.WriteString("\t},\n")
 	fmt.Fprintf(&b, "\tPolicy: fixturechange.Policy{\n\t\tMissingRow: %q, ChangedRow: %q, IDDrift: %q, DuplicateKey: %q,\n\t},\n",
 		set.Policy.MissingRow, set.Policy.ChangedRow, set.Policy.IDDrift, set.Policy.DuplicateKey)
-	b.WriteString("\tChanges: []fixturechange.Change{\n")
-	for _, c := range res.Changes {
-		fmt.Fprintf(&b, "\t\t{Model: %q, Kind: fixturechange.%s,\n", c.Model, kindIdent(c.Kind))
-		if c.ID != "" {
-			fmt.Fprintf(&b, "\t\t\tID: %q,\n", c.ID)
+	if len(res.Changes) <= largeSet {
+		b.WriteString("\tChanges: []fixturechange.Change{\n")
+		renderChanges(&b, res.Changes)
+		b.WriteString("\t},\n}\n")
+	} else {
+		// One literal of thousands of changes, each with its maps, is one
+		// function of initialisation code, and the compiler's time on it
+		// grows faster than its size: 4,800 changes took 77 seconds and
+		// 1.3 GB to build. A function per hundred changes builds them in 8.
+		var parts []string
+		for i := 0; i < len(res.Changes); i += partSize {
+			parts = append(parts, fmt.Sprintf("%sPart%d", ident, len(parts)+1))
 		}
-		fmt.Fprintf(&b, "\t\t\tKey: %s,\n", renderValues(c.Key))
-		if len(c.Old) > 0 {
-			fmt.Fprintf(&b, "\t\t\tOld: %s,\n", renderValues(c.Old))
+		b.WriteString("\tChanges: fixturechange.Concat(\n")
+		for _, part := range parts {
+			fmt.Fprintf(&b, "\t\t%s(),\n", part)
 		}
-		if len(c.New) > 0 {
-			fmt.Fprintf(&b, "\t\t\tNew: %s,\n", renderValues(c.New))
+		b.WriteString("\t),\n}\n")
+		for i, part := range parts {
+			from, to := i*partSize, min((i+1)*partSize, len(res.Changes))
+			fmt.Fprintf(&b, "\n// %s is changes %d to %d of %d.\n", part, from+1, to, len(res.Changes))
+			fmt.Fprintf(&b, "func %s() []fixturechange.Change {\n\treturn []fixturechange.Change{\n", part)
+			renderChanges(&b, res.Changes[from:to])
+			b.WriteString("\t}\n}\n")
 		}
-		b.WriteString("\t\t},\n")
 	}
-	b.WriteString("\t},\n}\n")
 
 	if len(res.Refusals) > 0 {
 		b.WriteString("\n// Left out, write these yourself:\n")
@@ -215,6 +225,45 @@ func seedGuardTable(cfg *Config) string {
 		return t
 	}
 	return cfg.Schema + "." + t
+}
+
+// largeSet is the most changes Render writes as one literal, and partSize how
+// many go into each function of a larger set. Up to a thousand changes build
+// in a few seconds either way, and one literal reads more easily.
+const (
+	largeSet = 1000
+	partSize = 100
+)
+
+// RenderWarnings says what a reader of the file Render writes for res should
+// be told: that a change set of more than a thousand changes is one migration
+// all the same, written in parts so that it compiles in reasonable time, and
+// that applying it holds its row locks until the last change is made.
+func RenderWarnings(res *Result) []string {
+	if len(res.Changes) <= largeSet {
+		return nil
+	}
+	return []string{fmt.Sprintf("%d changes in one migration: the file is written in parts of %d so that it "+
+		"compiles in reasonable time, and it runs in one transaction that holds every row it changes until the "+
+		"last change is made. Several smaller fixture edits, each generated on its own, keep both short",
+		len(res.Changes), partSize)}
+}
+
+func renderChanges(b *strings.Builder, changes []fixturechange.Change) {
+	for _, c := range changes {
+		fmt.Fprintf(b, "\t\t{Model: %q, Kind: fixturechange.%s,\n", c.Model, kindIdent(c.Kind))
+		if c.ID != "" {
+			fmt.Fprintf(b, "\t\t\tID: %q,\n", c.ID)
+		}
+		fmt.Fprintf(b, "\t\t\tKey: %s,\n", renderValues(c.Key))
+		if len(c.Old) > 0 {
+			fmt.Fprintf(b, "\t\t\tOld: %s,\n", renderValues(c.Old))
+		}
+		if len(c.New) > 0 {
+			fmt.Fprintf(b, "\t\t\tNew: %s,\n", renderValues(c.New))
+		}
+		b.WriteString("\t\t},\n")
+	}
 }
 
 func kindIdent(k fixturechange.Kind) string {
