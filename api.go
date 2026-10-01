@@ -506,6 +506,9 @@ func (p *Project) Check(ctx context.Context, db bun.IDB) (*CheckReport, error) {
 			return err
 		}
 		lintAll(p.Config, head, tables)
+		if err := LintKeys(ctx, tx, p.Config, head, tables); err != nil {
+			return err
+		}
 		database, err := databaseSnapshot(ctx, tx, p.Config, tables, head)
 		if err != nil {
 			return err

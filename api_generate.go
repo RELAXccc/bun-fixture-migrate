@@ -174,7 +174,7 @@ func (p *Project) Generate(ctx context.Context, db bun.IDB, opts GenerateOptions
 			if opts.NoLint {
 				return nil
 			}
-			return g.lint(p.Config, head, tables, before)
+			return g.lint(ctx, tx, p.Config, head, tables, before)
 		})
 		if err != nil {
 			return fail(err)
@@ -203,7 +203,7 @@ func (p *Project) Generate(ctx context.Context, db bun.IDB, opts GenerateOptions
 				if err := canonical(ctx, tx, p.Config, tables, head, old); err != nil {
 					return err
 				}
-				return g.lint(p.Config, head, tables, before)
+				return g.lint(ctx, tx, p.Config, head, tables, before)
 			})
 			if err != nil {
 				return fail(err)
@@ -361,11 +361,16 @@ func (p *Project) Generate(ctx context.Context, db bun.IDB, opts GenerateOptions
 }
 
 // lint checks the fixture files against what the database says about its own
-// columns, and refuses on what the policy makes an error. A lint that could
-// not run is never reported as a lint that found nothing: the connection
-// error comes back as an error.
-func (g *Generated) lint(cfg *Config, head *Snapshot, tables map[string]*dbschema.Table, before int) error {
+// columns, and the natural keys against its indexes, and refuses on what the
+// policy makes an error. A lint that could not run is never reported as a
+// lint that found nothing: the connection error comes back as an error.
+func (g *Generated) lint(ctx context.Context, tx bun.Tx, cfg *Config, head *Snapshot,
+	tables map[string]*dbschema.Table, before int) error {
+
 	lintAll(cfg, head, tables)
+	if err := LintKeys(ctx, tx, cfg, head, tables); err != nil {
+		return err
+	}
 	mode, findings := cfg.Worst(head.Findings[before:])
 	g.Lint = findings
 	if len(findings) == 0 || mode != ModeError {
