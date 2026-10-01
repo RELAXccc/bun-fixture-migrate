@@ -528,9 +528,9 @@ func export(o streams, args []string) error {
 	}
 	// An export is written from the database, not edited into the file it
 	// replaces: what the file said in comments is gone from it. Written
-	// elsewhere with -o, it replaces nothing.
+	// elsewhere, with -o or to standard output, it replaces nothing.
 	for i, data := range outputs {
-		if n := droppedComments(current[i].Data, data); n > 0 && *out == "" {
+		if n := droppedComments(current[i].Data, data); n > 0 && *out == "" && !*stdout {
 			fmt.Fprintf(o.stderr, "note: the export does not keep the comments of %s: %s not in it; "+
 				"put back the ones to keep before committing\n", s.fixturePaths[i], plural(n, "comment line"))
 		}

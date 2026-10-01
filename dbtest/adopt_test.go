@@ -146,6 +146,13 @@ func TestAdoptingAsTheREADMESays(t *testing.T) {
 	if a.read("fixtures/fixture.yml") != exported {
 		t.Fatal("two exports of one database differ")
 	}
+	// To standard output it replaces nothing, and says nothing: a script
+	// may read both streams as one.
+	a.write("fixtures/fixture.yml", "# prices are in cents\n"+exported)
+	if out := a.run(0, "export", "-stdout"); out != exported {
+		t.Fatalf("export -stdout is not the export alone:\n%s", out)
+	}
+	a.write("fixtures/fixture.yml", exported)
 
 	// $ bun-fixture-migrate baseline
 	if out := a.run(0, "baseline"); !strings.Contains(out, "wrote internal/migrations/fixture_state.yml") {
