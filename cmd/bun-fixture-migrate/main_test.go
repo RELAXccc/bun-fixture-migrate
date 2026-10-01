@@ -144,6 +144,34 @@ func TestGenerateWritesTheFileItNames(t *testing.T) {
 	}
 }
 
+// -at makes the output the same on every run: a release script, a test that
+// replays a project's history, a reviewer regenerating to compare.
+func TestGenerateAtATimeIsReproducible(t *testing.T) {
+	cfg, base := project(t, newFixture, oldFixture)
+	var files [2]string
+	for i, at := range []string{"20260102030405", "2026-01-02T03:04:05Z"} {
+		code, stdout, stderr := call(t, "generate", "-config", cfg, "-old", base, "-name", "plan prices", "-at", at, "-dry-run")
+		if code != 0 {
+			t.Fatalf("exit %d\n%s%s", code, stdout, stderr)
+		}
+		files[i] = stdout
+	}
+	if files[0] != files[1] || !strings.Contains(files[0], "fixtureChanges20260102030405PlanPrices") {
+		t.Fatalf("one time spelled two ways has to write one file:\n%s\n---\n%s", files[0], files[1])
+	}
+	code, stdout, stderr := call(t, "generate", "-config", cfg, "-old", base, "-name", "plan prices", "-at", "20260102030405")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s%s", code, stdout, stderr)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(cfg), "migrations", "20260102030405_fixture_plan_prices.go")); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, stderr := call(t, "generate", "-config", cfg, "-old", base, "-name", "x", "-at", "yesterday"); code != 1 ||
+		!strings.Contains(stderr, "YYYYMMDDHHMMSS") {
+		t.Fatalf("a bad -at has to be an error naming the format, got %d: %s", code, stderr)
+	}
+}
+
 // Nothing to do is not a failure, and it must not leave a migration behind
 // that registers an empty change set.
 func TestGenerateWritesNothingWhenNothingChanged(t *testing.T) {

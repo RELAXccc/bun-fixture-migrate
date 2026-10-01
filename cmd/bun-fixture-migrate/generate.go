@@ -27,6 +27,7 @@ func generate(o streams, args []string) error {
 		dryRun  = fs.Bool("dry-run", false, "print the file instead of writing it, and leave the state file alone")
 		partial = fs.Bool("allow-partial", false, "write the changes that were accepted even when others were refused")
 		noLint  = fs.Bool("no-lint", false, "do not check the fixture file against the database's columns and defaults")
+		at      = fs.String("at", "", "timestamp the migration as of this time, YYYYMMDDHHMMSS or RFC 3339, instead of now: for output that is the same on every run")
 	)
 	s, err := common(o, fs, args)
 	if err != nil {
@@ -129,6 +130,12 @@ func generate(o streams, args []string) error {
 	if *name == "" {
 		return fmt.Errorf("-name is required")
 	}
+	now := time.Now()
+	if *at != "" {
+		if now, err = parseAt(*at); err != nil {
+			return err
+		}
+	}
 
 	dir := *out
 	if dir == "" {
@@ -144,7 +151,7 @@ func generate(o streams, args []string) error {
 			return fmt.Errorf("the migrations directory: %w", err)
 		}
 	}
-	stamp := fixturemigrate.NextStamp(time.Now(), existing)
+	stamp := fixturemigrate.NextStamp(now, existing)
 	// bun orders migrations by name as strings, so a short name such as
 	// "3_backfill" sorts after every timestamp and would run after this one.
 	for _, name := range existing {
@@ -190,6 +197,18 @@ func generate(o streams, args []string) error {
 	}
 	fmt.Fprintln(o.stdout, "read it, run plan against a copy of production, then deploy")
 	return nil
+}
+
+// parseAt reads the -at flag: a migration timestamp as bun spells it, or an
+// RFC 3339 time.
+func parseAt(s string) (time.Time, error) {
+	if t, err := time.Parse(fixturemigrate.Stamp, s); err == nil {
+		return t, nil
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	return time.Time{}, fmt.Errorf("-at %q is neither YYYYMMDDHHMMSS nor an RFC 3339 time", s)
 }
 
 // baseState is the fixture file generate diffs against when it does not diff
