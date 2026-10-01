@@ -52,9 +52,15 @@ const castBatch = 500
 func Canonicalize(ctx context.Context, db bun.IDB, cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table) error {
 	refCanon := map[string]map[string]string{} // model -> ref value as written -> canonical
 	for _, model := range snap.Order {
-		m := cfg.Models[model]
+		// A model nobody configured has no table to cast against, and
+		// passing over it would compare its values uncast: the same mistake
+		// FixtureSnapshot refuses.
+		m, err := cfg.model(model)
+		if err != nil {
+			return err
+		}
 		table := tables[cfg.QualifiedTable(m)]
-		if m == nil || table == nil {
+		if table == nil {
 			continue
 		}
 		entries := snap.Entries[model]
