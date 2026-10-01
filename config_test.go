@@ -223,11 +223,64 @@ func TestAnIDThatIsAReferenceIsRefused(t *testing.T) {
 	}}
 	err := cfg.Prepare()
 	if err == nil || !strings.Contains(err.Error(), `model "Limit": its id, plan_id, is also a reference to Plan`) ||
-		!strings.Contains(err.Error(), "leave id out") {
+		!strings.Contains(err.Error(), "set id: none") {
 		t.Fatalf("got %v", err)
 	}
 	cfg.Models["Limit"].ID = ""
 	if err := cfg.Prepare(); err != nil {
 		t.Fatalf("without the id: %v", err)
+	}
+}
+
+// A table whose primary key, id, is the id of another model's row, a plan's
+// details keyed by the plan, has no id of its own: id: none says so, and the
+// model is keyed and referenced by that column. Before, nothing could say it:
+// left out, the id was "id", the reference, and the configuration scaffold
+// wrote for such a table was refused.
+func TestAModelWithoutAnIDOfItsOwn(t *testing.T) {
+	details := func() *Model {
+		return &Model{Table: "plan_details", ID: NoID, Key: []string{"id"}, References: map[string]string{"id": "Plan"}}
+	}
+	cfg := &Config{Models: map[string]*Model{"Plan": {Table: "plans"}, "PlanDetail": details()}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	m := cfg.Models["PlanDetail"]
+	if m.ID != "" || !m.hasNoID() || m.skip("id") {
+		t.Fatalf("the model has no id, and id is a column like any other: %+v", m)
+	}
+	// Prepare stays repeatable.
+	if err := cfg.Prepare(); err != nil || m.ID != "" {
+		t.Fatalf("a second Prepare: %v, id %q", err, m.ID)
+	}
+	if order, err := cfg.DependencyOrder(); err != nil || strings.Join(order, ",") != "Plan,PlanDetail" {
+		t.Fatalf("the details come after the plans they point at: %v %v", order, err)
+	}
+	// Left out, id is the reference, which is refused with the way out.
+	cfg = &Config{Models: map[string]*Model{"Plan": {Table: "plans"},
+		"PlanDetail": {Table: "plan_details", Key: []string{"id"}, References: map[string]string{"id": "Plan"}}}}
+	if err := cfg.Prepare(); err == nil || !strings.Contains(err.Error(), "its id, id, is also a reference to Plan") ||
+		!strings.Contains(err.Error(), "set id: none") {
+		t.Fatalf("got %v", err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		change func(cfg *Config)
+		want   string
+	}{
+		{"serial", func(cfg *Config) { cfg.Models["PlanDetail"].Serial = true }, "serial is true, and id is none"},
+		{"ids", func(cfg *Config) { cfg.Models["PlanDetail"].IDs = IDsDatabase }, "ids is database, and id is none"},
+		{"referenced", func(cfg *Config) {
+			cfg.Models["Order"] = &Model{Table: "orders", References: map[string]string{"detail_id": "PlanDetail"}}
+		}, `model "Order": column "detail_id" references PlanDetail, which has no id of its own (id: none), and a ` +
+			"reference holds the id of the row it names: point it at the model PlanDetail's key points at, Plan, " +
+			"whose id PlanDetail's id holds"},
+	} {
+		cfg := &Config{Models: map[string]*Model{"Plan": {Table: "plans"}, "PlanDetail": details()}}
+		tc.change(cfg)
+		if err := cfg.Prepare(); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: got %v", tc.name, err)
+		}
 	}
 }

@@ -94,16 +94,61 @@ func TestIDDriftIsTheModelsOwn(t *testing.T) {
 	if len(res.Refusals) != 0 || len(res.Warnings) != 1 {
 		t.Fatalf("Plan's id_drift warn: %+v / %+v", res.Warnings, res.Refusals)
 	}
+	// The warning names the id_drift that decided: the model's.
+	if r := res.Warnings[0].Reason; !strings.Contains(r, "the model's id_drift is warn") || strings.Contains(r, "policy.") {
+		t.Fatalf("got %s", r)
+	}
 	cfg.Models["Plan"].IDDrift = ModeIgnore
 	if res := computeWith(t, cfg, base, next); len(res.Refusals)+len(res.Warnings) != 0 {
 		t.Fatalf("Plan's id_drift ignore: %+v / %+v", res.Warnings, res.Refusals)
 	}
-	// And the other way round: the policy block says warn, the model error.
+	// And the other way round: the policy block says warn, the model error,
+	// and setting the policy block's to warn would change nothing.
 	cfg = testConfig(t)
 	cfg.Policy.IDDrift = ModeWarn
 	cfg.Models["Plan"].IDDrift = ModeError
-	if res := computeWith(t, cfg, base, next); len(res.Refusals) != 1 {
+	res = computeWith(t, cfg, base, next)
+	if len(res.Refusals) != 1 || !strings.Contains(res.Refusals[0].Reason, "or set the model's id_drift to warn") ||
+		strings.Contains(res.Refusals[0].Reason, "policy.") {
 		t.Fatalf("Plan's id_drift error: %+v / %+v", res.Warnings, res.Refusals)
+	}
+	// Where the model sets nothing, the policy block's decides, and is the
+	// one named; one the model sets of another key changes nothing.
+	cfg = testConfig(t)
+	cfg.Policy.IDDrift = ModeWarn
+	cfg.Models["Plan"].ChangedRow = ModeError
+	if res := computeWith(t, cfg, base, next); len(res.Warnings) != 1 ||
+		!strings.Contains(res.Warnings[0].Reason, "; policy.id_drift is warn") {
+		t.Fatalf("got %+v", res.Warnings)
+	}
+	cfg.Policy.IDDrift = ModeError
+	if res := computeWith(t, cfg, base, next); len(res.Refusals) != 1 ||
+		!strings.Contains(res.Refusals[0].Reason, "or set policy.id_drift to warn") {
+		t.Fatalf("got %+v", res.Refusals)
+	}
+}
+
+// A refused delete names the deletes that refused it: the model's own, or
+// the policy block's it inherits.
+func TestARefusedDeleteNamesItsDeletes(t *testing.T) {
+	old := "- model: Currency\n  rows:\n    - {id: 1, code: EUR}\n    - {id: 2, code: USD}\n"
+	next := "- model: Currency\n  rows:\n    - {id: 1, code: EUR}\n"
+	for _, tc := range []struct {
+		policy, model DeletePolicy
+		want          string
+	}{
+		{DeleteRefuse, "", "refused by the configuration, policy.deletes: refuse, because"},
+		{DeleteAllow, DeleteRefuse, "refused by the configuration, the model's deletes: refuse, because"},
+	} {
+		cfg := &Config{Policy: Policy{Deletes: tc.policy}, Models: map[string]*Model{
+			"Currency": {Table: "currencies", Ref: "code", Key: []string{"code"}, Deletes: tc.model}}}
+		if err := cfg.Prepare(); err != nil {
+			t.Fatal(err)
+		}
+		res := computeWith(t, cfg, old, next)
+		if len(res.Refusals) != 1 || !strings.Contains(res.Refusals[0].Reason, tc.want) {
+			t.Errorf("%s/%s: expected %q in %+v", tc.policy, tc.model, tc.want, res.Refusals)
+		}
 	}
 }
 
@@ -217,5 +262,31 @@ var set = fc.Set{
 	bad := strings.Replace(string(src), "Policy: &fc.Policy{", "Policy: fc.Policy{", 1)
 	if _, _, err := ReadChangeSet([]byte(bad)); err == nil || !strings.Contains(err.Error(), "&fixturechange.Policy") {
 		t.Fatalf("a table policy that is not a pointer: %v", err)
+	}
+}
+
+// A refusal of findings names the policies that make them errors, each where
+// its value comes from: a model's own duplicate_key, the policy block's
+// zero_default. An invalid value no policy makes an error is only fixed.
+func TestARefusalOfFindingsNamesThePolicies(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Policy.DuplicateKey = ModeWarn
+	cfg.Models["Plan"].DuplicateKey = ModeError
+	findings := []Finding{
+		{Kind: FindingDuplicateKey, Model: "Plan", Row: "Plan/name=team"},
+		{Kind: FindingDuplicateKey, Model: "Feature", Row: "Feature/code=api"},
+		{Kind: FindingZeroDefault, Model: "Feature", Row: "Feature/code=api"},
+		{Kind: FindingInvalidValue, Model: "Plan", Row: "Plan/name=team"},
+	}
+	if got := cfg.warnTo(findings); got != ", or set Plan's duplicate_key and policy.zero_default to warn" {
+		t.Fatalf("got %q", got)
+	}
+	if got := cfg.warnTo(findings[3:]); got != "" {
+		t.Fatalf("an invalid value has no policy to set: %q", got)
+	}
+	_, err := refuseFindings(cfg, &Snapshot{Findings: findings})
+	if err == nil || !strings.HasSuffix(err.Error(), "nothing written. Fix them, or set Plan's duplicate_key and "+
+		"policy.zero_default to warn") {
+		t.Fatalf("got %v", err)
 	}
 }

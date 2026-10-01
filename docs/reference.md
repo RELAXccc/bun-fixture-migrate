@@ -45,7 +45,9 @@ Writes a commented starting configuration from a database's catalog: a model per
 key, whether it is serial, the foreign keys to a table's id as `references`, the column defaults as
 `defaults`, and a natural key guessed from the narrowest unique index besides the primary key. A
 partition is part of its partitioned table, not a model of its own; a foreign key to another column,
-a code say, is an ordinary column. Timestamps the database writes with a row, from a default such as
+a code say, is an ordinary column. A table whose primary key is another table's id, a plan's details
+keyed by the plan, has no id of its own: it is written `id: none`, keyed and referenced by that
+column, and a foreign key to it is a reference to the plan whose id it holds. Timestamps the database writes with a row, from a default such as
 `now()` or, on a table with a `BEFORE` row trigger, an `updated_at`, are proposed for `ignore`, and
 the triggers are named. Every guess is marked `# GUESS:`.
 
@@ -159,7 +161,8 @@ about. So is a migration without a `seed_guard_table`, which on a database that 
 runs before the seed and fails, and one whose seed guard is the table of no model.
 
 With a database configured, both sides are respelled by it first, so a value written two ways (`1.10`
-and `1.1` in a numeric column) is no change. When the fixture files differ from the state file but
+and `1.1` in a numeric column, `'86400 seconds'` and `'24:00:00'` in an interval one) is no change.
+Without one, such a change is refused, since the column's type decides whether it is one. When the fixture files differ from the state file but
 change no value, nothing is generated and the state file takes the new text, so `status -offline`
 agrees.
 
@@ -182,12 +185,24 @@ value of a unique column, or the open end of a price that a partial unique index
 constraint allows once. On top of that order every change waits for the ones it depends on: a row
 pointing at a new row waits for its insert, parents before children in one table too; a row is
 deleted once nothing in the migration still names it, children before parents; and a row taking a
-value another row of the table gives up waits for it, unless two rows trade values, which no unique
-column allows anyway. A unique index over several columns orders the changes by the tuple it holds,
-an item moved down a list to make room at the top included. With a database configured the
-catalog's unique indexes decide; without one, the columns whose values are distinct on both sides
-are taken for unique, and two such guesses that contradict each other both give way, with a warning
-to run with the database. A row whose ref value changes, a country renamed from Germany to
+value another row of the table gives up waits for it. A unique index over several columns orders the
+changes by the tuple it holds, an item moved down a list to make room at the top included. With a
+database configured the catalog's unique indexes decide; without one, the columns whose values are
+distinct on both sides are taken for unique, and two such guesses that contradict each other both
+give way, with a warning to run with the database.
+
+Rows trading the values of a unique index among themselves, two swapping them or a list rotated
+(positions 1, 2, 3 becoming 2, 3, 1), cannot be updated in any order while the index is checked after
+every statement: whichever row moves first finds its new value still held. Nor can rows whose changes
+two such indexes order in opposite ways. With the database configured, `generate`, `check` and `sync`
+refuse those changes, naming the rows and the index, and any change waiting on one of them, for a
+value it gives up or a row it names: declare it a `UNIQUE` constraint `DEFERRABLE INITIALLY
+IMMEDIATE`, which a migration checks at its end, and generate again; or move one of the rows to a
+value no row holds in a migration of its own first, and the others in the next. A
+`DEFERRABLE` constraint orders nothing, and any trade gets through it. Where the files do not write
+every column of the index, or without the database, where the index is a guess, such a circle is a
+warning instead, and so is one the waits for an index's values close with the waits for the rows
+the changes point at: an item giving its position up to a new item it then points at. A row whose ref value changes, a country renamed from Germany to
 Deutschland, is no change to the rows pointing at it: they point at its id. Models follow their
 references, in file order otherwise, whether or not the new file still mentions them.
 
@@ -388,7 +403,7 @@ listed stops every command.
 | Key | Default | |
 | --- | --- | --- |
 | `table` | | the SQL table, optionally schema-qualified; required |
-| `id` | `id` | the primary key column: written on insert when the row has one, never compared or updated, what a reference resolves to. A primary key that is itself a reference, a plan's limits keyed by the plan, is refused as `id`: leave `id` out and keep the column in `key` and `references` |
+| `id` | `id` | the primary key column: written on insert when the row has one, never compared or updated, what a reference resolves to. `none` for a table without an id of its own, whose primary key is a reference to another model's row, a plan's details keyed by the plan's id: `id: none`, `key: [id]`, `references: {id: Plan}`, which `scaffold` writes. Its rows are found by that key, nothing points at them (a reference to such a model is refused: point at the plan), and it is neither `serial` nor `ids: database`. A primary key that is itself a reference is refused as `id` |
 | `serial` | `false` | the id comes from a sequence; migrations move it past explicit ids |
 | `ref` | `name` | the column a reference to this model names a row by |
 | `key` | `[ref]` | the natural key: the columns that identify a row without its id |
