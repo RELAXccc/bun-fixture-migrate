@@ -12,6 +12,27 @@ import (
 )
 
 func (r *runner) exec(ctx context.Context, c fixturechange.Change) (outcome, error) {
+	out, err := r.execOne(ctx, c)
+	// A row deleted, or given another name, is no longer where a reference
+	// to its old name was resolved: a later change of the set naming that
+	// name has to look again, and find nothing or the row now holding it.
+	if _, renamed := c.New[r.set.Tables[c.Model].Key]; err == nil && out.rows > 0 &&
+		(c.Kind == fixturechange.Delete || (c.Kind == fixturechange.Update && renamed)) {
+		r.forget(c.Model)
+	}
+	return out, err
+}
+
+// forget drops the references to a model's rows resolved so far.
+func (r *runner) forget(model string) {
+	for k := range r.refs {
+		if strings.HasPrefix(k, model+"\x00") {
+			delete(r.refs, k)
+		}
+	}
+}
+
+func (r *runner) execOne(ctx context.Context, c fixturechange.Change) (outcome, error) {
 	t := r.set.Tables[c.Model]
 	table, err := quoteIdent(t.Name)
 	if err != nil {

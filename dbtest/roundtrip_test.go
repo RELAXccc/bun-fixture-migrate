@@ -711,6 +711,39 @@ func TestAGuardReferenceToARenamedRowFollowsThePolicy(t *testing.T) {
 	}
 }
 
+// A reference is resolved once per set and remembered. A row renamed or
+// deleted later in the same set was still found under its old name: here the
+// feature inserted for "free" pointed at the plan just renamed to "starter",
+// not at the one renamed to "free".
+func TestAReferenceAfterARenameInTheSameSetFindsTheRowNowNamedSo(t *testing.T) {
+	db := testDB(t)
+	seed(t, db)
+	rename := func(id, from, to string) fixturechange.Change {
+		return fixturechange.Change{Model: "Plan", Kind: fixturechange.Update, ID: id,
+			Key: fixturechange.Values{"name": fixturechange.Lit(from)},
+			Old: fixturechange.Values{"name": fixturechange.Lit(from)},
+			New: fixturechange.Values{"name": fixturechange.Lit(to)}}
+	}
+	set := fixturechange.Set{Name: "swap", Tables: tables(), Changes: []fixturechange.Change{
+		{Model: "Feature", Kind: fixturechange.Delete,
+			Key: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "free"), "code": fixturechange.Lit("api")},
+			Old: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "free"), "code": fixturechange.Lit("api"),
+				"quota": fixturechange.Lit("100")}},
+		rename("1", "free", "starter"),
+		rename("2", "team", "free"),
+		{Model: "Feature", Kind: fixturechange.Insert,
+			Key: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "free"), "code": fixturechange.Lit("sso")},
+			New: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "free"), "code": fixturechange.Lit("sso"),
+				"quota": fixturechange.Lit("1")}},
+	}}
+	if _, err := applyReporting(t, db, set); err != nil {
+		t.Fatal(err)
+	}
+	if got := scan[string](t, db, "SELECT p.name FROM features f JOIN plans p ON p.id = f.plan_id WHERE f.code = 'sso'"); got != "free" {
+		t.Fatalf("the feature of free points at %s", got)
+	}
+}
+
 // A set that deletes a plan and the feature pointing at it, run a second time,
 // finds the feature's key referring to the plan it deleted the first time:
 // that is the set's own work, already done, and not a row it cannot find. The
