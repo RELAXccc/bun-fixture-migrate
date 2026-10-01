@@ -340,3 +340,113 @@ func TestReviewAModelWithoutABlockHasNoRows(t *testing.T) {
 		t.Fatalf("the sync left %q, a seed holds %q", got, want)
 	}
 }
+
+type RvCountry struct {
+	bun.BaseModel `bun:"table:rv_countries"`
+	ID            int64  `bun:"id,pk"`
+	Code          string `bun:"code,notnull"`
+	Name          string `bun:"name,notnull"`
+}
+
+type RvCity struct {
+	bun.BaseModel `bun:"table:rv_cities"`
+	ID            int64  `bun:"id,pk"`
+	Name          string `bun:"name,notnull"`
+	CountryID     int64  `bun:"country_id,notnull"`
+}
+
+type RvTag struct {
+	bun.BaseModel `bun:"table:rv_tags"`
+	ID            int64  `bun:"id,pk"`
+	Name          string `bun:"name,notnull"`
+	Slug          string `bun:"slug,notnull"`
+}
+
+// A country keyed by its code changes the name references find it by. The
+// city pointing at it needs no change of its own; before, it got one that
+// waited for the country while the country waited for it, and that circle
+// switched off the ordering by unique values for the whole set, so the tags
+// trading slugs in the same release failed on their unique index.
+func TestReviewARefValueChangeLeavesTheUniqueOrderingAlone(t *testing.T) {
+	l := newLab(t, map[string]*fixturemigrate.Model{
+		"RvCountry": {Table: "rv_countries", Key: []string{"code"}, Ref: "name"},
+		"RvCity":    {Table: "rv_cities", Key: []string{"name"}, References: map[string]string{"country_id": "RvCountry"}},
+		"RvTag":     {Table: "rv_tags", Key: []string{"name"}},
+	}, "rv_countries",
+		[]string{"DROP TABLE IF EXISTS rv_cities", "DROP TABLE IF EXISTS rv_countries", "DROP TABLE IF EXISTS rv_tags",
+			"CREATE TABLE rv_countries (id bigint PRIMARY KEY, code text NOT NULL UNIQUE, name text NOT NULL UNIQUE)",
+			"CREATE TABLE rv_cities (id bigint PRIMARY KEY, name text NOT NULL UNIQUE, country_id bigint NOT NULL REFERENCES rv_countries)",
+			"CREATE TABLE rv_tags (id bigint PRIMARY KEY, name text NOT NULL UNIQUE, slug text NOT NULL UNIQUE)"},
+		`SELECT (SELECT string_agg(concat_ws('|', name, slug), ',' ORDER BY name) FROM rv_tags) || ' / ' ||
+			(SELECT string_agg(concat_ws('|', ci.name, co.code, co.name), ',' ORDER BY ci.name)
+			 FROM rv_cities ci JOIN rv_countries co ON co.id = ci.country_id)`,
+		(*RvCountry)(nil), (*RvCity)(nil), (*RvTag)(nil))
+	v1 := `- model: RvCountry
+  rows:
+    - {_id: de, id: 1, code: DE, name: Germany}
+- model: RvCity
+  rows:
+    - {id: 1, name: Berlin, country_id: '{{ $.RvCountry.de.ID }}'}
+- model: RvTag
+  rows:
+    - {id: 1, name: t1, slug: a}
+    - {id: 2, name: t2, slug: b}
+`
+	v2 := strings.NewReplacer("name: Germany", "name: Deutschland", "slug: b", "slug: c", "slug: a", "slug: b").Replace(v1)
+	for _, renames := range []fixturemigrate.RenamePolicy{fixturemigrate.RenameRefuse, fixturemigrate.RenameUpdate} {
+		l.cfg.Policy.Renames = renames
+		l.fidelity(v1, v2)
+	}
+	res, err := fixturemigrate.Compute(l.cfg, fixtureSnapshot(t, l.cfg, v1, "old"), fixtureSnapshot(t, l.cfg, v2, "new"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range res.Changes {
+		if c.Model == "RvCity" {
+			t.Fatalf("the city does not change: %+v", res.Changes)
+		}
+	}
+}
+
+type RvItem struct {
+	bun.BaseModel `bun:"table:rv_items"`
+	ID            int64  `bun:"id,pk"`
+	Name          string `bun:"name,notnull"`
+	Cat           string `bun:"cat,notnull"`
+	Pos           int64  `bun:"pos,notnull"`
+}
+
+// An item put at the top of a list kept in order by UNIQUE (cat, pos): the
+// others move down first, the last one first. Before, only a unique index of
+// one column ordered the changes, and this failed on the index.
+func TestReviewACompositeUniqueIndexOrdersTheChanges(t *testing.T) {
+	l := newLab(t, map[string]*fixturemigrate.Model{"RvItem": {Table: "rv_items", Key: []string{"name"}}}, "rv_items",
+		[]string{"DROP TABLE IF EXISTS rv_items", "CREATE TABLE rv_items (id bigint PRIMARY KEY, name text NOT NULL UNIQUE, " +
+			"cat text NOT NULL, pos bigint NOT NULL, UNIQUE (cat, pos))"},
+		`SELECT string_agg(concat_ws('|', name, cat, pos), E'\n' ORDER BY name) FROM rv_items`, (*RvItem)(nil))
+	v1 := "- model: RvItem\n  rows:\n    - {id: 1, name: a, cat: x, pos: 1}\n    - {id: 2, name: b, cat: x, pos: 2}\n" +
+		"    - {id: 3, name: c, cat: x, pos: 3}\n    - {id: 5, name: q, cat: y, pos: 1}\n"
+	v2 := "- model: RvItem\n  rows:\n    - {id: 1, name: a, cat: x, pos: 2}\n    - {id: 2, name: b, cat: x, pos: 3}\n" +
+		"    - {id: 3, name: c, cat: x, pos: 4}\n    - {id: 4, name: z, cat: x, pos: 1}\n    - {id: 5, name: q, cat: y, pos: 1}\n"
+	l.fidelity(v1, v2)
+}
+
+// Without the database, which column is unique is a guess, and two guesses
+// that order the changes in opposite ways both give way, with a warning that
+// the database decides. With the catalog read, the real index orders them.
+func TestReviewGuessedUniquesGiveWayToTheCatalog(t *testing.T) {
+	l := newLab(t, map[string]*fixturemigrate.Model{"RvItem": {Table: "rv_items", Key: []string{"name"}}}, "rv_items",
+		[]string{"DROP TABLE IF EXISTS rv_items", "CREATE TABLE rv_items (id bigint PRIMARY KEY, name text NOT NULL UNIQUE, " +
+			"cat text NOT NULL, pos bigint NOT NULL UNIQUE)"},
+		`SELECT string_agg(concat_ws('|', name, cat, pos), E'\n' ORDER BY name) FROM rv_items`, (*RvItem)(nil))
+	v1 := "- model: RvItem\n  rows:\n    - {id: 1, name: r1, cat: a, pos: 0}\n    - {id: 2, name: r2, cat: c, pos: 1}\n"
+	v2 := "- model: RvItem\n  rows:\n    - {id: 1, name: r1, cat: b, pos: 1}\n    - {id: 2, name: r2, cat: a, pos: 2}\n"
+	res, err := fixturemigrate.Compute(l.cfg, fixtureSnapshot(t, l.cfg, v1, "old"), fixtureSnapshot(t, l.cfg, v2, "new"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0].Reason, "run generate with the database configured") {
+		t.Fatalf("expected a warning that the database decides, got %+v", res.Warnings)
+	}
+	l.fidelity(v1, v2)
+}

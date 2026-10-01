@@ -103,25 +103,22 @@ type Snapshot struct {
 	// not zero. They are reported, never worked around.
 	Findings []Finding
 
-	// unique holds, per model, the columns a unique index of their own
-	// covers, once the catalog has been read for the snapshot (by
+	// unique holds, per model, the columns of each unique index of its
+	// table, once the catalog has been read for the snapshot (by
 	// DatabaseSnapshot or Canonicalize); nil while nobody has looked.
-	unique map[string]map[string]bool
+	unique map[string][][]string
 }
 
-// noteUniques records which columns of a model's table have a unique index of
-// their own.
+// noteUniques records the unique indexes of a model's table.
 func (s *Snapshot) noteUniques(model string, table *dbschema.Table) {
 	if s.unique == nil {
-		s.unique = map[string]map[string]bool{}
+		s.unique = map[string][][]string{}
 	}
-	cols := map[string]bool{}
+	indexes := make([][]string, 0, len(table.Uniques))
 	for _, index := range table.Uniques {
-		if len(index) == 1 {
-			cols[index[0]] = true
-		}
+		indexes = append(indexes, append([]string(nil), index...))
 	}
-	s.unique[model] = cols
+	s.unique[model] = indexes
 }
 
 // clone copies a snapshot deeply enough that rewriting an entry in it cannot
