@@ -143,7 +143,9 @@ Each was reproduced before it went into this table.
 | NEL, DEL, the C1 range, U+FFFE in exported text | NEL folded into a space, the rest unparseable | broken export | escaped; every export is parsed back before it is written | done |
 | `NaN`, `Infinity`, timestamp `infinity`, `jsonb` strings and null, `Hello {{ name }}` in an export | written so dbfixture could not load them, or refused needlessly | broken export | YAML's spellings, a string-literal template, or a refusal with the reason | done |
 | `{"a": 1.0}` in `jsonb`, written by SQL | compared as text with the file's `1` | phantom drift | numbers canonical on both sides | done |
-| a 2-D array; an array numbered from 0 | an invalid value after export; `[0:1]={7,8}` exported as `[7, 8]` | broken export, **silent corruption** | the array literal built from nested JSON; another lower bound refused | done |
+| a 2-D array; an array numbered from 0 | an invalid value after export; `[0:1]={7,8}` exported as `[7, 8]` | broken export, **silent corruption** | the array literal built from nested JSON; another lower bound refused | done, and see below |
+| a 2-D array in a file or an export | bun cannot write a nested slice into an array column, so `dbfixture` fails to load the sequence of sequences the tool read and exported | broken export, unloadable file | an `invalid value` in a file, an export refused with the reason | done |
+| an array holding a NULL, exported under `array_nulls: refuse` | written as `[1, null, 3]`, which the tool then refused to read and a `[]int64` field loads as `{1,3}` | broken export | the export refused unless `array_nulls: keep` | done |
 | a table `CHECK` the new value violates | generate wrote it, the deploy failed | failed deploy | a single-column `CHECK` is an `invalid value`; others `plan` reports | done |
 | `1.5` in an integer column | dbfixture stores 1 | phantom drift | an `invalid value` saying so | done |
 | a view named as a model's table | "not a table" | misleading | says it is a view, and that only tables hold master data | done |

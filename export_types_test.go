@@ -42,7 +42,8 @@ func TestExportLiteral(t *testing.T) {
 		{col("text"), "yes", `"yes"`, "", ""},
 		{col("text"), "Hello {{ name }}", `"{{ \"Hello {{ name }}\" }}"`, "", ""},
 		{col("uuid"), "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", `"a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"`, "", ""},
-		{arr, "[[1, 2], [3, 4]]", "[[1, 2], [3, 4]]", "", ""},
+		{arr, "[[1, 2], [3, 4]]", "", "", "more than one dimension, which a fixture file can only write as a sequence of sequences"},
+		{dbschema.Column{Type: "_jsonb", Category: "A", ElemType: "jsonb"}, `[[1, 2], {"a": 1}]`, `[[1, 2], {"a": 1}]`, "", ""},
 		{arr, "[0:1]={7,8}", "", "", "lower bound is not 1"},
 		{arr, `["NaN", 1]`, "", "", "NaN or Infinity"},
 		{dbschema.Column{Type: "_text", Category: "A", ElemType: "text", ElemCategory: "S"}, "[\"a\u2028b\"]",
@@ -201,5 +202,40 @@ func TestExportOfANullJSONColumn(t *testing.T) {
 	}
 	if got := hazardComment(fixturechange.Null(), jsonb); !strings.Contains(got, "a map, slice or any field loads ~ as the JSON null") {
 		t.Fatal(got)
+	}
+}
+
+// An array holding a NULL is written with a null in the sequence, which a
+// []string or []int64 field leaves out: under array_nulls: refuse the export
+// is refused, as reading such a file back would be.
+func TestExportRefusesANullElementUnlessTheModelKeepsIt(t *testing.T) {
+	cfg := testConfig(t)
+	arr := dbschema.Column{Name: "tags", Type: "_text", Category: "A", ElemType: "text", ElemCategory: "S"}
+	for _, lit := range []string{`["a", null]`, `[["a"], [null]]`} {
+		if _, _, err := exportValue(cfg, "Plan", "tags", fixturechange.Lit(lit), arr, nil); err == nil ||
+			!strings.Contains(err.Error(), "an array with a NULL element") || !strings.Contains(err.Error(), "array_nulls: keep") {
+			t.Errorf("%s: %v", lit, err)
+		}
+	}
+	cfg.Models["Plan"].ArrayNulls = ArrayNullsKeep
+	if got, _, err := exportValue(cfg, "Plan", "tags", fixturechange.Lit(`["a", null]`), arr, nil); err != nil || got != `["a", null]` {
+		t.Errorf("kept: %q %v", got, err)
+	}
+	// A null inside an object of a jsonb[] is no NULL element.
+	jarr := dbschema.Column{Name: "docs", Type: "_jsonb", Category: "A", ElemType: "jsonb"}
+	cfg.Models["Plan"].ArrayNulls = ""
+	if _, _, err := exportValue(cfg, "Plan", "docs", fixturechange.Lit(`[{"a": null}]`), jarr, nil); err != nil {
+		t.Errorf("an object's null: %v", err)
+	}
+}
+
+// What an export holds is parsed back as dbfixture reads it, and a sequence of
+// sequences in an array column is no value dbfixture loads.
+func TestVerifyExportRefusesASequenceOfSequencesInAnArrayColumn(t *testing.T) {
+	arr := dbschema.Column{Name: "grid", Type: "_int4", Category: "A", ElemType: "int4", ElemCategory: "N"}
+	data := []byte("- model: M\n  rows:\n    - grid: [[1, 2], [3, 4]]\n")
+	rows := []writtenRow{{model: "M", cells: map[string]writtenCell{"grid": {value: fixturechange.Lit("[[1, 2], [3, 4]]"), column: arr}}}}
+	if err := verifyExport(data, rows); err == nil || !strings.Contains(err.Error(), "is a sequence of sequences") {
+		t.Fatalf("got %v", err)
 	}
 }

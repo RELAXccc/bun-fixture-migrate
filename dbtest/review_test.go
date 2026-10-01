@@ -207,3 +207,25 @@ func TestReviewAPrimaryKeyThatIsAReference(t *testing.T) {
 		plans+"    - {plan_id: '{{ $.RvPlan.basic.ID }}', max_users: 6}\n    - {plan_id: '{{ $.RvPlan.pro.ID }}', max_users: 50}\n")
 	l.roundTrip()
 }
+
+type RvArr struct {
+	bun.BaseModel `bun:"table:rv_arr"`
+	ID            int64   `bun:"id,pk"`
+	Name          string  `bun:"name,notnull"`
+	Nums          []int64 `bun:"nums,array"`
+}
+
+// An array holding a NULL was exported with a null in the sequence, which the
+// tool then refused to read back and an []int64 field loads without it. The
+// export is refused now, unless the model says its array fields keep a null.
+func TestReviewAnExportOfAnArrayHoldingANull(t *testing.T) {
+	l := newLab(t, map[string]*fixturemigrate.Model{"RvArr": {Table: "rv_arr", Key: []string{"name"}}}, "rv_arr",
+		[]string{"DROP TABLE IF EXISTS rv_arr", "CREATE TABLE rv_arr (id bigint PRIMARY KEY, name text NOT NULL UNIQUE, nums bigint[])"},
+		`SELECT string_agg(concat_ws('|', name, nums::text), E'\n' ORDER BY name) FROM rv_arr`, (*RvArr)(nil))
+	run(t, l.db, "INSERT INTO rv_arr VALUES (1, 'a', '{1,NULL,3}')")
+	if _, err := l.export(); err == nil || !strings.Contains(err.Error(), "RvArr.nums holds [1, null, 3], an array with a NULL element") {
+		t.Fatalf("expected the export to be refused, got %v", err)
+	}
+	run(t, l.db, "UPDATE rv_arr SET nums = '{1,3}'")
+	l.roundTrip()
+}

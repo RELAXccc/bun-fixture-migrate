@@ -69,7 +69,7 @@ as written, and any other field the value it resolves to:
 | `~`, `null` | NULL (and see `null_default`) | NULL; in `json` and `jsonb` [a finding](#json-and-jsonb) |
 | `!!binary SGk=` | the text it encodes, `Hi` | the text it encodes |
 | `1.5` in an integer column | | a finding: an integer field holds `1`, a string field is refused |
-| a mapping `{sso: true}` or a sequence | | in `json` or `jsonb` the JSON document; in an array column the array, nested for a multidimensional one; in `bytea` the bytes of a sequence of byte values, the only YAML a `[]byte` field loads |
+| a mapping `{sso: true}` or a sequence | | in `json` or `jsonb` the JSON document; in an array column the array, and a sequence of sequences an `invalid value`, because bun cannot write a nested slice into an array column and `dbfixture` fails to load it; in `bytea` the bytes of a sequence of byte values, the only YAML a `[]byte` field loads |
 | an alias `*name` | the value it names | the value it names |
 
 A null inside a sequence, `[a, ~, b]`, is left out by a `[]string` or `[]int64` field and kept by a
@@ -188,8 +188,11 @@ and held against the database before anything is written, and a difference fails
   refused: no spelling reads back as itself. A model with `defaults: {settings: 'null'}` gets its JSON
   nulls left out of the rows instead, which is what a map field leaves there. SQL NULL is `~`,
   refused unless `policy.null_default` is `warn`, because a map field loads `~` as the JSON null.
-- Arrays as sequences, a multidimensional one as nested sequences. An array whose lower bound is not
-  1, `[0:1]={7,8}`, is refused.
+- Arrays as sequences. An array of more than one dimension is refused: a file can only write it as a
+  sequence of sequences, which `dbfixture` fails to load, because bun cannot write a nested slice into
+  an array column; put the column in `ignore`. So is an array whose lower bound is not 1,
+  `[0:1]={7,8}`, and, unless the model's `array_nulls` is `keep`, an array holding a NULL element,
+  which a `[]string` or `[]int64` field would load without it.
 - Text double-quoted, everything YAML would refuse or fold escaped: control characters, DEL, the C1
   range, NEL, U+2028 and U+2029, U+FFFE. Text that `dbfixture` would evaluate as a template,
   `Hello {{ name }}`, is written as a template whose only action is that text as a string literal,

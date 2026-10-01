@@ -315,6 +315,8 @@ func (w writtenCell) check(cell Cell) error {
 		}
 	case cell.IsNull:
 		return fmt.Errorf("reads back as null, not %q", w.value.Lit)
+	case cell.Structured && w.column.Category == "A" && !isJSONElem(w.column) && nestedArray(cell.Text):
+		return fmt.Errorf("is a sequence of sequences, and %s", multidimensionalReason)
 	default:
 		got, want := exportedReading(w.column, cell), databaseReading(w.column, w.value.Lit)
 		if got != want {
@@ -546,8 +548,57 @@ func exportValue(cfg *Config, model, col string, v fixturechange.Value, column d
 		}
 		return fmt.Sprintf("'{{ $.%s.%s.%s }}'", v.Ref.Model, anchor, camel(target.ID)), "", nil
 	}
+	if column.Category == "A" && cfg.arrayNulls(cfg.Models[model]) != ArrayNullsKeep && jsonNullElement(v.Lit) {
+		return "", "", fmt.Errorf("%s.%s holds %s, an array with a NULL element, which a YAML sequence writes as "+
+			"null and a []string or []int64 field leaves out, so the file would read as something else and not "+
+			"load as this: set array_nulls: keep on the model if its array fields keep a null, as a []*string "+
+			"does, or put %s in ignore", model, col, v.Lit, col)
+	}
 	return exportLiteral(model, col, v.Lit, column)
 }
+
+// jsonNullElement reports a JSON array holding a null, or holding an array
+// that does, as an array column holds a NULL element.
+func jsonNullElement(text string) bool {
+	var v any
+	if err := json.Unmarshal([]byte(text), &v); err != nil {
+		return false
+	}
+	var holds func(v any) bool
+	holds = func(v any) bool {
+		elems, ok := v.([]any)
+		if !ok {
+			return false
+		}
+		for _, e := range elems {
+			if e == nil || holds(e) {
+				return true
+			}
+		}
+		return false
+	}
+	return holds(v)
+}
+
+// nestedArray reports a JSON array that holds an array, which is how an
+// array of more than one dimension is read.
+func nestedArray(text string) bool {
+	var elems []any
+	if err := json.Unmarshal([]byte(text), &elems); err != nil {
+		return false
+	}
+	for _, e := range elems {
+		if _, ok := e.([]any); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// multidimensionalReason is why an array of more than one dimension is no
+// value of a fixture file, which can only write it as a sequence of
+// sequences: bun v1.2.18 writes a nested slice as text PostgreSQL refuses.
+const multidimensionalReason = "bun cannot write a nested slice into an array column, so dbfixture fails to load it"
 
 // exportLiteral writes a value the way the column's type reads back as the
 // same value through the Go field a bun model has for that type -- an int64,
@@ -567,6 +618,10 @@ func exportLiteral(model, col, lit string, column dbschema.Column) (string, stri
 		if !jsonArray(lit) {
 			return refuse("an array whose lower bound is not 1, which no YAML sequence loads as: " +
 				"renumber it from 1 in the database, or ignore the column")
+		}
+		if !isJSONElem(column) && nestedArray(lit) {
+			return refuse("an array of more than one dimension, which a fixture file can only write as a sequence " +
+				"of sequences, and " + multidimensionalReason + ": put the column in ignore")
 		}
 		if column.ElemCategory == "N" && strings.Contains(lit, `"`) {
 			return refuse("an array of numbers with NaN or Infinity in it, which a YAML sequence " +

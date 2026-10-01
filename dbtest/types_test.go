@@ -801,14 +801,26 @@ func TestTypesSpecialNumbersExport(t *testing.T) {
 type TyGrid struct {
 	bun.BaseModel `bun:"table:ty_grid"`
 
-	ID   int64  `bun:"id,pk"`
-	Name string `bun:"name,notnull"`
+	ID    int64     `bun:"id,pk"`
+	Name  string    `bun:"name,notnull"`
+	Grid  []*int64  `bun:"grid,array"`
+	Words []*string `bun:"words,array"`
 }
 
-// A multidimensional array written by SQL is exported as nested sequences and
-// read back as the array it was; one whose lower bound is not 1 has no YAML
-// spelling and is refused. Before, the nested sequence came back as an
-// invalid value, and [0:1]={7,8} was exported as [7, 8].
+type TyGrid2 struct {
+	bun.BaseModel `bun:"table:ty_grid"`
+
+	ID   int64     `bun:"id,pk"`
+	Name string    `bun:"name,notnull"`
+	Grid [][]int64 `bun:"grid,array"`
+}
+
+// A multidimensional array has no spelling a fixture file loads: dbfixture
+// hands bun a nested slice, which bun writes as text PostgreSQL refuses. Its
+// export is refused with the reason, and a sequence of sequences read from a
+// file is an invalid value. One whose lower bound is not 1 has no YAML
+// spelling either. Before, both were exported, the nested sequence as a file
+// dbfixture could not load and [0:1]={7,8} as [7, 8].
 func TestTypesMultidimensionalArrays(t *testing.T) {
 	// The table holds NULL elements, which only an array field of pointers
 	// or sql.Null values keeps.
@@ -817,16 +829,23 @@ func TestTypesMultidimensionalArrays(t *testing.T) {
 		[]string{"DROP TABLE IF EXISTS ty_grid",
 			"CREATE TABLE ty_grid (id bigint PRIMARY KEY, name text NOT NULL UNIQUE, grid integer[], words text[])"},
 		`SELECT string_agg(concat_ws('|', name, grid, words), E'\n' ORDER BY name) FROM ty_grid`, (*TyGrid)(nil))
+	nested := "- model: TyGrid2\n  rows:\n    - {id: 1, name: g, grid: [[1, 2], [3, 4]]}\n"
+	other := connect(t)
+	other.RegisterModel((*TyGrid2)(nil))
+	if err := seedErr(other, nested); err == nil {
+		t.Fatal("dbfixture loads a sequence of sequences into an array column now: export and read them again")
+	}
+	l.refused(strings.Replace(nested, "TyGrid2", "TyGrid", 1), "is a sequence of sequences, an array of more than one dimension")
+
 	run(t, l.db, `INSERT INTO ty_grid VALUES (1, 'g', '{{1,2},{3,4}}', '{{a,"b c"},{NULL,"{d}"}}'),
 		(2, 'cube', '{{{1},{2}},{{3},{4}}}', '{}'), (3, 'flat', '{1,NULL}', '{x}')`)
-	data, err := l.export()
-	if err != nil {
-		t.Fatal(err)
+	if _, err := l.export(); err == nil || !strings.Contains(err.Error(), "more than one dimension") {
+		t.Fatalf("a multidimensional array is refused: %v", err)
 	}
-	if !strings.Contains(string(data), "grid: [[1, 2], [3, 4]]") || !strings.Contains(string(data), `words: [["a", "b c"], [null, "{d}"]]`) {
-		t.Fatalf("a 2-D array is a nested sequence:\n%s", data)
+	run(t, l.db, `DELETE FROM ty_grid WHERE name <> 'flat'`)
+	if data := l.roundTrip(); !strings.Contains(data, "grid: [1, null]") {
+		t.Fatalf("a NULL element is a null:\n%s", data)
 	}
-	l.check(string(data))
 
 	run(t, l.db, `INSERT INTO ty_grid VALUES (4, 'lb', '[0:1]={7,8}', '{}')`)
 	if _, err := l.export(); err == nil || !strings.Contains(err.Error(), "lower bound is not 1") {
@@ -834,7 +853,8 @@ func TestTypesMultidimensionalArrays(t *testing.T) {
 	}
 	// The file and the database disagree about it, as they should: a seed
 	// of [7, 8] is numbered from 1.
-	head := l.read(string(data) + "    - {id: 4, name: lb, grid: [7, 8], words: []}\n")
+	head := l.read("- model: TyGrid\n  rows:\n    - {id: 3, name: flat, grid: [1, null], words: [x]}\n" +
+		"    - {id: 4, name: lb, grid: [7, 8], words: []}\n")
 	readOnlyDo(t, l.db, func(tx bun.Tx, tables map[string]*dbschema.Table) {
 		database, err := fixturemigrate.DatabaseSnapshot(context.Background(), tx, l.cfg, tables,
 			fixturemigrate.SnapshotOptions{Columns: head.Columns, Order: head.Order})

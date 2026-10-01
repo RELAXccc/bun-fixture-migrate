@@ -387,7 +387,11 @@ func castValues(ctx context.Context, db bun.IDB, column dbschema.Column,
 func castInput(c dbschema.Column, v string) (string, string) {
 	switch {
 	case c.Category == "A" && jsonArray(v):
-		lit, err := arrayLiteral(v, c.ElemType == "json" || c.ElemType == "jsonb")
+		if !isJSONElem(c) && nestedArray(v) {
+			return "", "which is a sequence of sequences, an array of more than one dimension, and " +
+				multidimensionalReason + ": keep the column out of the file and put it in ignore"
+		}
+		lit, err := arrayLiteral(v, isJSONElem(c))
 		if err != nil {
 			return "", "which is not an array the column's type can hold: " + err.Error()
 		}
@@ -687,6 +691,12 @@ func byteaOf(v string) (string, string) {
 // isJSON reports a json or jsonb column.
 func isJSON(c dbschema.Column) bool {
 	return c.Type == "json" || c.Type == "jsonb"
+}
+
+// isJSONElem reports an array of json or jsonb, whose nested arrays are
+// elements, not dimensions.
+func isJSONElem(c dbschema.Column) bool {
+	return c.Category == "A" && (c.ElemType == "json" || c.ElemType == "jsonb")
 }
 
 // dateTime reports a column of dates or times, or an array of them: the
