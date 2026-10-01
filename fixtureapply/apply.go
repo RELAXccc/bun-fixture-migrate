@@ -349,8 +349,9 @@ func withLockTimeout(ctx context.Context, tx bun.IDB, timeout string,
 // that does not hold fails the set like any other change, inside its
 // transaction, so bun's record is taken back as usual. A constraint that is
 // not DEFERRABLE is checked as it always is. Inside a caller's transaction the
-// constraints are immediate afterwards, which also checks whatever the caller
-// had left deferred.
+// check also covers whatever the caller had left deferred, and afterwards
+// every constraint is back in the mode it is declared with; see
+// deferredByDefault.
 func withDeferredConstraints(ctx context.Context, tx bun.IDB, set fixturechange.Set,
 	restore func(context.Context) error) (func(context.Context) error, error) {
 
@@ -359,11 +360,63 @@ func withDeferredConstraints(ctx context.Context, tx bun.IDB, set fixturechange.
 	}
 	return func(ctx context.Context) error {
 		if _, err := tx.ExecContext(ctx, "SET CONSTRAINTS ALL IMMEDIATE"); err != nil {
+			// A foreign key's check locks the row it points at, and waits
+			// for a session that holds it like any statement of the set.
+			if pgerr.State(err) == pgerr.LockNotAvailable {
+				limit := "the session's lock_timeout"
+				if set.LockTimeout != "" {
+					limit = "the lock timeout of " + set.LockTimeout
+				}
+				out := Outcome{Set: set.Name, Index: -1, Status: StatusFailed, Problem: ProblemLockTimeout,
+					Message: fmt.Sprintf("once every change was made, checking the constraints PostgreSQL defers "+
+						"waited for a lock another session held for longer than %s, so nothing was changed; the "+
+						"change set runs again on the next deploy", limit)}
+				return &ChangeError{Outcome: out, err: fmt.Errorf("%s: %w", out.Message, err)}
+			}
 			return fmt.Errorf("%s: once every change was made, a constraint did not hold, so nothing was "+
 				"changed: %w", set.Name, privilege(err))
 		}
+		if err := deferredByDefault(ctx, tx); err != nil {
+			return err
+		}
 		return restore(ctx)
 	}, nil
+}
+
+// deferredByDefault puts every constraint declared DEFERRABLE INITIALLY
+// DEFERRED back to deferred, after the check at the end of a change set made
+// them all immediate. Inside a caller's transaction -- plan simulating a deploy,
+// a test, a program of its own -- a later statement relying on such a
+// constraint, a child row inserted before its parent, would otherwise fail
+// where the deploy, which commits each migration, succeeds.
+//
+// PostgreSQL does not say which mode a caller had set a constraint to, so it
+// gets the mode it is declared with. SET CONSTRAINTS finds a constraint by its
+// name in its schema, and takes every constraint of that name there: a name
+// that one constraint declared INITIALLY DEFERRED shares with another that is
+// not is left immediate rather than defer the other one too.
+func deferredByDefault(ctx context.Context, tx bun.IDB) error {
+	var names string
+	if err := tx.QueryRowContext(ctx, `
+SELECT coalesce(string_agg(quote_ident(n.nspname) || '.' || quote_ident(c.conname), ', '
+                           ORDER BY n.nspname, c.conname), '')
+FROM (SELECT DISTINCT connamespace, conname FROM pg_constraint WHERE condeferrable AND condeferred) c
+JOIN pg_namespace n ON n.oid = c.connamespace
+WHERE NOT pg_is_other_temp_schema(n.oid)
+  AND NOT EXISTS (SELECT 1 FROM pg_constraint o
+                  WHERE o.connamespace = c.connamespace AND o.conname = c.conname AND NOT o.condeferred)`).
+		Scan(&names); err != nil {
+		return fmt.Errorf("read the constraints declared INITIALLY DEFERRED: %w", err)
+	}
+	if names == "" {
+		return nil
+	}
+	// The names come from the catalog, quoted, and may hold a ? that bun
+	// would read as a placeholder in the text of the statement.
+	if _, err := tx.ExecContext(ctx, "SET CONSTRAINTS ? DEFERRED", bun.Safe(names)); err != nil {
+		return fmt.Errorf("defer the constraints declared INITIALLY DEFERRED again: %w", err)
+	}
+	return nil
 }
 
 // problem names the three materially different reasons a guarded statement

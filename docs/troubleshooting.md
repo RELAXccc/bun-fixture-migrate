@@ -290,6 +290,7 @@ Messages a generated migration returns through bun's migrator:
 | `2 rows of features point at plans name=pro through ...` | referenced | [a migration failed](production.md#a-fixture-migration-failed-during-a-deploy) |
 | `rows of plans hold name=team` | duplicate key: more than one row has the natural key, none is touched | remove the extra rows and add a unique index on the key |
 | `held a lock on a row of plans for longer than the lock timeout` | lock timeout: nothing was changed | the next deploy runs it again; find the long transaction |
+| `checking the constraints PostgreSQL defers waited for a lock another session held` | lock timeout, while the `DEFERRABLE` constraints were checked at the end of the set: a foreign key's check locks the row it points at | the next deploy runs it again; find the long transaction |
 | `does not hold the model's where` | error: the row a change writes would not be master data | the fixture row and the model's `where` disagree; fix one |
 | `once every change was made, a constraint did not hold` | error: a `DEFERRABLE` constraint, checked when the set is done | the set leaves a foreign key or unique key broken; [plan](production.md#a-fixture-migration-failed-during-a-deploy) shows the changes |
 | `is a bytea column` | error: a list of numbers for binary data | write the bytes as `\x` and hex digits |
