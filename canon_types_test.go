@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
 )
@@ -97,6 +98,55 @@ func TestValueError(t *testing.T) {
 	}
 	if got := valueMessage(stateErr("22P02")); got != "boom" {
 		t.Fatalf("pgx's decoration is stripped: %q", got)
+	}
+}
+
+// The time.Time yaml.v3 decodes a value into, when it can.
+func TestGoTime(t *testing.T) {
+	for _, tc := range []struct {
+		text     string
+		resolved bool
+		want     string
+		ok       bool
+	}{
+		{"2026-01-01", false, "2026-01-01T00:00:00Z", true},
+		{"2026-01-01T10:00:00+02:00", false, "2026-01-01T08:00:00Z", true},
+		{"2026-01-01 10:00:00", false, "", false},
+		{"2026-01-01T10:00:00.1234567Z", true, "2026-01-01T10:00:00.1234567Z", true},
+		{"10:00", false, "", false},
+		{"infinity", false, "", false},
+	} {
+		got, ok := goTime(tc.text, tc.resolved)
+		if ok != tc.ok || (ok && got.UTC().Format(time.RFC3339Nano) != tc.want) {
+			t.Errorf("%q: %v %v, want %q %v", tc.text, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+func TestIsoExample(t *testing.T) {
+	tz := dbschema.Column{Type: "timestamptz"}
+	if got := isoExample(tz, "2026-01-01 10:00:00.5+00"); got != "2026-01-01T10:00:00.5Z" {
+		t.Fatal(got)
+	}
+	if got := isoExample(dbschema.Column{Type: "timetz"}, "10:00:00+00"); got != "10:00:00+00" {
+		t.Fatal(got)
+	}
+}
+
+func TestDateTime(t *testing.T) {
+	for _, tc := range []struct {
+		col  dbschema.Column
+		want bool
+	}{
+		{dbschema.Column{Type: "timestamptz"}, true},
+		{dbschema.Column{Type: "date", Domain: "day"}, true},
+		{dbschema.Column{Type: "_timetz", Category: "A", ElemType: "timetz"}, true},
+		{dbschema.Column{Type: "interval"}, false},
+		{dbschema.Column{Type: "text"}, false},
+	} {
+		if got := dateTime(tc.col); got != tc.want {
+			t.Errorf("%+v: %v", tc.col, got)
+		}
 	}
 }
 

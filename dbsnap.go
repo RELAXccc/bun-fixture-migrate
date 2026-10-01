@@ -116,6 +116,9 @@ func DatabaseSnapshot(ctx context.Context, db bun.IDB, cfg *Config, tables map[s
 		snap.reportDuplicates(model)
 	}
 	reportDuplicateRefs(cfg, snap)
+	if err := reportEqualKeys(ctx, db, cfg, snap, tables); err != nil {
+		return nil, err
+	}
 	return snap, nil
 }
 

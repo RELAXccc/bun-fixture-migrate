@@ -16,6 +16,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
 	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
@@ -407,6 +408,146 @@ func TestTypesEveryCastErrorIsAFinding(t *testing.T) {
 		`hs is "{\"k\":\"v\"}", which the column's type, hstore, cannot hold`)
 }
 
+type TyTime struct {
+	bun.BaseModel `bun:"table:ty_time_t"`
+
+	ID   int64     `bun:"id,pk"`
+	Name string    `bun:"name,notnull"`
+	Ts   time.Time `bun:"ts,nullzero"`
+	Tstz time.Time `bun:"tstz,nullzero"`
+	D    time.Time `bun:"d,type:date,nullzero"`
+}
+
+type TyTimeStr struct {
+	bun.BaseModel `bun:"table:ty_time_s"`
+
+	ID   int64  `bun:"id,pk"`
+	Name string `bun:"name,notnull"`
+	Ts   string `bun:"ts,type:timestamp,nullzero"`
+	Tstz string `bun:"tstz,type:timestamptz,nullzero"`
+	D    string `bun:"d,type:date,nullzero"`
+	T    string `bun:"t,type:time,nullzero"`
+	Ttz  string `bun:"ttz,type:timetz,nullzero"`
+}
+
+// A date or a time is accepted when every model that can load it stores the
+// same value, in any session: a time.Time field, written by bun in UTC and
+// cut to microseconds, and a string field, read by PostgreSQL in the seeding
+// session. When they differ, or the session decides, it is a finding with the
+// two values. Before, the tool took one reading, and a fresh seed drifted
+// from its own file, or a migration wrote another instant than the seed.
+func TestTypesTimestampSpellings(t *testing.T) {
+	create := func(table string) string {
+		return "CREATE TABLE " + table + ` (id bigint PRIMARY KEY, name text NOT NULL UNIQUE,
+			ts timestamp, tstz timestamptz, d date, t time, ttz timetz)`
+	}
+	defaults := map[string]string{"ts": fixturemigrate.NullDefault, "tstz": fixturemigrate.NullDefault,
+		"d": fixturemigrate.NullDefault, "t": fixturemigrate.NullDefault, "ttz": fixturemigrate.NullDefault}
+	l := newLab(t, map[string]*fixturemigrate.Model{
+		"TyTime":    {Table: "ty_time_t", Key: []string{"name"}, Defaults: defaults},
+		"TyTimeStr": {Table: "ty_time_s", Key: []string{"name"}, Defaults: defaults},
+	}, "ty_time_s",
+		[]string{"DROP TABLE IF EXISTS ty_time_t", "DROP TABLE IF EXISTS ty_time_s", create("ty_time_t"), create("ty_time_s")},
+		`SELECT coalesce(string_agg(concat_ws('|', x.tab, name, ts, tstz AT TIME ZONE 'UTC', d, t, ttz AT TIME ZONE 'UTC'), E'\n' ORDER BY x.tab, name), '')
+			FROM (SELECT 't' AS tab, * FROM ty_time_t UNION ALL SELECT 's', * FROM ty_time_s) x`,
+		(*TyTime)(nil), (*TyTimeStr)(nil))
+
+	// What each model stores, by column and spelling; "" where the model
+	// cannot load the spelling at all.
+	stored := func(model, col, value string) string {
+		t.Helper()
+		l.reset()
+		text := "- model: " + model + "\n  rows:\n    - {id: 1, name: x, " + col + ": " + value + "}\n"
+		if err := seedErr(l.db, text); err != nil {
+			return ""
+		}
+		table := map[string]string{"TyTime": "ty_time_t", "TyTimeStr": "ty_time_s"}[model]
+		expr := col + "::text"
+		switch col {
+		case "tstz":
+			expr = "(tstz AT TIME ZONE 'UTC')::text"
+		case "ttz":
+			expr = "(ttz AT TIME ZONE 'UTC')::text"
+		}
+		return scan[string](t, l.db, "SELECT "+expr+" FROM "+table)
+	}
+
+	accepted := []struct{ col, value string }{
+		{"ts", "2026-01-01 10:00:00"},
+		{"ts", "2026-01-01T10:00:00Z"},
+		{"ts", `"2026-01-01T10:00:00Z"`},
+		{"ts", `"2026-01-01 10:00:00"`},
+		{"ts", "2026-01-01T10:00:00.123456Z"},
+		{"ts", "2026-01-01"},
+		{"tstz", "2026-01-01T10:00:00+02:00"},
+		{"tstz", `"2026-01-01T10:00:00+02:00"`},
+		{"tstz", `"2026-01-01 10:00:00+02"`},
+		{"tstz", "2026-01-01T10:00:00.123456Z"},
+		{"tstz", `"infinity"`},
+		{"d", "2026-01-01"},
+		{"d", `"2026-01-01"`},
+		{"d", "2026-01-01T10:00:00+02:00"},
+		{"t", `"10:00:00"`},
+		{"t", `"10:00:00+02"`},
+		{"ttz", `"10:00:00+02"`},
+	}
+	var rowsT, rowsS []string
+	for i, c := range accepted {
+		viaTime, viaString := stored("TyTime", c.col, c.value), stored("TyTimeStr", c.col, c.value)
+		if viaString == "" || (viaTime != "" && viaTime != viaString) {
+			t.Fatalf("%s: %s is not one value: a time.Time field stores %q, a string field %q",
+				c.col, c.value, viaTime, viaString)
+		}
+		row := "    - {id: " + itoa(int64(i+10)) + ", name: r" + itoa(int64(i)) + ", " + c.col + ": " + c.value + "}\n"
+		if viaTime != "" {
+			rowsT = append(rowsT, row)
+		}
+		rowsS = append(rowsS, row)
+	}
+	file := func(t, s []string) string {
+		out := "- model: TyTimeStr\n  rows:\n    - {id: 1, name: anchor}\n" + strings.Join(s, "")
+		if len(t) > 0 {
+			out += "- model: TyTime\n  rows:\n" + strings.Join(t, "")
+		}
+		return out
+	}
+	v1, v2 := file(nil, nil), file(rowsT, rowsS)
+	if f := l.findings(v2); f != "" {
+		t.Fatalf("values every model stores alike are refused:\n%s", f)
+	}
+	l.fidelity(v1, v2)
+
+	// A zone-less timestamp in a timestamptz column is the documented
+	// exception: an unquoted YAML timestamp is UTC to a time.Time field, which
+	// is what the column is taken to be written from.
+	premise := file([]string{"    - {id: 2, name: zoneless, tstz: 2026-01-01 10:00:00}\n"}, nil)
+	l.fidelity(v1, premise)
+
+	refused := []struct{ col, value, want string }{
+		{"ts", "2026-01-01T10:00:00+02:00", "a time.Time field stores as 2026-01-01 08:00:00 and a string field as 2026-01-01 10:00:00"},
+		{"ts", `"2026-01-01T10:00:00+02:00"`, "a time.Time field stores as 2026-01-01 08:00:00 and a string field as 2026-01-01 10:00:00"},
+		{"ts", "2026-01-01T10:00:00.1234567Z", "a time.Time field stores as 2026-01-01 10:00:00.123456 and a string field as 2026-01-01 10:00:00.123457"},
+		{"tstz", "2026-01-01T10:00:00.1234567Z", "write the one you mean as 2026-01-01T10:00:00.123456Z or 2026-01-01T10:00:00.123457Z"},
+		{"tstz", `"2026-01-01 10:00:00"`, "TimeZone or the DateStyle of the session that writes it"},
+		{"tstz", "2026-01-01", "as 2026-01-01T00:00:00Z"},
+		{"tstz", `"01/02/2026 10:00:00+00"`, "DateStyle of the session that writes it, a day first or a month first"},
+		{"tstz", `"now"`, "PostgreSQL evaluates when the row is written"},
+		{"d", "2026-01-01T23:30:00-05:00", "a time.Time field stores as 2026-01-02 and a string field as 2026-01-01"},
+		{"d", `"01/02/2026"`, "DateStyle of the session that writes it, a day first or a month first"},
+		{"d", `"2026-01-02 x"`, "which the column's type, date, cannot hold"},
+		{"d", `"tomorrow"`, "PostgreSQL evaluates when the row is written"},
+		{"ttz", `"10:00"`, "TimeZone or the DateStyle"},
+	}
+	for _, c := range refused {
+		l.refused("- model: TyTimeStr\n  rows:\n    - {id: 1, name: x, "+c.col+": "+c.value+"}\n", c.col+" is ", c.want)
+	}
+	// The evidence for the first two kinds: the models store two values.
+	if viaTime, viaString := stored("TyTime", "ts", "2026-01-01T10:00:00+02:00"),
+		stored("TyTimeStr", "ts", "2026-01-01T10:00:00+02:00"); viaTime == viaString {
+		t.Fatalf("a time.Time and a string field store the same, %s: the premise changed", viaTime)
+	}
+}
+
 type TyBin struct {
 	bun.BaseModel `bun:"table:ty_bin"`
 
@@ -435,6 +576,75 @@ func TestTypesBinaryTagInATextColumn(t *testing.T) {
 		t.Skip("the fixture reader still takes a !!binary scalar's base64 text for what a string field gets")
 	}
 	b.fidelity(b1, b3)
+}
+
+type TyTag struct {
+	bun.BaseModel `bun:"table:ty_tags"`
+
+	ID     int64  `bun:"id,pk"`
+	Code   string `bun:"code,notnull"`
+	Weight int64  `bun:"weight"`
+}
+
+// Two natural keys PostgreSQL holds equal are one key, whatever their bytes:
+// Go and GO in a citext column. Before, the diff took them for two rows and
+// generated an insert dbfixture cannot load beside the other.
+func TestTypesKeysEqualUnderTheirType(t *testing.T) {
+	db := connect(t)
+	if _, err := db.ExecContext(context.Background(), "CREATE EXTENSION IF NOT EXISTS citext"); err != nil {
+		t.Skipf("citext: %v", err)
+	}
+	l := newLab(t, map[string]*fixturemigrate.Model{"TyTag": {Table: "ty_tags", Key: []string{"code"}}}, "ty_tags",
+		[]string{"DROP TABLE IF EXISTS ty_tags",
+			"CREATE TABLE ty_tags (id bigint PRIMARY KEY, code citext NOT NULL, weight int NOT NULL)"},
+		`SELECT string_agg(concat_ws('|', code, weight), E'\n' ORDER BY code) FROM ty_tags`, (*TyTag)(nil))
+	const v1 = "- model: TyTag\n  rows:\n    - {id: 1, code: Go, weight: 1}\n"
+	l.seed(v1)
+	l.check(v1)
+	both := v1 + "    - {id: 2, code: GO, weight: 5}\n"
+	l.refused(both, "the natural keys code=Go and code=GO are one value to the key's type in PostgreSQL")
+
+	// The database side says so too, so an export lists them.
+	l.seed(both)
+	readOnlyDo(t, l.db, func(tx bun.Tx, tables map[string]*dbschema.Table) {
+		snap, err := fixturemigrate.DatabaseSnapshot(context.Background(), tx, l.cfg, tables, fixturemigrate.SnapshotOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snap.Findings) != 1 || snap.Findings[0].Kind != fixturemigrate.FindingDuplicateKey {
+			t.Fatalf("%+v", snap.Findings)
+		}
+	})
+	// A key made of a reference and a citext column: the reference is its
+	// target's key, and the label is compared as citext.
+	u := newLab(t, map[string]*fixturemigrate.Model{
+		"TyTag":    {Table: "ty_tags", Key: []string{"code"}, Ref: "code"},
+		"TyTagUse": {Table: "ty_tag_uses", Key: []string{"tag_id", "label"}, References: map[string]string{"tag_id": "TyTag"}},
+	}, "ty_tags", []string{"DROP TABLE IF EXISTS ty_tag_uses",
+		"CREATE TABLE ty_tag_uses (id bigint PRIMARY KEY, tag_id bigint NOT NULL, label citext NOT NULL)"},
+		"SELECT ''", (*TyTag)(nil), (*TyTagUse)(nil))
+	uses := v1 + `- model: TyTagUse
+  rows:
+    - {id: 1, tag_id: '{{ $.TyTag.pk1.ID }}', label: x}
+    - {id: 2, tag_id: '{{ $.TyTag.pk1.ID }}', label: X}
+`
+	u.refused(uses, "the natural keys label=x,tag_id=TyTag(Go) and label=X,tag_id=TyTag(Go) are one value")
+	if f := u.findings(strings.Replace(uses, "label: X", "label: y", 1)); f != "" {
+		t.Fatalf("two labels apart are two keys: %s", f)
+	}
+
+	run(t, l.db, "DELETE FROM ty_tags WHERE id = 2", "CREATE UNIQUE INDEX ON ty_tags (code)")
+	if err := seedErr(l.db, "- model: TyTag\n  rows:\n    - {id: 2, code: GO, weight: 5}\n"); err == nil {
+		t.Fatal("dbfixture loaded a key the unique index holds equal to one it has")
+	}
+}
+
+type TyTagUse struct {
+	bun.BaseModel `bun:"table:ty_tag_uses"`
+
+	ID    int64  `bun:"id,pk"`
+	TagID int64  `bun:"tag_id,notnull"`
+	Label string `bun:"label,notnull"`
 }
 
 type TyCheck struct {
