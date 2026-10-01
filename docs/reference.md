@@ -162,6 +162,8 @@ sides are respelled by it first, as `generate` does; a difference that is only s
 
 Exit 3 when:
 
+- the state file is there and does not read: it holds git's conflict markers, or its checksum does
+  not match;
 - the fixture files change something no migration makes, or the state file records a change
   `generate -allow-partial` left out;
 - the fixture files have a finding the policy makes an error;
@@ -364,7 +366,7 @@ field's type could settle, such as a null inside a sequence), `unknown column`.
 
 | Field | |
 | --- | --- |
-| `state` | `null` when no state file is configured. `format` is 1 for a file written before the format was numbered. `covers` is the newest fixture migration whose changes the state includes, `base` what that one was generated against |
+| `state` | `null` when no state file is configured. `exists` is whether the file is there, and `error` why one that is there does not read, such as a merge that stopped in it; nothing is compared then. `format` is 1 for a file written before the format was numbered. `covers` is the newest fixture migration whose changes the state includes, `base` what that one was generated against |
 | `base` | what `uncovered` was worked out against: `the state file`, or `HEAD` while there is none |
 | `uncovered`, `refused` | what the fixture files change that no migration makes, one line per model, and what of it `generate` would refuse |
 | `left_out` | changes `generate -allow-partial` refused and recorded in the state file, until `baseline -force` |

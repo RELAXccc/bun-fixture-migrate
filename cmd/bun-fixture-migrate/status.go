@@ -61,8 +61,11 @@ type statusReport struct {
 }
 
 type stateInfo struct {
-	Path      string `json:"path"`
-	Exists    bool   `json:"exists"`
+	Path   string `json:"path"`
+	Exists bool   `json:"exists"`
+	// Error is why a state file that exists does not read: a merge that
+	// stopped in it, an edit its checksum caught. Nothing is compared then.
+	Error     string `json:"error,omitempty"`
 	Migration string `json:"migration,omitempty"`
 	Format    int    `json:"format,omitempty"`
 	// Covers is the newest fixture migration whose changes the state
@@ -241,6 +244,9 @@ func status(o streams, args []string) error {
 	}
 
 	var failures []string
+	if r.State != nil && r.State.Error != "" {
+		failures = append(failures, "the state file does not read, so nothing says what the fixture file changes")
+	}
 	if n := len(r.Uncovered) + len(r.Refused); n > 0 {
 		failures = append(failures, "the fixture file has changes no migration makes")
 	}
@@ -296,7 +302,8 @@ func (s *setup) statusBase(r *statusReport) (*fixturemigrate.Snapshot, *fixturem
 			files, r.Base = read.Files, "the state file"
 		case errors.Is(err, fixturemigrate.ErrNoState):
 		default:
-			r.Problems = append(r.Problems, err.Error())
+			r.State.Exists = true
+			r.State.Error = strings.TrimPrefix(err.Error(), s.statePath+": ")
 			return nil, nil, nil
 		}
 	}
@@ -587,6 +594,8 @@ func printStatus(o streams, r *statusReport) {
 	switch {
 	case r.State == nil:
 		fmt.Fprintf(w, "state file\tnone configured\n")
+	case r.State.Error != "":
+		fmt.Fprintf(w, "state file\t%s does not read: %s\n", r.State.Path, r.State.Error)
 	case !r.State.Exists:
 		fmt.Fprintf(w, "state file\t%s does not exist yet\n", r.State.Path)
 	default:

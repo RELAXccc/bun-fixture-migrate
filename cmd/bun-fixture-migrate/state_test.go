@@ -784,3 +784,33 @@ func TestABaselineOfARevisionWithoutTheFixtureFileIsRefused(t *testing.T) {
 		t.Fatalf("a state file was written: %v", err)
 	}
 }
+
+// A state file that is there and does not read is not one that does not
+// exist yet: status says which it is, and fails for that reason.
+func TestStatusSaysAStateFileDoesNotRead(t *testing.T) {
+	cfg, base := project(t, newFixture, oldFixture)
+	statePath := filepath.Join(filepath.Dir(cfg), "migrations", "fixture_state.yml")
+	if code, _, errs := call(t, "baseline", "-config", cfg, "-old", base); code != 0 {
+		t.Fatal(errs)
+	}
+	good := readFile(t, statePath)
+	for name, data := range map[string]string{
+		"conflicted": "<<<<<<< HEAD\n" + good + "=======\n" + good + ">>>>>>> other\n",
+		"edited":     strings.Replace(good, "price_cents: 2000", "price_cents: 2100", 1),
+	} {
+		if err := os.WriteFile(statePath, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		code, out, errs := call(t, "status", "-config", cfg, "-offline")
+		if code != 3 || strings.Contains(out, "does not exist yet") || !strings.Contains(out, statePath+" does not read: ") ||
+			!strings.HasSuffix(errs, "bun-fixture-migrate: the state file does not read, so nothing says what the fixture file changes\n") {
+			t.Errorf("%s: exit %d\n%s%s", name, code, out, errs)
+		}
+		_, out, _ = call(t, "status", "-config", cfg, "-offline", "-json")
+		var report statusReport
+		if err := json.Unmarshal([]byte(out), &report); err != nil || report.State == nil || !report.State.Exists ||
+			report.State.Error == "" || strings.HasPrefix(report.State.Error, statePath) {
+			t.Errorf("%s: %v\n%s", name, err, out)
+		}
+	}
+}
