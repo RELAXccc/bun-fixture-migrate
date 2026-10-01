@@ -45,17 +45,30 @@ func TestYAMLJSONIsWhatAMapMarshalsTo(t *testing.T) {
 	}
 }
 
-// jsonb keeps the scale of a number; both sides of a comparison are written
-// without it.
-func TestCanonicalJSON(t *testing.T) {
+// jsonb keeps the scale of a number, and its own order of keys and spacing;
+// both sides of a comparison, and every migration, are written in one
+// spelling instead, the one a fixture file's mapping reads as without the
+// database. An export writes jsonb's own.
+func TestNormalJSON(t *testing.T) {
 	for in, want := range map[string]string{
-		`{"a": 1.0, "b": 1.50, "c": [1.0, -0.0, 1e3], "d": "1.0"}`: `{"a": 1, "b": 1.5, "c": [1, 0, 1000], "d": "1.0"}`,
-		`["a\"1.0", 2.50]`:               `["a\"1.0", 2.5]`,
+		`{"a": 1.0, "b": 1.50, "c": [1.0, -0.0, 1e3], "d": "1.0", "aa": {"z": 1, "y": 2}}`: `{"a":1,"aa":{"y":2,"z":1},"b":1.5,"c":[1,0,1000],"d":"1.0"}`,
+		`["a\"1.0", 2.50, "<&>"]`:        `["a\"1.0",2.5,"<&>"]`,
 		`"str"`:                          `"str"`,
 		`not json 1.0`:                   `not json 1.0`,
+		`[0:1]={7,8}`:                    `[0:1]={7,8}`,
 		`123456789012345680000000000000`: `123456789012345680000000000000`,
+		`1.2345678901234568e+29`:         `123456789012345680000000000000`,
 	} {
-		if got := canonicalJSON(in); got != want {
+		if got := normalJSON(in); got != want {
+			t.Errorf("%s: %s, want %s", in, got, want)
+		}
+	}
+	for in, want := range map[string]string{
+		`{"at":"x","k":1,"aa":[1,{"b":true,"a":null}]}`: `{"k": 1, "aa": [1, {"a": null, "b": true}], "at": "x"}`,
+		`[]`: `[]`,
+		`{}`: `{}`,
+	} {
+		if got := jsonbText(in); got != want {
 			t.Errorf("%s: %s, want %s", in, got, want)
 		}
 	}
@@ -75,8 +88,8 @@ func TestColumnTextOfStructuredColumns(t *testing.T) {
 		col      dbschema.Column
 		in, want string
 	}{
-		{dbschema.Column{Type: "jsonb"}, `{"a": 1.0}`, `{"a": 1}`},
-		{dbschema.Column{Type: "_numeric", Category: "A"}, `[1.50, null]`, `[1.5, null]`},
+		{dbschema.Column{Type: "jsonb"}, `{"b": 2, "a": 1.0}`, `{"a":1,"b":2}`},
+		{dbschema.Column{Type: "_numeric", Category: "A"}, `[1.50, null]`, `[1.5,null]`},
 		{dbschema.Column{Type: "int4", Domain: "qty"}, `05`, `5`},
 		{dbschema.Column{Type: "text"}, `1.0`, `1.0`},
 	} {

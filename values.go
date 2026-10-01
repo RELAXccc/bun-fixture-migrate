@@ -224,7 +224,7 @@ func columnText(c dbschema.Column, text string) string {
 			return s
 		}
 	case c.Type == "json" || c.Type == "jsonb" || c.Category == "A":
-		return canonicalJSON(text)
+		return normalJSON(text)
 	}
 	return text
 }
@@ -546,46 +546,108 @@ func jsonString(s string) string {
 	return strings.TrimSuffix(b.String(), "\n")
 }
 
-// canonicalJSON writes every number of a JSON text the way canonicalDecimal
-// does and leaves the rest -- key order, spacing, strings -- as it is. jsonb
-// keeps the scale a number was written with, so {"a": 1.0} written by SQL
-// reads back as 1.0 where the fixture file's {a: 1} reads back as 1; jsonb's
-// equality, and every application reading it, hold them the same, and so,
-// after this, does the text. Text that is not JSON comes back unchanged.
-func canonicalJSON(text string) string {
+// normalJSON is JSON text in one spelling, whoever wrote it: compact, the
+// keys of every object sorted the way encoding/json sorts a map's, every
+// number canonical (see canonicalDecimal), strings as encoding/json writes
+// them. jsonb keeps the scale a number was written with, so {"a": 1.0}
+// written by SQL reads back as 1.0 where the fixture file's {a: 1} reads
+// back as 1; jsonb's equality, and every application reading it, hold them
+// the same, and so, after this, does the text. It is what a value of a json,
+// jsonb or array column is compared as, and what a generated migration
+// writes, with the database at hand or without: the fixture file's own
+// reading of a mapping or a sequence is spelled this way too. Text that is
+// not JSON comes back unchanged.
+func normalJSON(text string) string {
 	if !json.Valid([]byte(text)) {
 		return text
 	}
+	dec := json.NewDecoder(strings.NewReader(text))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return text
+	}
+	var canon func(v any) any
+	canon = func(v any) any {
+		switch v := v.(type) {
+		case json.Number:
+			if s, ok := canonicalDecimal(v.String()); ok {
+				return json.Number(s)
+			}
+		case map[string]any:
+			for k, e := range v {
+				v[k] = canon(e)
+			}
+		case []any:
+			for i, e := range v {
+				v[i] = canon(e)
+			}
+		}
+		return v
+	}
 	var b strings.Builder
-	b.Grow(len(text))
-	for i := 0; i < len(text); {
-		c := text[i]
-		switch {
-		case c == '"':
-			j := i + 1
-			for j < len(text) && text[j] != '"' {
-				if text[j] == '\\' {
-					j++
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(canon(v)); err != nil {
+		return text
+	}
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// jsonbText writes JSON text the way jsonb's own text writes it, which is
+// how an export spells a document: the keys of an object shortest first and
+// then in byte order, a space after every comma and colon, numbers as they
+// are. Text that is not JSON comes back unchanged.
+func jsonbText(text string) string {
+	dec := json.NewDecoder(strings.NewReader(text))
+	dec.UseNumber()
+	var v any
+	if !json.Valid([]byte(text)) || dec.Decode(&v) != nil {
+		return text
+	}
+	var b strings.Builder
+	var write func(v any)
+	write = func(v any) {
+		switch v := v.(type) {
+		case map[string]any:
+			keys := make([]string, 0, len(v))
+			for k := range v {
+				keys = append(keys, k)
+			}
+			sort.Slice(keys, func(i, j int) bool {
+				if len(keys[i]) != len(keys[j]) {
+					return len(keys[i]) < len(keys[j])
 				}
-				j++
+				return keys[i] < keys[j]
+			})
+			b.WriteByte('{')
+			for i, k := range keys {
+				if i > 0 {
+					b.WriteString(", ")
+				}
+				b.WriteString(jsonString(k) + ": ")
+				write(v[k])
 			}
-			b.WriteString(text[i:min(j+1, len(text))])
-			i = j + 1
-		case c == '-' || (c >= '0' && c <= '9'):
-			j := i + 1
-			for j < len(text) && strings.IndexByte("+-.eE0123456789", text[j]) >= 0 {
-				j++
+			b.WriteByte('}')
+		case []any:
+			b.WriteByte('[')
+			for i, e := range v {
+				if i > 0 {
+					b.WriteString(", ")
+				}
+				write(e)
 			}
-			if canon, ok := canonicalDecimal(text[i:j]); ok {
-				b.WriteString(canon)
-			} else {
-				b.WriteString(text[i:j])
-			}
-			i = j
-		default:
-			b.WriteByte(c)
-			i++
+			b.WriteByte(']')
+		case json.Number:
+			b.WriteString(v.String())
+		case string:
+			b.WriteString(jsonString(v))
+		case bool:
+			b.WriteString(strconv.FormatBool(v))
+		case nil:
+			b.WriteString("null")
 		}
 	}
+	write(v)
 	return b.String()
 }

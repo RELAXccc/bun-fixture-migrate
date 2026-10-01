@@ -142,6 +142,10 @@ func cellOf(node yaml.Node) (Cell, error) {
 		if err != nil {
 			return Cell{}, err
 		}
+		// In the one spelling the database's values are read in, so a
+		// migration writes the same text with the database at hand or
+		// without it.
+		text, asAny = normalJSON(text), normalJSON(asAny)
 		c := Cell{Text: text, Structured: true, StringText: sequenceAsWritten(&node)}
 		if asAny != text {
 			c.JSONText = asAny

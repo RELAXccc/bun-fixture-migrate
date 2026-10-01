@@ -60,7 +60,7 @@ func TestExportLiteral(t *testing.T) {
 		{col("json"), `{"big": 123456789012345678901234567890}`, "", "", "a fresh seed would store 123456789012345680000000000000"},
 		{col("jsonb"), `[0.1234567890123456789]`, "", "", "more digits than the float64"},
 		{col("jsonb"), `{"u": 12345678901234567890, "i": -9223372036854775808}`,
-			`{"u": 12345678901234567890, "i": -9223372036854775808}`, "", ""},
+			`{"i": -9223372036854775808, "u": 12345678901234567890}`, "", ""},
 		{col("jsonb"), `[18446744073709551616]`, "", "", "more digits than the float64"},
 	} {
 		got, note, err := exportLiteral("M", "c", tc.in, tc.col)

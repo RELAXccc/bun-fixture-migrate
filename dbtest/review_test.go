@@ -6,6 +6,7 @@ package dbtest_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -516,4 +517,56 @@ func TestReviewACaseChangeOfACitextKeyIsARename(t *testing.T) {
 	if got := l.current(); got != "gopl|"+id+"|Go" {
 		t.Fatalf("migrated %s", got)
 	}
+}
+
+type RvSpell struct {
+	bun.BaseModel `bun:"table:rv_spell"`
+	ID            int64          `bun:"id,pk"`
+	Name          string         `bun:"name,notnull"`
+	Doc           map[string]any `bun:"doc,type:jsonb"`
+	Raw           map[string]any `bun:"raw,type:json"`
+	List          []any          `bun:"list,type:jsonb"`
+	Ints          []int64        `bun:"ints,array"`
+	Words         []string       `bun:"words,array"`
+	Nums          []float64      `bun:"nums,array"`
+	Price         float64        `bun:"price"`
+	Ratio         float64        `bun:"ratio"`
+	Big           int64          `bun:"big"`
+}
+
+// One fixture edit is one migration, whether generate read the column types
+// from the database or not: the literals of a change are spelled the same
+// either way. Before, a jsonb document came out compact with its keys sorted
+// without the database and in jsonb's own spelling with it.
+func TestReviewAChangeIsSpelledTheSameWithAndWithoutTheDatabase(t *testing.T) {
+	l := newLab(t, map[string]*fixturemigrate.Model{"RvSpell": {Table: "rv_spell", Key: []string{"name"}}}, "rv_spell",
+		[]string{"DROP TABLE IF EXISTS rv_spell", "CREATE TABLE rv_spell (id bigint PRIMARY KEY, name text NOT NULL UNIQUE, " +
+			"doc jsonb, raw json, list jsonb, ints int[], words text[], nums numeric[], price numeric(10,2), ratio float8, big bigint)"},
+		`SELECT ''`, (*RvSpell)(nil))
+	v1 := "- model: RvSpell\n  rows:\n    - {id: 1, name: a, doc: {k: 1}, raw: {k: 1}, list: [1], ints: [1], words: [a], " +
+		"nums: [1], price: 1, ratio: 1, big: 1}\n"
+	v2 := "- model: RvSpell\n  rows:\n    - {id: 1, name: a, doc: {zeta: 1.50, at: 2026-01-01T10:00:00+02:00, big: 1e21, " +
+		"nested: {b: [1, 2.0], a: \"<x>\"}, \"long key\": true}, raw: {b: 1, a: [x, 1.0]}, list: [{b: 1, a: 2}, \"s\", 1.5], " +
+		"ints: [3, 2, 1], words: [\"b c\", \"a\", \"d\\\"e\"], nums: [1.5, 2, 0.001], price: 12.5, ratio: 0.1, big: 9007199254740993}\n" +
+		"    - {id: 2, name: b, doc: {}, raw: {}, list: [], ints: [], words: [], nums: [], price: 0.5, ratio: 0.0000001, big: -5}\n"
+	offline, err := fixturemigrate.Compute(l.cfg, fixtureSnapshot(t, l.cfg, v1, "old"), fixtureSnapshot(t, l.cfg, v2, "new"))
+	if err != nil || len(offline.Refusals) != 0 {
+		t.Fatalf("%v %+v", err, offline.Refusals)
+	}
+	old, next := fixtureSnapshot(t, l.cfg, v1, "old"), fixtureSnapshot(t, l.cfg, v2, "new")
+	readOnlyDo(t, l.db, func(tx bun.Tx, tables map[string]*dbschema.Table) {
+		for _, s := range []*fixturemigrate.Snapshot{old, next} {
+			if err := fixturemigrate.Canonicalize(context.Background(), tx, l.cfg, s, tables); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	online, err := fixturemigrate.Compute(l.cfg, old, next)
+	if err != nil || len(online.Refusals) != 0 {
+		t.Fatalf("%v %+v", err, online.Refusals)
+	}
+	if got, want := fmt.Sprintf("%+v", online.Changes), fmt.Sprintf("%+v", offline.Changes); got != want {
+		t.Fatalf("with the database:\n%s\nwithout:\n%s", got, want)
+	}
+	l.fidelity(v1, v2)
 }

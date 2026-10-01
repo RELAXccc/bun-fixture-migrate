@@ -385,42 +385,6 @@ func databaseReading(c dbschema.Column, text string) string {
 	return text
 }
 
-// normalJSON is JSON text with its keys sorted and its numbers canonical, or
-// the text itself when it is not JSON.
-func normalJSON(text string) string {
-	dec := json.NewDecoder(strings.NewReader(text))
-	dec.UseNumber()
-	var v any
-	if err := dec.Decode(&v); err != nil {
-		return text
-	}
-	var canon func(v any) any
-	canon = func(v any) any {
-		switch v := v.(type) {
-		case json.Number:
-			if s, ok := canonicalDecimal(v.String()); ok {
-				return json.Number(s)
-			}
-		case map[string]any:
-			for k, e := range v {
-				v[k] = canon(e)
-			}
-		case []any:
-			for i, e := range v {
-				v[i] = canon(e)
-			}
-		}
-		return v
-	}
-	var b strings.Builder
-	enc := json.NewEncoder(&b)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(canon(v)); err != nil {
-		return text
-	}
-	return strings.TrimSuffix(b.String(), "\n")
-}
-
 // loadOrder is the order dbfixture can load a model's rows in. It resolves a
 // template against the rows above it, so a row that points at a row of its
 // own model has to come after that row: parents before their children, and
@@ -552,7 +516,7 @@ func exportValue(cfg *Config, model, col string, v fixturechange.Value, column d
 		return "", "", fmt.Errorf("%s.%s holds %s, an array with a NULL element, which a YAML sequence writes as "+
 			"null and a []string or []int64 field leaves out, so the file would read as something else and not "+
 			"load as this: set array_nulls: keep on the model if its array fields keep a null, as a []*string "+
-			"does, or put %s in ignore", model, col, v.Lit, col)
+			"does, or put %s in ignore", model, col, jsonbText(v.Lit), col)
 	}
 	return exportLiteral(model, col, v.Lit, column)
 }
@@ -627,7 +591,7 @@ func exportLiteral(model, col, lit string, column dbschema.Column) (string, stri
 			return refuse("an array of numbers with NaN or Infinity in it, which a YAML sequence " +
 				"cannot spell so that this tool reads it back")
 		}
-		return yamlSafeJSON(lit), "", nil
+		return yamlSafeJSON(jsonbText(lit)), "", nil
 	}
 	switch column.Type {
 	case "int2", "int4", "int8", "oid":
@@ -720,7 +684,7 @@ func quotedTemplate(s string) (string, bool) {
 // field; a number, true and false are themselves.
 func exportJSON(model, col, lit string) (string, string, error) {
 	refuse := func(why string) (string, string, error) {
-		return "", "", fmt.Errorf("%s.%s holds the JSON %s, %s", model, col, lit, why)
+		return "", "", fmt.Errorf("%s.%s holds the JSON %s, %s", model, col, jsonbText(lit), why)
 	}
 	dec := json.NewDecoder(strings.NewReader(lit))
 	dec.UseNumber()
@@ -745,7 +709,7 @@ func exportJSON(model, col, lit string) (string, string, error) {
 		}
 		return exportString(v), "", nil
 	case map[string]any, []any:
-		return yamlSafeJSON(lit), "", nil
+		return yamlSafeJSON(jsonbText(lit)), "", nil
 	}
 	return lit, "", nil
 }
