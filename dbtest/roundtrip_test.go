@@ -834,3 +834,92 @@ func TestAStatementSomethingElseStoppedFails(t *testing.T) {
 		t.Fatalf("nothing may change, price_cents = %d", got)
 	}
 }
+
+// A char(n) column compared through "character", which is char(1): 'EUR'
+// became 'E'. An update of a char(5) column never matched its guard and was
+// skipped as a changed row, a char(3)[] value was written as {"E  ","E  "},
+// every change keyed on a char(3) code failed as a missing row, and an insert
+// of a row already there failed as an id held by another row.
+func TestACharColumnKeepsItsLength(t *testing.T) {
+	db := connect(t)
+	run(t, db, "DROP TABLE IF EXISTS char_currencies",
+		"CREATE TABLE char_currencies (id bigserial PRIMARY KEY, code char(3) NOT NULL UNIQUE, label char(5) NOT NULL, aliases char(3)[])",
+		"INSERT INTO char_currencies (id, code, label, aliases) VALUES (1, 'EUR', 'Euro', '{EUR,EWR}'), (2, 'USD', 'Dolr', NULL)")
+	code := func(c string) fixturechange.Values { return fixturechange.Values{"code": fixturechange.Lit(c)} }
+	set := fixturechange.Set{
+		Name:   "20260921120000_fixture_chars",
+		Tables: fixturechange.Tables{"Currency": {Name: "char_currencies", ID: "id", Key: "code", Serial: true}},
+		Changes: []fixturechange.Change{
+			{Model: "Currency", Kind: fixturechange.Update, Key: code("EUR"),
+				Old: fixturechange.Values{"label": fixturechange.Lit("Euro"), "aliases": fixturechange.Lit(`["EUR","EWR"]`)},
+				New: fixturechange.Values{"label": fixturechange.Lit("Euros"), "aliases": fixturechange.Lit(`["EUR","EWR","ECU"]`)}},
+			{Model: "Currency", Kind: fixturechange.Insert, Key: code("GBP"),
+				New: fixturechange.Values{"id": fixturechange.Lit("3"), "code": fixturechange.Lit("GBP"),
+					"label": fixturechange.Lit("Pound"), "aliases": fixturechange.Lit(`["GBP","STG"]`)}},
+			{Model: "Currency", Kind: fixturechange.Delete, Key: code("USD"),
+				Old: fixturechange.Values{"id": fixturechange.Lit("2"), "code": fixturechange.Lit("USD"),
+					"label": fixturechange.Lit("Dolr"), "aliases": fixturechange.Null()}},
+		},
+	}
+	dump := func() string {
+		return scan[string](t, db, `SELECT string_agg(concat_ws(' ', id, code, label, aliases::text), ', ' ORDER BY id) FROM char_currencies`)
+	}
+	before := dump()
+	for _, want := range []fixtureapply.Status{fixtureapply.StatusApplied, fixtureapply.StatusUnchanged} {
+		outcomes, err := applyReporting(t, db, set)
+		if err != nil {
+			t.Fatalf("Apply: %v", err)
+		}
+		for _, o := range outcomes {
+			if o.Index >= 0 && o.Status != want {
+				t.Fatalf("want every change %s: %+v", want, o)
+			}
+		}
+		if got := dump(); got != "1 EUR Euros {EUR,EWR,ECU}, 3 GBP Pound {GBP,STG}" {
+			t.Fatalf("after Apply: %s", got)
+		}
+	}
+	if err := fixtureapply.Revert(context.Background(), db, set, quiet()); err != nil {
+		t.Fatalf("Revert: %v", err)
+	}
+	if got := dump(); got != before {
+		t.Fatalf("after Revert: %s, want %s", got, before)
+	}
+}
+
+// box and circle have an = that compares areas. A hand edit to another box of
+// the same area passed the guard and was overwritten; it is a changed row.
+func TestAGeometricValueIsComparedAsItself(t *testing.T) {
+	db := connect(t)
+	run(t, db, "DROP TABLE IF EXISTS zones",
+		"CREATE TABLE zones (id bigserial PRIMARY KEY, name text NOT NULL UNIQUE, area box, c circle)",
+		"INSERT INTO zones (name, area, c) VALUES ('zone', '(1,1),(0,0)', '<(0,0),1>')")
+	set := fixturechange.Set{
+		Name:   "20260921120000_fixture_zones",
+		Tables: fixturechange.Tables{"Zone": {Name: "zones", ID: "id", Key: "name"}},
+		Changes: []fixturechange.Change{{Model: "Zone", Kind: fixturechange.Update,
+			Key: fixturechange.Values{"name": fixturechange.Lit("zone")},
+			Old: fixturechange.Values{"area": fixturechange.Lit("(1,1),(0,0)"), "c": fixturechange.Lit("<(0,0),1>")},
+			New: fixturechange.Values{"area": fixturechange.Lit("(3,3),(0,0)"), "c": fixturechange.Lit("<(5,5),2>")}}},
+	}
+	// A hand edit: another box and another circle, of the same areas.
+	run(t, db, "UPDATE zones SET area = '(4,0.25),(0,0)', c = '<(9,9),1>'")
+	outcomes, err := applyReporting(t, db, set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outcomes) != 1 || outcomes[0].Problem != fixtureapply.ProblemChangedRow {
+		t.Fatalf("the edit is a changed row: %+v", outcomes)
+	}
+	if got := scan[string](t, db, "SELECT area::text || ' ' || c::text FROM zones"); got != "(4,0.25),(0,0) <(9,9),1>" {
+		t.Fatalf("the hand edit has to survive, got %s", got)
+	}
+	// Without the edit the change is made, and a second run finds it made.
+	run(t, db, "UPDATE zones SET area = '(1,1),(0,0)', c = '<(0,0),1>'")
+	for _, want := range []fixtureapply.Status{fixtureapply.StatusApplied, fixtureapply.StatusUnchanged} {
+		outcomes, err := applyReporting(t, db, set)
+		if err != nil || len(outcomes) != 1 || outcomes[0].Status != want {
+			t.Fatalf("want %s: %v %+v", want, err, outcomes)
+		}
+	}
+}

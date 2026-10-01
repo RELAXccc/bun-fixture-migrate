@@ -15,18 +15,28 @@ import (
 type colType struct {
 	// cast is the type a value is cast to before it is compared: the
 	// column's own, without a length for the character types, since an
-	// explicit cast to varchar(3) truncates without a word.
+	// explicit cast to varchar(3) truncates without a word. Without a length
+	// is "bpchar", not "character": the latter is char(1), and 'EUR' cast to
+	// it is 'E'.
 	cast string
 	// base is the name of the type, or of a domain's base type.
 	base string
 	// array is true for an array type.
 	array bool
-	// equality is true when the type has an = operator of its own. json,
-	// xml, point and the other geometric types do not, and neither, in
-	// pg_operator's terms, do arrays and enums, which compare through anyarray
-	// and anyenum.
+	// equality is true when the type has an = operator of its own that says
+	// two values are the same value. json, xml and point have none, and
+	// neither, in pg_operator's terms, do arrays and enums, which compare
+	// through anyarray and anyenum. The other geometric types have one that
+	// says something else; see sameIsNotEqual.
 	equality bool
 }
+
+// sameIsNotEqual are the types whose = is not "the same value": box and circle
+// compare areas, path the number of points, and lseg and line within a
+// tolerance. A guard comparing through it would take a hand edit to another
+// box of the same area for the value the change was generated against, and
+// overwrite it. They compare through their text, as point does.
+var sameIsNotEqual = map[string]bool{"box": true, "circle": true, "path": true, "lseg": true, "line": true}
 
 // colTypes reads the column types of a model's table, once per run.
 func (r *runner) colTypes(ctx context.Context, model string) (map[string]colType, error) {
@@ -38,7 +48,7 @@ func (r *runner) colTypes(ctx context.Context, model string) (map[string]colType
 		return nil, err
 	}
 	rows, err := r.tx.QueryContext(ctx, `
-SELECT a.attname, format_type(a.atttypid, a.atttypmod), format_type(a.atttypid, NULL), bt.typname,
+SELECT a.attname, format_type(a.atttypid, a.atttypmod), format_type(a.atttypid, -1), bt.typname,
        bt.typcategory = 'A',
        EXISTS (SELECT 1 FROM pg_operator o WHERE o.oprname = '=' AND o.oprleft = bt.oid AND o.oprright = bt.oid)
 FROM pg_attribute a
@@ -60,6 +70,9 @@ WHERE a.attrelid = ?::regclass AND a.attnum > 0 AND NOT a.attisdropped`, table)
 		switch ct.base {
 		case "varchar", "bpchar", "_varchar", "_bpchar":
 			ct.cast = bare
+		}
+		if sameIsNotEqual[ct.base] {
+			ct.equality = false
 		}
 		types[name] = ct
 	}
