@@ -220,6 +220,26 @@ func TestBunWritesTheDefaultForANull(t *testing.T) {
 	}
 }
 
+// The same rule holds for bun's UPDATE since v1.2.17 (uptrace/bun#1315): an
+// application that saves a row through db.NewUpdate().Model(row) writes
+// DEFAULT for a nil pointer and for a zero in a nullzero field. An admin UI
+// that clears such a field therefore leaves the column's default, not NULL,
+// and check reports the difference from a file that says ~. This pins the
+// premise the documentation states.
+func TestBunUpdatesANullToTheDefault(t *testing.T) {
+	db := connect(t)
+	ctx := context.Background()
+	run(t, db, "DROP TABLE IF EXISTS tags",
+		"CREATE TABLE tags (id bigint PRIMARY KEY, label text DEFAULT 'none', note text DEFAULT 'n/a')",
+		"INSERT INTO tags VALUES (1, 'set', 'set')")
+	if _, err := db.NewUpdate().Model(&Tag{ID: 1}).WherePK().Exec(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := scan[string](t, db, "SELECT concat_ws('|', label, note) FROM tags WHERE id = 1"); got != "none|n/a" {
+		t.Fatalf("this test documents bun's UPDATE; if it stores NULL now, the documentation is out of date: %s", got)
+	}
+}
+
 type Plain struct {
 	bun.BaseModel `bun:"table:plains"`
 
