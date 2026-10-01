@@ -208,3 +208,22 @@ func TestSchemasAreEverySchemaATableIsIn(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+// A primary key that is also a reference, a plan's limits keyed by the plan,
+// would be read as the template text naming the plan: it is refused with what
+// to do instead.
+func TestAnIDThatIsAReferenceIsRefused(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{
+		"Plan":  {Table: "plans"},
+		"Limit": {Table: "limits", ID: "plan_id", Key: []string{"plan_id"}, References: map[string]string{"plan_id": "Plan"}},
+	}}
+	err := cfg.Prepare()
+	if err == nil || !strings.Contains(err.Error(), `model "Limit": its id, plan_id, is also a reference to Plan`) ||
+		!strings.Contains(err.Error(), "leave id out") {
+		t.Fatalf("got %v", err)
+	}
+	cfg.Models["Limit"].ID = ""
+	if err := cfg.Prepare(); err != nil {
+		t.Fatalf("without the id: %v", err)
+	}
+}

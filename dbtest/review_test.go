@@ -170,3 +170,40 @@ func mustParse(t *testing.T, text string) fixturemigrate.Doc {
 	}
 	return doc
 }
+
+type RvPlan struct {
+	bun.BaseModel `bun:"table:rv_plans"`
+	ID            int64  `bun:"id,pk"`
+	Name          string `bun:"name,notnull"`
+}
+
+type RvLimit struct {
+	bun.BaseModel `bun:"table:rv_limits"`
+	PlanID        int64 `bun:"plan_id,pk"`
+	MaxUsers      int64 `bun:"max_users,notnull"`
+}
+
+// A primary key that is a reference, as scaffold configured it, read the
+// template naming the plan as the id. The configuration is refused now, and
+// without the id the table reads, migrates and syncs as dbfixture seeds it.
+func TestReviewAPrimaryKeyThatIsAReference(t *testing.T) {
+	models := map[string]*fixturemigrate.Model{
+		"RvPlan":  {Table: "rv_plans"},
+		"RvLimit": {Table: "rv_limits", ID: "plan_id", Key: []string{"plan_id"}, References: map[string]string{"plan_id": "RvPlan"}},
+	}
+	cfg := &fixturemigrate.Config{Schema: "public", Models: models}
+	if err := cfg.Prepare(); err == nil || !strings.Contains(err.Error(), "its id, plan_id, is also a reference to RvPlan") {
+		t.Fatalf("expected the configuration to be refused, got %v", err)
+	}
+	models["RvLimit"].ID = ""
+	l := newLab(t, models, "rv_plans",
+		[]string{"DROP TABLE IF EXISTS rv_limits", "DROP TABLE IF EXISTS rv_plans",
+			"CREATE TABLE rv_plans (id bigint PRIMARY KEY, name text NOT NULL UNIQUE)",
+			"CREATE TABLE rv_limits (plan_id bigint PRIMARY KEY REFERENCES rv_plans, max_users bigint NOT NULL)"},
+		`SELECT string_agg(concat_ws('|', p.name, l.max_users), E'\n' ORDER BY p.name) FROM rv_limits l JOIN rv_plans p ON p.id = l.plan_id`,
+		(*RvPlan)(nil), (*RvLimit)(nil))
+	plans := "- model: RvPlan\n  rows:\n    - {_id: basic, id: 1, name: basic}\n    - {_id: pro, id: 2, name: pro}\n- model: RvLimit\n  rows:\n"
+	l.fidelity(plans+"    - {plan_id: '{{ $.RvPlan.basic.ID }}', max_users: 5}\n",
+		plans+"    - {plan_id: '{{ $.RvPlan.basic.ID }}', max_users: 6}\n    - {plan_id: '{{ $.RvPlan.pro.ID }}', max_users: 50}\n")
+	l.roundTrip()
+}
