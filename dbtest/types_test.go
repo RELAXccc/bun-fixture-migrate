@@ -517,10 +517,12 @@ func TestTypesTimestampSpellings(t *testing.T) {
 	}
 	l.fidelity(v1, v2)
 
-	// A zone-less timestamp in a timestamptz column is the documented
-	// exception: an unquoted YAML timestamp is UTC to a time.Time field, which
-	// is what the column is taken to be written from.
-	premise := file([]string{"    - {id: 2, name: zoneless, tstz: 2026-01-01 10:00:00}\n"}, nil)
+	// A zone-less timestamp in a timestamptz column, and a date alone, are
+	// the documented exception: an unquoted YAML timestamp is UTC to a
+	// time.Time field, and a date midnight UTC, and the column is taken to be
+	// written from one.
+	premise := file([]string{"    - {id: 2, name: zoneless, tstz: 2026-01-01 10:00:00}\n",
+		"    - {id: 3, name: dateonly, tstz: 2026-01-02}\n"}, nil)
 	l.fidelity(v1, premise)
 
 	refused := []struct{ col, value, want string }{
@@ -529,7 +531,7 @@ func TestTypesTimestampSpellings(t *testing.T) {
 		{"ts", "2026-01-01T10:00:00.1234567Z", "a time.Time field stores as 2026-01-01 10:00:00.123456 and a string field as 2026-01-01 10:00:00.123457"},
 		{"tstz", "2026-01-01T10:00:00.1234567Z", "write the one you mean as 2026-01-01T10:00:00.123456Z or 2026-01-01T10:00:00.123457Z"},
 		{"tstz", `"2026-01-01 10:00:00"`, "TimeZone or the DateStyle of the session that writes it"},
-		{"tstz", "2026-01-01", "as 2026-01-01T00:00:00Z"},
+		{"tstz", `"2026-01-01"`, "as 2026-01-01T00:00:00Z"},
 		{"tstz", `"01/02/2026 10:00:00+00"`, "DateStyle of the session that writes it, a day first or a month first"},
 		{"tstz", `"now"`, "PostgreSQL evaluates when the row is written"},
 		{"d", "2026-01-01T23:30:00-05:00", "a time.Time field stores as 2026-01-02 and a string field as 2026-01-01"},
