@@ -255,12 +255,18 @@ func readColumns(m *Model, table *dbschema.Table, want []string) ([]string, erro
 //
 // It is built apart from being run so a test can read it.
 func selectQuery(cfg *Config, m *Model, table *dbschema.Table, cols []string) (string, bool, error) {
-	idQuoted, err := quoteIdent(m.ID)
-	if err != nil {
-		return "", false, err
+	// A model without an id of its own (id: none) reads none, whatever
+	// column the table calls id.
+	idColumn, hasID := table.Column(m.ID)
+	hasID = hasID && m.ID != ""
+	var idQuoted string
+	if hasID {
+		var err error
+		if idQuoted, err = quoteIdent(m.ID); err != nil {
+			return "", false, err
+		}
 	}
 	selects := make([]string, 0, len(cols)+1)
-	idColumn, hasID := table.Column(m.ID)
 	if hasID {
 		selects = append(selects, readExpr(idColumn, idQuoted))
 	}

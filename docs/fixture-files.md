@@ -308,8 +308,10 @@ hand and `baseline -force`. See the [runbook](production.md#generate-refused-a-c
   bun's default naming. A template naming a field whose column is spelled otherwise is an error, not
   a guess.
 - A model's `id` is the row's own value, never a reference: a primary key that also points at another
-  model, a plan's limits keyed by the plan, is refused in the configuration. Leave `id` out for such a
-  table, which is then read without one, and keep the column in `key` and `references`.
+  model, a plan's details keyed by the plan, is refused in the configuration. Set `id: none` for such a
+  table, which is then read without an id of its own, and keep the column in `key` and `references`;
+  `scaffold` writes it so. Its rows name their plan, `id: '{{ $.Plan.free.ID }}'`, as `dbfixture` loads
+  them.
 - A structured value (mapping or sequence) is supported in `json`, `jsonb`, array and `bytea` columns,
   and not as a reference. A mapping in an `hstore` column, which a `map[string]string` field loads, is
   an `invalid value`.

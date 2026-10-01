@@ -45,7 +45,9 @@ Writes a commented starting configuration from a database's catalog: a model per
 key, whether it is serial, the foreign keys to a table's id as `references`, the column defaults as
 `defaults`, and a natural key guessed from the narrowest unique index besides the primary key. A
 partition is part of its partitioned table, not a model of its own; a foreign key to another column,
-a code say, is an ordinary column. Timestamps the database writes with a row, from a default such as
+a code say, is an ordinary column. A table whose primary key is another table's id, a plan's details
+keyed by the plan, has no id of its own: it is written `id: none`, keyed and referenced by that
+column, and a foreign key to it is a reference to the plan whose id it holds. Timestamps the database writes with a row, from a default such as
 `now()` or, on a table with a `BEFORE` row trigger, an `updated_at`, are proposed for `ignore`, and
 the triggers are named. Every guess is marked `# GUESS:`.
 
@@ -394,7 +396,7 @@ listed stops every command.
 | Key | Default | |
 | --- | --- | --- |
 | `table` | | the SQL table, optionally schema-qualified; required |
-| `id` | `id` | the primary key column: written on insert when the row has one, never compared or updated, what a reference resolves to. A primary key that is itself a reference, a plan's limits keyed by the plan, is refused as `id`: leave `id` out and keep the column in `key` and `references` |
+| `id` | `id` | the primary key column: written on insert when the row has one, never compared or updated, what a reference resolves to. `none` for a table without an id of its own, whose primary key is a reference to another model's row, a plan's details keyed by the plan's id: `id: none`, `key: [id]`, `references: {id: Plan}`, which `scaffold` writes. Its rows are found by that key, nothing points at them (a reference to such a model is refused: point at the plan), and it is neither `serial` nor `ids: database`. A primary key that is itself a reference is refused as `id` |
 | `serial` | `false` | the id comes from a sequence; migrations move it past explicit ids |
 | `ref` | `name` | the column a reference to this model names a row by |
 | `key` | `[ref]` | the natural key: the columns that identify a row without its id |
