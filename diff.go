@@ -320,6 +320,10 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 					res.Refusals = append(res.Refusals, r)
 					continue
 				}
+				if r, ok := leftOut(model, label, cur[0], next.Columns[model]); ok {
+					res.Refusals = append(res.Refusals, r)
+					continue
+				}
 				inserts = append(inserts, change)
 				continue
 			}
@@ -1087,6 +1091,29 @@ func refusedBySharedID(cfg *Config, next *Snapshot, c fixturechange.Change) (Ref
 		"its %s, %s, is the %s of %s too. dbfixture cannot load a file in which two rows share one, and "+
 			"a migration cannot insert both: give each row its own %s", m.ID, id.Lit, m.ID,
 		strings.Join(others, ", "), m.ID)}, true
+}
+
+// leftOut refuses an insert of a row that leaves out a column other rows of
+// its model write, when no defaults entry says what leaving it out means.
+// dbfixture stores the field's zero there, or NULL, or the column's default,
+// depending on the model; the insert would store whatever the database does
+// for a column it is not given; and from then on every comparison with the
+// database would find the column set there and left out here, and refuse the
+// row. Said once, now, it is said where it can be fixed.
+func leftOut(model, label string, e *Entry, columns []string) (Refusal, bool) {
+	var missing []string
+	for _, col := range columns {
+		if _, ok := e.Cells[col]; !ok {
+			missing = append(missing, col)
+		}
+	}
+	if len(missing) == 0 {
+		return Refusal{}, false
+	}
+	list := strings.Join(missing, ", ")
+	return Refusal{model, label, fmt.Sprintf(
+		"it leaves out %s, which other rows of %s write, and nothing says what leaving it out means: "+
+			"write it in this row, or say in defaults what an omitted %s stands for", list, model, list)}, true
 }
 
 // diffRow compares two revisions of one row. A column that is spelled out on

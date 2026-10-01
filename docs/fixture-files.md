@@ -100,6 +100,11 @@ defaults:
 `scaffold` fills `defaults` from the column defaults. `~` is right for a column added to a table
 later, which holds NULL in the rows written before it.
 
+A row that leaves out a column other rows of its model write, with no `defaults` entry for it, is
+not inserted by a migration: `dbfixture` stores the field's zero there, or NULL, or the column's
+default, depending on the model, and every comparison with the database would refuse the row
+afterwards. Write the column, or say in `defaults` what leaving it out means.
+
 The comparison stays literal: the tool never substitutes a column default for a value the file
 writes. A value bun would not write as it stands (a zero into a column with a default, a null into
 a column with a default) is a fault in the file, and the lint says so.

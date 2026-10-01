@@ -1030,3 +1030,26 @@ func TestAChangeSetNamesItsTablesInTheConfiguredSchema(t *testing.T) {
 		t.Fatalf("a public table stays as written, got %q", got)
 	}
 }
+
+// An inserted row that leaves out a column other rows write, with no defaults
+// entry for it, would be stored as whatever the model and the database make
+// of nothing, and refused by every comparison afterwards. It is refused now.
+func TestAnInsertLeavingOutAColumnOthersWriteIsRefused(t *testing.T) {
+	next := replace(t, base, "- model: Feature\n", `    - _id: pro
+      id: 3
+      name: pro
+      currency_id: '{{ $.Currency.eur.ID }}'
+      seats: 100
+- model: Feature
+`)
+	res := compute(t, base, next)
+	if len(res.Changes) != 0 || len(res.Refusals) != 1 ||
+		!strings.Contains(res.Refusals[0].Reason, "it leaves out price_cents, which other rows of Plan write") {
+		t.Fatalf("expected the insert to be refused, got %+v / %+v", res.Changes, res.Refusals)
+	}
+	cfg := testConfig(t)
+	cfg.Models["Plan"].Defaults = Defaults{"price_cents": "0"}
+	if res := computeWith(t, cfg, base, next); len(res.Refusals) != 0 || len(res.Changes) != 1 {
+		t.Fatalf("with a default it is an ordinary insert: %+v / %+v", res.Changes, res.Refusals)
+	}
+}
