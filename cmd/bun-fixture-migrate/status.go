@@ -359,7 +359,11 @@ func (s *setup) uncoveredInDB(o streams, tx bun.Tx, r *statusReport, old, head *
 	if err != nil {
 		return nil, err
 	}
-	if len(res.Changes)+len(res.Refusals) == 0 && len(offline.Changes)+len(offline.Refusals) > 0 {
+	// Unless a finding is what took the difference out, such as a column the
+	// table does not have, which generate refuses rather than records.
+	worst, _ := s.cfg.Worst(head.Findings)
+	if worst != fixturemigrate.ModeError && len(res.Changes)+len(res.Refusals) == 0 &&
+		len(offline.Changes)+len(offline.Refusals) > 0 {
 		r.Notes = append(r.Notes, "the fixture file differs from "+r.Base+" only in how values are written, which "+
 			"status -offline cannot tell from a change; run bun-fixture-migrate generate to record the new spelling")
 	}

@@ -222,3 +222,40 @@ func TestScaffoldMarksWhatItCannotKnow(t *testing.T) {
 		t.Errorf("no models:\n%s", text)
 	}
 }
+
+// A primary key that points at another model's row is that model's
+// reference, and the tool reads an id as the row's own value: Prepare refuses
+// the two together. The scaffold leaves the id out and keys the model on the
+// column instead.
+func TestScaffoldKeysATableOnAPrimaryKeyThatIsAReference(t *testing.T) {
+	tables := testTables()
+	tables["public.plan_limits"] = &dbschema.Table{Schema: "public", Name: "plan_limits", PrimaryKey: []string{"plan_id"},
+		Columns: []dbschema.Column{
+			{Name: "plan_id", Position: 1, Type: "int8"},
+			{Name: "seats", Position: 2, Type: "int8"},
+		},
+		ForeignKeys: []dbschema.ForeignKey{{Columns: []string{"plan_id"},
+			RefSchema: "public", RefTable: "plans", RefColumns: []string{"id"}}},
+	}
+	data := Scaffold(tables, nil, "public", ScaffoldOptions{})
+	text := string(data)
+	start := strings.Index(text, "    table: plan_limits\n")
+	if start < 0 {
+		t.Fatalf("no model for plan_limits:\n%s", text)
+	}
+	model := text[start:]
+	if end := strings.Index(model, "\n\n"); end > 0 {
+		model = model[:end]
+	}
+	if strings.Contains(model, "    id: plan_id") || !strings.Contains(model, "    key: [plan_id]\n") ||
+		!strings.Contains(model, "      plan_id: Plan") || strings.Contains(model, "    ref: ") {
+		t.Fatalf("expected the model keyed on its reference, without an id:\n%s", model)
+	}
+	path := filepath.Join(t.TempDir(), "fixture-migrate.yml")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(path); err != nil {
+		t.Fatalf("the scaffold has to load as a configuration: %v", err)
+	}
+}

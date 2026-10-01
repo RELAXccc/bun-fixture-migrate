@@ -41,6 +41,19 @@ var fixtureChanges20260930165255PlanPrices = fixturechange.Set{
 		MissingRow: "error", ChangedRow: "warn", IDDrift: "error", DuplicateKey: "error",
 	},
 	Changes: []fixturechange.Change{
+		{Model: "Plan", Kind: fixturechange.Update,
+			Key: fixturechange.Values{"name": fixturechange.Lit("team")},
+			Old: fixturechange.Values{
+				"note":        fixturechange.Null(),
+				"price_cents": fixturechange.Lit("2000"),
+				"settings":    fixturechange.Lit(`{"sso":false,"trial_days":14}`),
+			},
+			New: fixturechange.Values{
+				"note":        fixturechange.Lit("most popular"),
+				"price_cents": fixturechange.Lit("2500"),
+				"settings":    fixturechange.Lit(`{"sso":true,"trial_days":14}`),
+			},
+		},
 		{Model: "Plan", Kind: fixturechange.Insert,
 			Key: fixturechange.Values{"name": fixturechange.Lit("pro")},
 			New: fixturechange.Values{
@@ -62,19 +75,6 @@ var fixtureChanges20260930165255PlanPrices = fixturechange.Set{
 				"code":    fixturechange.Lit("api"),
 				"plan_id": fixturechange.RefTo("Plan", "pro"),
 				"quota":   fixturechange.Lit("50000"),
-			},
-		},
-		{Model: "Plan", Kind: fixturechange.Update,
-			Key: fixturechange.Values{"name": fixturechange.Lit("team")},
-			Old: fixturechange.Values{
-				"note":        fixturechange.Null(),
-				"price_cents": fixturechange.Lit("2000"),
-				"settings":    fixturechange.Lit(`{"sso":false,"trial_days":14}`),
-			},
-			New: fixturechange.Values{
-				"note":        fixturechange.Lit("most popular"),
-				"price_cents": fixturechange.Lit("2500"),
-				"settings":    fixturechange.Lit(`{"sso":true,"trial_days":14}`),
 			},
 		},
 	},

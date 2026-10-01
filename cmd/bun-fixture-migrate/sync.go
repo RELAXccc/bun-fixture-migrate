@@ -91,13 +91,13 @@ func ranChanges(res *fixturemigrate.SyncResult) bool {
 
 func printSync(o streams, r syncReport) {
 	for _, f := range r.Findings {
-		fmt.Fprintln(o.stdout, f.Kind+": "+f.Model+" "+f.Row+": "+f.Detail)
+		fmt.Fprintln(o.stdout, f.Kind+": "+fixturemigrate.Finding{Model: f.Model, Row: f.Row}.Where()+": "+f.Detail)
 	}
 	for _, ref := range r.Refusals {
-		fmt.Fprintln(o.stdout, "refused: "+ref.Model+" "+ref.Key+": "+ref.Reason)
+		fmt.Fprintln(o.stdout, "refused: "+fixturemigrate.Refusal{Model: ref.Model, Key: ref.Key}.Where()+": "+ref.Reason)
 	}
 	for _, w := range r.Warnings {
-		fmt.Fprintln(o.stdout, "warning: "+w.Model+" "+w.Key+": "+w.Reason)
+		fmt.Fprintln(o.stdout, "warning: "+fixturemigrate.Refusal{Model: w.Model, Key: w.Key}.Where()+": "+w.Reason)
 	}
 	changes := 0
 	w := tabwriter.NewWriter(o.stdout, 0, 4, 2, ' ', 0)

@@ -217,9 +217,12 @@ func TestTheConfigurationAgainstTheCatalog(t *testing.T) {
 	if !strings.Contains(out, "Currency colour: the fixture file writes this column, public.currencies does not have it") {
 		t.Fatal(out)
 	}
+	// The column is out of the comparison, and the finding stops status
+	// without sending anybody to a generate that refuses, or saying the
+	// difference is only a spelling.
 	out = a.run(3, "status")
-	if !strings.Contains(out, "generate refuses to write their migration") || strings.Contains(out, "run: bun-fixture-migrate generate") ||
-		!strings.Contains(out, "unknown column") {
+	if !strings.Contains(out, "unknown column") || strings.Contains(out, "run: bun-fixture-migrate generate") ||
+		strings.Contains(out, "record the new spelling") {
 		t.Fatal(out)
 	}
 	a.run(2, "generate", "-name", "colour")

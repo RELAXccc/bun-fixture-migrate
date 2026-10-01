@@ -157,8 +157,13 @@ constraint allows once. On top of that order every change waits for the ones it 
 pointing at a new row waits for its insert, parents before children in one table too; a row is
 deleted once nothing in the migration still names it, children before parents; and a row taking a
 value another row of the table gives up waits for it, unless two rows trade values, which no unique
-column allows anyway. Models follow their references, in file order otherwise, whether or not the
-new file still mentions them.
+column allows anyway. A unique index over several columns orders the changes by the tuple it holds,
+an item moved down a list to make room at the top included. With a database configured the
+catalog's unique indexes decide; without one, the columns whose values are distinct on both sides
+are taken for unique, and two such guesses that contradict each other both give way, with a warning
+to run with the database. A row whose ref value changes, a country renamed from Germany to
+Deutschland, is no change to the rows pointing at it: they point at its id. Models follow their
+references, in file order otherwise, whether or not the new file still mentions them.
 
 ### baseline
 
@@ -306,7 +311,7 @@ listed stops every command.
 | Key | Default | |
 | --- | --- | --- |
 | `table` | | the SQL table, optionally schema-qualified; required |
-| `id` | `id` | the primary key column: written on insert when the row has one, never compared or updated, what a reference resolves to |
+| `id` | `id` | the primary key column: written on insert when the row has one, never compared or updated, what a reference resolves to. A primary key that is itself a reference, a plan's limits keyed by the plan, is refused as `id`: leave `id` out and keep the column in `key` and `references` |
 | `serial` | `false` | the id comes from a sequence; migrations move it past explicit ids |
 | `ref` | `name` | the column a reference to this model names a row by |
 | `key` | `[ref]` | the natural key: the columns that identify a row without its id |
