@@ -483,16 +483,17 @@ func lengthMessage(c dbschema.Column) string {
 // to a connection, a transaction or the server failing: any error with a
 // SQLSTATE but those of connections (08), transaction state (25),
 // serialization (40), a missing privilege (42501), resources (53), object
-// state (55), operator intervention (57), system errors (58), and internal
-// errors (XX). A type's input function says no in class 22 for most types,
-// but hstore, ltree and tsquery say 42601, and a domain's CHECK 23514.
+// state (55), operator intervention (57), system errors (58), and data or
+// index corruption (XX001, XX002). A type's input function says no in class 22
+// for most types, but hstore, ltree and tsquery say 42601 from PostgreSQL 16
+// on, a plain internal error (XX000) before it, and a domain's CHECK 23514.
 func valueError(err error) bool {
 	state := pgerr.State(err)
-	if len(state) != 5 || state == "42501" {
+	if len(state) != 5 || state == "42501" || state == "XX001" || state == "XX002" {
 		return false
 	}
 	switch state[:2] {
-	case "08", "25", "40", "53", "55", "57", "58", "XX":
+	case "08", "25", "40", "53", "55", "57", "58":
 		return false
 	}
 	return true

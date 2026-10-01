@@ -190,7 +190,8 @@ models:
 func TestAnExportWritesWhatTheFixtureFilesHold(t *testing.T) {
 	db := itemDB(t)
 	loadFixture(t, db, itemFixture)
-	run(t, db, "DROP TABLE IF EXISTS u_things",
+	// gen_random_uuid is core from PostgreSQL 13; before, pgcrypto has it.
+	run(t, db, "CREATE EXTENSION IF NOT EXISTS pgcrypto", "DROP TABLE IF EXISTS u_things",
 		"CREATE TABLE u_things (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), code text UNIQUE NOT NULL, label text)",
 		"INSERT INTO u_things (code, label) VALUES ('a', 'A')")
 	c := buildCLI(t)

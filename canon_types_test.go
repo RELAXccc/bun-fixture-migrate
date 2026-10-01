@@ -87,7 +87,9 @@ func TestValueError(t *testing.T) {
 	for state, want := range map[string]bool{
 		"22P02": true, "22001": true, "23514": true, "23502": true, "42601": true, "54000": true, "42883": true,
 		"08006": false, "25P02": false, "40001": false, "42501": false, "53100": false, "55P03": false,
-		"57014": false, "58030": false, "XX000": false,
+		"57014": false, "58030": false, "XX001": false, "XX002": false,
+		// hstore's input function before PostgreSQL 16.
+		"XX000": true,
 	} {
 		if got := valueError(stateErr(state)); got != want {
 			t.Errorf("%s: %v, want %v", state, got, want)
