@@ -486,8 +486,19 @@ func TestEachModelRunsUnderItsOwnPolicy(t *testing.T) {
 		t.Fatalf("a plan edited here fails under the set's changed_row error: %v", err)
 	}
 	// A missing translation is still the set's missing_row error, and the
-	// message says where to change that.
+	// message says where to change that: the set's Policy, where the
+	// model's MissingRow comes from, although the model has a Policy of its
+	// own, which does not set it.
 	run(t, db, "UPDATE au_plans SET price = 25 WHERE name = 'team'", "DELETE FROM au_translations WHERE key = 'hello'")
+	err = fixtureapply.Revert(ctx, db, set, quiet())
+	if !errors.As(err, &ce) || ce.Outcome.Problem != fixtureapply.ProblemMissingRow ||
+		!strings.Contains(err.Error(), `set MissingRow to "warn" in this migration's Policy,`) {
+		t.Fatalf("missing row: %v", err)
+	}
+	// Set by the model's own Policy, it is changed there.
+	set.Tables["Translation"] = fixturechange.Table{Name: "au_translations", ID: "id", Key: "key",
+		Policy: &fixturechange.Policy{ChangedRow: "warn", MissingRow: "error"}}
+	set.Policy.MissingRow = "warn"
 	err = fixtureapply.Revert(ctx, db, set, quiet())
 	if !errors.As(err, &ce) || ce.Outcome.Problem != fixtureapply.ProblemMissingRow ||
 		!strings.Contains(err.Error(), `in the Policy of "Translation" in this migration's Tables`) {
