@@ -957,3 +957,53 @@ func TestARowTakingAValueAnotherGivesUpWaitsForIt(t *testing.T) {
 		t.Fatalf("a trade keeps the file's order: %s", got)
 	}
 }
+
+// A reference finds its row by the ref value alone, so one that two rows
+// hold names neither: categories called "Accessories" under two parents.
+func TestAReferenceToAValueTwoRowsHoldIsRefused(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{"Category": {Table: "categories", Serial: true,
+		Key: []string{"parent_id", "name"}, References: map[string]string{"parent_id": "Category"},
+		Defaults: Defaults{"parent_id": NullDefault}}}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	old := `- model: Category
+  rows:
+    - {_id: root, id: 1, name: Root}
+    - {_id: tools, id: 2, name: Tools, parent_id: '{{ $.Category.root.ID }}'}
+    - {_id: tacc, id: 3, name: Accessories, parent_id: '{{ $.Category.tools.ID }}'}
+    - {_id: garden, id: 4, name: Garden, parent_id: '{{ $.Category.root.ID }}'}
+    - {_id: gacc, id: 5, name: Accessories, parent_id: '{{ $.Category.garden.ID }}'}
+`
+	res := computeWith(t, cfg, old, old+"    - {_id: gloves, id: 6, name: Gloves, parent_id: '{{ $.Category.gacc.ID }}'}\n")
+	if len(res.Changes) != 0 || len(res.Refusals) != 1 || !strings.Contains(res.Refusals[0].Reason,
+		`parent_id points at Category "Accessories", which 2 rows hold (Category/name=Accessories/parent_id=Category(Tools), `+
+			`Category/name=Accessories/parent_id=Category(Garden))`) {
+		t.Fatalf("expected the reference to be refused, got %+v / %+v", res.Changes, res.Refusals)
+	}
+}
+
+// Two branches each adding "the next id" leave a file in which two rows share
+// one. It is a finding, the insert writing that id is refused, and neither
+// row is taken for a rename of the other.
+func TestTwoRowsSharingAnIDAreReportedAndNotTakenForARename(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Policy.Renames = RenameUpdate
+	plans := func(rows string) string {
+		return "- model: Currency\n  rows:\n    - {_id: eur, id: 1, code: EUR}\n- model: Plan\n  rows:\n" + rows
+	}
+	biz := "    - {id: 4, name: biz, currency_id: '{{ $.Currency.eur.ID }}'}\n"
+	max := "    - {id: 4, name: max, currency_id: '{{ $.Currency.eur.ID }}'}\n"
+	merged := snap(t, cfg, plans(biz+max), "merged")
+	if len(merged.Findings) != 1 || merged.Findings[0].Kind != FindingDuplicateID || merged.Findings[0].Row != "id=4" ||
+		!strings.Contains(merged.Findings[0].Detail, "2 rows hold this id (Plan/name=biz, Plan/name=max)") {
+		t.Fatalf("expected the shared id to be reported, got %+v", merged.Findings)
+	}
+	for _, old := range []string{plans(biz), plans(max)} {
+		res := computeWith(t, cfg, old, plans(biz+max))
+		if len(res.Changes) != 0 || len(res.Refusals) != 1 ||
+			!strings.Contains(res.Refusals[0].Reason, "its id, 4, is the id of Plan/name=") {
+			t.Fatalf("expected the insert to be refused, got %+v / %+v", res.Changes, res.Refusals)
+		}
+	}
+}

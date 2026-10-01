@@ -491,7 +491,7 @@ func reportDuplicateRefs(cfg *Config, snap *Snapshot) {
 			snap.Findings = append(snap.Findings, Finding{
 				Kind: FindingDuplicateKey, Model: model, Row: m.Ref + "=" + value,
 				Detail: fmt.Sprintf(
-					"%s rows share this %s (%s), and every generated reference resolves with "+
+					"%s share this %s (%s), and every generated reference resolves with "+
 						"WHERE %s = ?, so it cannot name one of them: add a unique index on %s",
 					plural(len(ids), "row"), m.Ref, strings.Join(ids, ", "), m.Ref, m.Ref),
 			})

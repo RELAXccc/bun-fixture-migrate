@@ -343,6 +343,7 @@ func FixtureSnapshot(cfg *Config, doc Doc, source string) (*Snapshot, error) {
 	for _, model := range snap.Order {
 		snap.Columns[model] = unionColumns(snap.Entries[model])
 		snap.reportDuplicates(model)
+		snap.reportDuplicateIDs(cfg, model)
 	}
 	return snap, nil
 }

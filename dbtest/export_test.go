@@ -473,7 +473,7 @@ func TestARefValueTwoRowsShareIsReported(t *testing.T) {
 	if found == nil {
 		t.Fatalf("expected the shared code to be reported, got %+v", snap.Findings)
 	}
-	if !strings.Contains(found.Detail, "1, 3") || !strings.Contains(found.Detail, "unique index") {
+	if !strings.Contains(found.Detail, "2 rows share this code (1, 3)") || !strings.Contains(found.Detail, "unique index") {
 		t.Fatalf("the finding names the colliding rows and the cure: %s", found.Detail)
 	}
 }

@@ -254,12 +254,24 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 	// another.
 	skipped := map[string]map[string]bool{}
 	renamed := map[string]bool{}
+	shared := sharedRefs(cfg, old, next)
 	for _, model := range order {
 		skip := map[string]bool{}
-		if err := identity(cfg, model, old, next, res, skip, renamed, &renames); err != nil {
+		if err := identity(cfg, model, old, next, res, skip, renamed, shared, &renames); err != nil {
 			return nil, err
 		}
 		skipped[model] = skip
+	}
+	// refused is every reason the diff has to leave a change out because of
+	// what it points at, or the id it writes.
+	refused := func(c fixturechange.Change) (Refusal, bool) {
+		if r, ok := refusedByRename(renamed, c); ok {
+			return r, true
+		}
+		if r, ok := refusedByShared(shared, c); ok {
+			return r, true
+		}
+		return refusedBySharedID(cfg, next, c)
 	}
 
 	for _, model := range order {
@@ -289,7 +301,7 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 			if len(prev) == 0 {
 				change := fixturechange.Change{
 					Model: model, Kind: fixturechange.Insert, Key: cur[0].Key, New: cur[0].Full(m)}
-				if r, ok := refusedByRename(renamed, change); ok {
+				if r, ok := refused(change); ok {
 					res.Refusals = append(res.Refusals, r)
 					continue
 				}
@@ -312,7 +324,7 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 			if change == nil {
 				continue
 			}
-			if r, ok := refusedByRename(renamed, *change); ok {
+			if r, ok := refused(*change); ok {
 				res.Refusals = append(res.Refusals, r)
 				continue
 			}
@@ -345,7 +357,7 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 			}
 			change := fixturechange.Change{
 				Model: model, Kind: fixturechange.Delete, Key: prev[0].Key, Old: prev[0].Full(m)}
-			if r, ok := refusedByRename(renamed, change); ok {
+			if r, ok := refused(change); ok {
 				res.Refusals = append(res.Refusals, r)
 				continue
 			}
@@ -385,16 +397,26 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 // involved are left out of the value diff either way, because their keys no
 // longer line up.
 func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
-	skip map[string]bool, renamed map[string]bool, renames *[]fixturechange.Change) error {
+	skip map[string]bool, renamed map[string]bool, shared map[string][]string, renames *[]fixturechange.Change) error {
 
 	m := cfg.Models[model]
+	// An id two rows of one snapshot share names neither of them: it is a
+	// fault of the file (FindingDuplicateID), not a rename or a renumbering,
+	// and which of the two came first in the file decides nothing.
+	sharedID := map[string]bool{}
+	for _, snap := range []*Snapshot{old, next} {
+		seen := map[string]bool{}
+		for _, e := range snap.Entries[model] {
+			if e.ID != "" && seen[e.ID] {
+				sharedID[e.ID] = true
+			}
+			seen[e.ID] = true
+		}
+	}
 	byID := func(entries []*Entry) map[string]*Entry {
 		out := map[string]*Entry{}
 		for _, e := range entries {
-			if e.ID == "" {
-				continue
-			}
-			if _, dup := out[e.ID]; !dup {
+			if e.ID != "" && !sharedID[e.ID] {
 				out[e.ID] = e
 			}
 		}
@@ -409,7 +431,7 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 	}
 
 	for _, prev := range old.Entries[model] {
-		if prev.ID == "" {
+		if prev.ID == "" || sharedID[prev.ID] {
 			continue
 		}
 		cur, ok := newByID[prev.ID]
@@ -436,6 +458,16 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 			change, err := renameChange(m, model, prev, cur)
 			if err != nil {
 				return err
+			}
+			if r, ok := refusedByShared(shared, change); ok {
+				res.Refusals = append(res.Refusals, r)
+				skip[prev.KeyStr], skip[cur.KeyStr] = true, true
+				for _, e := range []*Entry{prev, cur} {
+					if v := e.refValue(m); v != "" {
+						renamed[model+"\x00"+v] = true
+					}
+				}
+				continue
 			}
 			*renames = append(*renames, change)
 			// Everything that points at this row named it by its old value.
@@ -487,11 +519,11 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 		}
 	}
 	for _, prev := range old.Entries[model] {
-		if skip[prev.KeyStr] || prev.ID == "" {
+		if skip[prev.KeyStr] || prev.ID == "" || sharedID[prev.ID] {
 			continue
 		}
 		cur, ok := newByKey[prev.KeyStr]
-		if !ok || cur.ID == "" || cur.ID == prev.ID {
+		if !ok || cur.ID == "" || cur.ID == prev.ID || sharedID[cur.ID] {
 			continue
 		}
 		if cfg.Policy.IDDrift == ModeWarn {
@@ -952,6 +984,98 @@ func refusedByRename(renamed map[string]bool, c fixturechange.Change) (Refusal, 
 		}
 	}
 	return Refusal{}, false
+}
+
+// sharedRefs lists, for every ref value more than one row of a model holds in
+// either snapshot, those rows, by "Model\x00value". A value still read two
+// ways (AsWritten) is shared only by rows that read the same both ways:
+// without the column's type, 0012 and "10" are not known to be one value,
+// and a reference to either is refused for that reason instead.
+func sharedRefs(cfg *Config, snaps ...*Snapshot) map[string][]string {
+	out := map[string][]string{}
+	for _, snap := range snaps {
+		for _, model := range snap.Order {
+			m := cfg.Models[model]
+			holders := map[[2]string][]string{}
+			for _, e := range snap.Entries[model] {
+				v := e.refValue(m)
+				if v == "" {
+					continue
+				}
+				written, ok := e.AsWritten[m.Ref]
+				if !ok {
+					written = v
+				}
+				holders[[2]string{v, written}] = append(holders[[2]string{v, written}], e.label(model))
+			}
+			readings := make([][2]string, 0, len(holders))
+			for v := range holders {
+				readings = append(readings, v)
+			}
+			sort.Slice(readings, func(i, j int) bool {
+				return readings[i][0]+"\x00"+readings[i][1] < readings[j][0]+"\x00"+readings[j][1]
+			})
+			for _, v := range readings {
+				if rows := holders[v]; len(rows) > 1 && len(rows) > len(out[model+"\x00"+v[0]]) {
+					out[model+"\x00"+v[0]] = rows
+				}
+			}
+		}
+	}
+	return out
+}
+
+// refusedByShared reports a change that points at a row by a ref value more
+// than one row holds. A migration finds the row a reference names with
+// "WHERE <ref> = ?", which would match all of them: categories named
+// "Accessories" under two parents, say. Nothing the change could carry says
+// which one is meant.
+func refusedByShared(shared map[string][]string, c fixturechange.Change) (Refusal, bool) {
+	if len(shared) == 0 {
+		return Refusal{}, false
+	}
+	for _, values := range []fixturechange.Values{c.Key, c.Old, c.New} {
+		for _, col := range sortedColumns(values) {
+			ref := values[col].Ref
+			if ref == nil {
+				continue
+			}
+			rows := shared[ref.Model+"\x00"+ref.Key]
+			if len(rows) == 0 {
+				continue
+			}
+			return Refusal{c.Model, keyLabel(c.Model, c.Key), fmt.Sprintf(
+				"%s points at %s %q, which %s hold (%s). A migration finds the row a reference names by that "+
+					"value alone, so it cannot tell them apart: make the ref column of %s unique, or hand-write "+
+					"this change", col, ref.Model, ref.Key, plural(len(rows), "row"), strings.Join(rows, ", "), ref.Model)}, true
+		}
+	}
+	return Refusal{}, false
+}
+
+// refusedBySharedID reports an insert writing an id another row of the new
+// snapshot has too, which two branches each adding "the next id" leave
+// behind. Neither row can be inserted under it, and dbfixture cannot load the
+// file at all.
+func refusedBySharedID(cfg *Config, next *Snapshot, c fixturechange.Change) (Refusal, bool) {
+	m := cfg.Models[c.Model]
+	id, ok := c.New[m.ID]
+	if c.Kind != fixturechange.Insert || !ok || id.Ref != nil || id.IsNull {
+		return Refusal{}, false
+	}
+	var others []string
+	for _, e := range next.Entries[c.Model] {
+		if e.ID == id.Lit && keyString(c.Model, e.Key) != keyString(c.Model, c.Key) {
+			others = append(others, e.label(c.Model))
+		}
+	}
+	if len(others) == 0 {
+		return Refusal{}, false
+	}
+	return Refusal{c.Model, keyLabel(c.Model, c.Key), fmt.Sprintf(
+		"its %s, %s, is the %s of %s too. dbfixture cannot load a file in which two rows share one, and "+
+			"a migration cannot insert both: give each row its own %s", m.ID, id.Lit, m.ID,
+		strings.Join(others, ", "), m.ID)}, true
 }
 
 // diffRow compares two revisions of one row. A column that is spelled out on

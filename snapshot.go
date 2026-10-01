@@ -1,6 +1,7 @@
 package fixturemigrate
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -151,6 +152,10 @@ const (
 	// FindingUnknownColumn is a column in the fixture file that the table does
 	// not have.
 	FindingUnknownColumn FindingKind = "unknown column"
+	// FindingDuplicateID is two rows of a fixture file sharing one id, which
+	// two branches each adding the next id leave behind after a merge:
+	// dbfixture cannot load such a file, and no migration can insert both.
+	FindingDuplicateID FindingKind = "duplicate id"
 )
 
 func (f Finding) String() string {
@@ -253,6 +258,34 @@ func (s *Snapshot) reportDuplicates(model string) {
 			Kind: FindingDuplicateKey, Model: model, Row: group[0].label(model),
 			Detail: "this natural key is held by " + plural(len(group), "row") + " (" + strings.Join(ids, ", ") +
 				"), so no lookup by it can tell them apart: give the table a unique index, or add a column to key",
+		})
+	}
+}
+
+// reportDuplicateIDs adds a finding for every id more than one row of a model
+// holds, naming the rows.
+func (s *Snapshot) reportDuplicateIDs(cfg *Config, model string) {
+	rows := map[string][]string{}
+	var order []string
+	for _, e := range s.Entries[model] {
+		if e.ID == "" {
+			continue
+		}
+		if _, seen := rows[e.ID]; !seen {
+			order = append(order, e.ID)
+		}
+		rows[e.ID] = append(rows[e.ID], e.label(model))
+	}
+	id := cfg.Models[model].ID
+	for _, value := range order {
+		if len(rows[value]) < 2 {
+			continue
+		}
+		s.Findings = append(s.Findings, Finding{
+			Kind: FindingDuplicateID, Model: model, Row: id + "=" + value,
+			Detail: fmt.Sprintf("%s hold this %s (%s), and dbfixture cannot load the file: the second insert "+
+				"fails on the primary key. Give each row its own %s",
+				plural(len(rows[value]), "row"), id, strings.Join(rows[value], ", "), id),
 		})
 	}
 }

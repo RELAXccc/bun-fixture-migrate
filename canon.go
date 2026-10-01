@@ -154,16 +154,17 @@ func Canonicalize(ctx context.Context, db bun.IDB, cfg *Config, snap *Snapshot, 
 			}
 		}
 	}
-	// Two keys that were spelled apart may be one value now.
+	// Two keys or two ids that were spelled apart may be one value now.
 	kept := snap.Findings[:0]
 	for _, f := range snap.Findings {
-		if f.Kind != FindingDuplicateKey {
+		if f.Kind != FindingDuplicateKey && f.Kind != FindingDuplicateID {
 			kept = append(kept, f)
 		}
 	}
 	snap.Findings = kept
 	for _, model := range snap.Order {
 		snap.reportDuplicates(model)
+		snap.reportDuplicateIDs(cfg, model)
 	}
 	return nil
 }

@@ -250,7 +250,7 @@ The `row` of a finding and the `key` of a refusal name the row for a person, as
 alike there, a NULL and the text `NULL` for instance; the tool never compares rows by it, so they are
 still two rows.
 
-Finding kinds: `duplicate key`, `zero against a default`, `null against a default`,
+Finding kinds: `duplicate key`, `duplicate id` (two rows of the file sharing one id), `zero against a default`, `null against a default`,
 `invalid value` (a value the column's type cannot hold), `unknown column`.
 
 ### status output

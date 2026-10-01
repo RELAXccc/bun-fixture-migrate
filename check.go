@@ -48,7 +48,7 @@ func (c *CheckResult) Lines() []string {
 	var out []string
 	grouped := FindingsByKind(c.Findings)
 	for _, kind := range []FindingKind{FindingUnknownColumn, FindingInvalidValue, FindingZeroDefault,
-		FindingNullDefault, FindingDuplicateKey} {
+		FindingNullDefault, FindingDuplicateKey, FindingDuplicateID} {
 		list := grouped[kind]
 		if len(list) == 0 {
 			continue

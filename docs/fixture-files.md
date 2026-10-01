@@ -114,6 +114,12 @@ Each ends up in the output with the model, the row and a reason; `generate` writ
 - **A renumbered primary key**: the same natural key under a different id, under `policy.id_drift`.
 - **A delete of a model marked `deletes: refuse`.** Whether the rows pointing at it should go with
   it, be repointed or block the delete is a decision about your data.
+- **A reference to a ref value more than one row holds**, such as two categories called
+  `Accessories` under different parents: a migration finds the row a reference names by that value
+  alone. Make the ref column unique.
+- **Two rows sharing one id**, which two branches each adding the next id leave behind: `dbfixture`
+  cannot load the file, so it is a `duplicate id` finding, and an insert writing that id is
+  refused. Neither row is taken for a rename of the other.
 - **Rows whose natural key is not unique**, once the group changes. Two rows with one key cannot be
   told apart by a `WHERE` clause. An unchanged duplicate group is left alone; `check` and `export`
   list every one.
