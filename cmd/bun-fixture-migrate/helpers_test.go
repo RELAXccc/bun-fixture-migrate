@@ -144,6 +144,7 @@ func TestPrintPlanSaysWhatHappened(t *testing.T) {
 	var out bytes.Buffer
 	o := streams{ctx: context.Background(), stdout: &out, stderr: &out}
 	printPlan(o, &planReport{
+		RowsLocked: 1, LockedSeconds: 7.25,
 		NotSimulated: []string{"20260101000000_backfill"},
 		Notes:        []string{"20260101000000_backfill.up.sql holds a template"},
 		Problems:     []string{"a.go and b.sql share the name 1"},
@@ -167,9 +168,10 @@ func TestPrintPlanSaysWhatHappened(t *testing.T) {
 		"failed Plan name=team update [missing row]: gone", "sequence moved", "boom",
 		"pending before it and not simulated: 20260101000000_backfill", "3_fixture_b: not reached",
 		"4_fixture_c: could not be planned", "5_fixture_d: would do nothing", "not simulated, not fixture migrations",
-		"rolled back: nothing was changed, except that an id an insert drew",
 		"note: a blank line", "note: 20260101000000_backfill.up.sql holds a template",
 		"problems a.go and b.sql share the name 1",
+		"except sequences, which no rollback undoes",
+		"for 7.25s it held locked the 1 row it wrote and what the SQL migrations locked",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q in:\n%s", want, out.String())
@@ -186,8 +188,21 @@ func TestPrintPlanSaysWhatHappened(t *testing.T) {
 	if n := strings.Count(out.String(), "no row of plans"); n != 1 {
 		t.Errorf("the failure is printed %d times:\n%s", n, out.String())
 	}
-	if strings.Contains(out.String(), "an id an insert drew") {
+	if strings.Contains(out.String(), "an id an insert drew") || strings.Contains(out.String(), "held locked") {
 		t.Errorf("nothing was inserted:\n%s", out.String())
+	}
+
+	// Fixture migrations alone: an insert's id, and the rows it held.
+	out.Reset()
+	printPlan(o, &planReport{RowsLocked: 2, LockedSeconds: 0.042, Migrations: []plannedMigration{{ID: "2_fixture_a",
+		Kind: "fixture", Result: "succeeds", Changes: []fixtureapply.Outcome{{Index: 0, Model: "Plan", Key: "name=pro",
+			Kind: fixturechange.Insert, Status: fixtureapply.StatusApplied, Rows: 2}}}}})
+	text = strings.Join(strings.Fields(out.String()), " ")
+	for _, want := range []string{"rolled back: nothing was changed, except that an id an insert drew",
+		"for 42ms it held locked the 2 rows it wrote; other sessions writing them waited"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in:\n%s", want, out.String())
+		}
 	}
 }
 

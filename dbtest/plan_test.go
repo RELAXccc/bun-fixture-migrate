@@ -8,6 +8,7 @@ package dbtest_test
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -374,5 +375,37 @@ func TestPlanFailsOnAProblemInTheMigrationsDirectory(t *testing.T) {
 	_, stdout, _ := c.run("plan", "-json")
 	if !strings.Contains(stdout, `"problems": [`) || !strings.Contains(stdout, "share the name") {
 		t.Fatalf("plan -json:\n%s", stdout)
+	}
+}
+
+// plan holds what it writes locked until it rolls back, and says how much and
+// how long. A sequence is outside every transaction, so what a SQL migration
+// does to one stays done after the rollback, and plan says that too.
+func TestPlanSaysWhatItHeldAndWhatItLeaves(t *testing.T) {
+	db := deferredDB(t)
+	run(t, db, "DROP SEQUENCE IF EXISTS d_seq", "CREATE SEQUENCE d_seq")
+	c := deferredCLI(t)
+	c.write("fixtures/fixture.yml", deferredFixture+"    - {id: 2, name: hammer, region_id: 1}\n")
+	c.must(0, "generate", "-name", "hammer", "-at", "20300101000000")
+	var report struct {
+		RowsLocked    int64   `json:"rows_locked"`
+		LockedSeconds float64 `json:"locked_seconds"`
+	}
+	_, stdout, _ := c.run("plan", "-json")
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil || report.RowsLocked != 1 || report.LockedSeconds <= 0 {
+		t.Fatalf("plan -json: %v\n%s", err, stdout)
+	}
+	if out := c.must(0, "plan"); !strings.Contains(out, "it held locked the 1 row it wrote") {
+		t.Fatalf("plan:\n%s", out)
+	}
+
+	c.write("migrations/20000101000000_seq.up.sql", "SELECT setval('d_seq', 42);\n")
+	out := c.must(0, "plan", "-with-sql")
+	if !strings.Contains(out, "it calls setval or nextval, which no rollback undoes") ||
+		!strings.Contains(out, "except sequences") {
+		t.Fatalf("plan -with-sql:\n%s", out)
+	}
+	if got := scan[int64](t, db, "SELECT last_value FROM d_seq"); got != 42 {
+		t.Fatalf("the premise: setval in a rolled back transaction stays, and d_seq is at %d", got)
 	}
 }

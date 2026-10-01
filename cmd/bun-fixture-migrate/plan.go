@@ -33,6 +33,13 @@ type planReport struct {
 	// it stands, as status reports them: two migrations bun records under
 	// one name, a generated file that no longer reads as one.
 	Problems []string `json:"problems"`
+	// RowsLocked is how many rows the fixture migrations wrote, each locked
+	// against every other writer until the plan rolled back, and
+	// LockedSeconds how long the plan's transaction was open, which is how
+	// long a session writing one of them, or using a table a SQL migration
+	// altered, had to wait.
+	RowsLocked    int64   `json:"rows_locked"`
+	LockedSeconds float64 `json:"locked_seconds"`
 }
 
 type plannedMigration struct {
@@ -99,6 +106,15 @@ func sqlTarget(m fixturemigrate.MigrationFile, path string) (t planTarget, skip 
 			t.notes = append(t.notes, "a quoted string or dollar-quoted body in it holds a blank line, which bun "+
 				"v1.2.18 keeps, as this plan did; bun after v1.2.18 drops blank lines from a SQL migration, "+
 				"which would change that text")
+			break
+		}
+	}
+	// A sequence is outside every transaction: what the plan does to one,
+	// the rollback leaves.
+	for _, q := range t.queries {
+		if lower := strings.ToLower(q); strings.Contains(lower, "setval") || strings.Contains(lower, "nextval") {
+			t.notes = append(t.notes, "it calls setval or nextval, which no rollback undoes: the sequence it "+
+				"moves stays moved in the database this plan ran against")
 			break
 		}
 	}
@@ -493,6 +509,7 @@ func simulate(o streams, db *bun.DB, targets []planTarget, lockTimeout time.Dura
 		return err
 	}
 	defer tx.Rollback()
+	start := time.Now()
 	if lockTimeout > 0 {
 		if _, err := tx.ExecContext(o.ctx, fmt.Sprintf("SET LOCAL lock_timeout = %d", lockTimeout.Milliseconds())); err != nil {
 			return err
@@ -549,7 +566,16 @@ func simulate(o streams, db *bun.DB, targets []planTarget, lockTimeout time.Dura
 	if err := o.ctx.Err(); err != nil {
 		return err
 	}
-	return tx.Rollback()
+	err = tx.Rollback()
+	report.LockedSeconds = time.Since(start).Round(time.Millisecond).Seconds()
+	for _, m := range report.Migrations {
+		for _, c := range m.Changes {
+			if c.Status == fixtureapply.StatusApplied {
+				report.RowsLocked += c.Rows
+			}
+		}
+	}
+	return err
 }
 
 // failureShown is true when the migration's error is the message of a change
@@ -636,8 +662,11 @@ func printPlan(o streams, r *planReport) {
 			fmt.Fprintln(o.stdout, "  "+p)
 		}
 	}
-	inserted := false
+	inserted, ranSQL := false, false
 	for _, m := range r.Migrations {
+		if m.Kind == "sql" && m.Result != "not reached" {
+			ranSQL = true
+		}
 		for _, c := range m.Changes {
 			if c.Status == fixtureapply.StatusApplied && c.Kind == fixturechange.Insert {
 				inserted = true
@@ -645,10 +674,24 @@ func printPlan(o streams, r *planReport) {
 		}
 	}
 	switch {
+	case ranSQL:
+		fmt.Fprintln(o.stdout, "\nrolled back: nothing was changed, except sequences, which no rollback undoes: "+
+			"an id an insert drew stays drawn, and a value a SQL migration gave a sequence stays")
 	case inserted:
 		fmt.Fprintln(o.stdout, "\nrolled back: nothing was changed, except that an id an insert drew from "+
 			"a sequence stays drawn, which only leaves a gap")
 	case len(r.Migrations) > 0:
 		fmt.Fprintln(o.stdout, "\nrolled back: nothing was changed")
+	}
+	// Planning against a live database is not free: what the plan wrote, it
+	// held locked until it rolled back.
+	held := time.Duration(r.LockedSeconds * float64(time.Second)).Round(time.Millisecond)
+	switch {
+	case ranSQL:
+		fmt.Fprintf(o.stdout, "for %s it held locked the %s it wrote and what the SQL migrations locked, "+
+			"most ALTER TABLE a whole table; other sessions using them waited\n", held, plural(int(r.RowsLocked), "row"))
+	case r.RowsLocked > 0:
+		fmt.Fprintf(o.stdout, "for %s it held locked the %s it wrote; other sessions writing them waited\n",
+			held, plural(int(r.RowsLocked), "row"))
 	}
 }

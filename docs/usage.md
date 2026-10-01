@@ -147,6 +147,12 @@ cannot be reproduced makes the plan inconclusive (exit 1) rather than wrong: a S
 cannot run in a transaction (`CREATE INDEX CONCURRENTLY`), and an enum value one migration adds and a
 later one uses, which no transaction can do in PostgreSQL. Plan again once those are applied.
 
+Two things a rollback does not take back. A sequence a SQL migration moves, with `setval`, `nextval`
+or an insert, stays moved in the database plan ran against, and plan notes a migration that calls
+`setval` or `nextval`: a `setval` that winds a sequence back, run against production, leaves the
+application's next insert colliding with an existing id. And while it runs, plan holds the locks a
+SQL migration takes, for most `ALTER TABLE` on the whole table. Run `plan -with-sql` against a copy.
+
 ## Several fixture files
 
 An application that loads its master data with

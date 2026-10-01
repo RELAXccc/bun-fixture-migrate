@@ -136,6 +136,15 @@ run. Refused against a standby.
 | `-lock-timeout <d>` | give up on a row lock after this long, default `5s` |
 | `-json` | the report as JSON, see [plan](#plan-output) |
 
+What plan writes it holds locked until it rolls back: every row a fixture migration writes, and
+whatever a SQL migration locks, which for most `ALTER TABLE` is the whole table, reads included.
+Against a live database, another session writing those rows waits for as long as the plan runs, and
+with a change set of thousands of rows that is seconds; the report says how many rows and how long.
+Plan against a copy of production, or off-peak. `-lock-timeout` limits how long plan waits for
+others' locks, not how long it holds its own. Sequences are outside every transaction: an id an
+insert draws stays drawn, and a sequence a SQL migration moves with `setval` or `nextval` stays
+moved, in the database plan ran against; plan notes such a migration.
+
 Exit 3 when a migration would fail, or with `-strict` be skipped; exit 1 when the plan could not
 finish (a lock waited for too long, a lost connection, a SQL migration that cannot run in a
 transaction, an enum value a migration in the same plan added, a table or column missing after a
@@ -291,7 +300,9 @@ Finding kinds: `duplicate key`, `zero against a default`, `null against a defaul
   ],
   "not_simulated": ["20260930160000_schema"],
   "notes": [],
-  "problems": []
+  "problems": [],
+  "rows_locked": 1,
+  "locked_seconds": 0.042
 }
 ```
 
@@ -301,7 +312,9 @@ ran. `after` names pending migrations that were not simulated and run before thi
 migration's `notes`, when there are any, say what its `result` and `error` do not: why the plan
 could not tell, or where the deploy can differ from the plan. The top-level `notes` say why a
 migration `-with-sql` would have run is in `not_simulated`. `problems` are those `status` reports in
-the migrations directory, each of which fails the plan.
+the migrations directory, each of which fails the plan. `rows_locked` is how many rows the fixture
+migrations wrote and held locked until the rollback, and `locked_seconds` how long the plan's
+transaction was open.
 
 ### sync output
 

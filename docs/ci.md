@@ -6,7 +6,7 @@ The checks worth running, and ready-made jobs for GitHub Actions and GitLab CI. 
 | Job | Needs a database | Fails when |
 | --- | --- | --- |
 | `status -offline` | no | a fixture edit came without its migration; two migrations share a name |
-| `plan -strict` | a copy of production, or production | a pending fixture migration would fail or skip a change |
+| `plan -strict` | a copy of production, or production off-peak | a pending fixture migration would fail or skip a change |
 | `status -require-applied` | the deployed database | a migration in the directory is not applied |
 | `check` | the deployed database | the database and the fixture file disagree (exit 3) |
 
@@ -76,8 +76,11 @@ does not run where it is:
           args: -strict
 ```
 
-`plan` writes and rolls back, so its database user needs the rights the migrations need. `check`
-and `status` only read, and are fine with a read-only user or a standby.
+`plan` writes and rolls back, so its database user needs the rights the migrations need. Until it
+rolls back it holds locked every row it wrote, and with `-with-sql` what the SQL migrations lock, so
+against production a large change set holds up the application's writes for as long as the plan
+runs; its report says how many rows and how long. Point it at a copy of production where you can.
+`check` and `status` only read, and are fine with a read-only user or a standby.
 
 To treat drift as a warning in a scheduled job, let the step fail softly and look at the code:
 
