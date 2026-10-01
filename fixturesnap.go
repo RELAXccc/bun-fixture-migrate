@@ -81,17 +81,26 @@ func (ix *index) anchorOf(m *Model, row Row) string {
 }
 
 // idText is a row's primary key as text, "" when the row leaves it to the
-// database: absent, null, or its type's zero, which bun does not write.
+// database: absent, null, or empty; see zeroID for a zero.
 func idText(m *Model, row Row) string {
 	c, ok := row[m.ID]
 	if !ok || c.IsNull {
 		return ""
 	}
 	id := scalarText(c)
-	if id == "" || sameScalar(id, "0") {
+	if zeroID(m, id) {
 		return ""
 	}
 	return id
+}
+
+// zeroID reports an id that stands for "the database numbers this row": an
+// empty one, and a zero in a serial model, whose autoincrement field bun
+// writes as DEFAULT when it holds zero. Anywhere else a zero is an id like
+// any other -- a status table keyed by "0", a row numbered 0 by hand -- and
+// rows point at it.
+func zeroID(m *Model, id string) bool {
+	return id == "" || (m.Serial && sameScalar(id, "0"))
 }
 
 // loaded registers a row the way dbfixture does after inserting it: later
@@ -164,8 +173,9 @@ func (ix *index) value(model, col string, row Row) (fixturechange.Value, bool, e
 	if !isRef {
 		return fixturechange.Lit(lit), true, nil
 	}
-	// A reference column holding nothing, 0 or NULL points at no row.
-	if lit == "" || sameScalar(lit, "0") {
+	// A reference column holding nothing or 0 points at no row, unless a row
+	// has that id.
+	if _, ok := ix.byID[target][lit]; !ok && (lit == "" || sameScalar(lit, "0")) {
 		return fixturechange.Lit(lit), true, nil
 	}
 	v, err := ix.refByID(model, col, target, lit)

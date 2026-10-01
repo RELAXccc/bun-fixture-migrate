@@ -136,3 +136,34 @@ func TestATemplateThisToolCannotEvaluateIsAnError(t *testing.T) {
 		t.Fatalf("an ignored column is not read at all: %v", err)
 	}
 }
+
+// bun writes DEFAULT for a zero only in an autoincrement field, so a zero is
+// "no id" in a serial model and an id like any other elsewhere.
+func TestAZeroIDIsAnIDUnlessTheModelIsSerial(t *testing.T) {
+	cfg := testConfig(t)
+	text := `- model: Currency
+  rows:
+    - {id: 0, code: XXX}
+- model: Plan
+  rows:
+    - {id: 0, name: free, currency_id: 0}
+- model: Feature
+  rows:
+    - {id: 0, plan_id: 0, code: api}
+`
+	s := snap(t, cfg, text, "fixture.yml")
+	if got := s.Entries["Currency"][0].ID; got != "0" {
+		t.Fatalf("a zero in a model that is not serial is its id, got %q", got)
+	}
+	if got := s.Entries["Feature"][0].ID; got != "" {
+		t.Fatalf("a zero in a serial model is left to the sequence, got %q", got)
+	}
+	// And a reference holding 0 names the row whose id is 0, where there is
+	// one.
+	if got := planRef(t, s, "free"); got.Ref == nil || got.Ref.Key != "XXX" {
+		t.Fatalf("expected Currency XXX, got %+v", got)
+	}
+	if got := s.Entries["Feature"][0].Cells["plan_id"]; got.Ref == nil || got.Ref.Key != "free" {
+		t.Fatalf("expected Plan free, got %+v", got)
+	}
+}

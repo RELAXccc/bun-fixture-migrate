@@ -504,7 +504,7 @@ func rewriteRefs(cfg *Config, snap *Snapshot, model, from, to string) {
 			if !touched {
 				continue
 			}
-			if key, err := keyOf(cfg, m, other, e.Cells); err == nil {
+			if key, err := keyOf(cfg, m, other, e.Full(m)); err == nil {
 				e.Key, e.KeyStr = key, keyString(other, key)
 			}
 		}

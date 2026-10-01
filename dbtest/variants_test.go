@@ -331,6 +331,68 @@ func TestVariantATreeWhoseParentsCameLater(t *testing.T) {
 	}.run(t)
 }
 
+// A currency keyed by its ISO code, which is its primary key as well, and a
+// status table whose first row is keyed by "0". Both are ids like any other:
+// the natural key can be the id, and a zero only means "no id" in a serial
+// model.
+type VCurrency struct {
+	bun.BaseModel `bun:"table:v_currencies"`
+	Code          string `bun:"code,pk"`
+	Label         string `bun:"label,notnull"`
+}
+
+type VStatus struct {
+	bun.BaseModel `bun:"table:v_statuses"`
+	Code          string `bun:"code,pk"`
+	Label         string `bun:"label,notnull,unique"`
+}
+
+type VPrice struct {
+	bun.BaseModel `bun:"table:v_prices"`
+	ID            int64  `bun:"id,pk"`
+	Name          string `bun:"name,notnull,unique"`
+	CurrencyCode  string `bun:"currency_code,notnull"`
+	StatusCode    string `bun:"status_code,notnull"`
+}
+
+func TestVariantAKeyThatIsTheIDAndAnIDThatIsZero(t *testing.T) {
+	head := `- model: VCurrency
+  rows:
+    - {_id: eur, code: EUR, label: Euro}
+    - {_id: usd, code: USD, label: Dollar}
+- model: VStatus
+  rows:
+    - {_id: s0, code: "0", label: pending}
+    - {_id: s1, code: "1", label: done}
+`
+	variant{
+		ddl: []string{"DROP TABLE IF EXISTS v_prices, v_currencies, v_statuses",
+			"CREATE TABLE v_currencies (code text PRIMARY KEY, label text NOT NULL)",
+			"CREATE TABLE v_statuses (code text PRIMARY KEY, label text UNIQUE NOT NULL)",
+			"CREATE TABLE v_prices (id bigint PRIMARY KEY, name text UNIQUE NOT NULL, " +
+				"currency_code text NOT NULL REFERENCES v_currencies, status_code text NOT NULL REFERENCES v_statuses)"},
+		models: []any{(*VCurrency)(nil), (*VStatus)(nil), (*VPrice)(nil)},
+		config: `models:
+  VCurrency: {table: v_currencies, id: code, key: [code], ref: code}
+  VStatus: {table: v_statuses, id: code, key: [label], ref: label}
+  VPrice:
+    table: v_prices
+    key: [name]
+    references: {currency_code: VCurrency, status_code: VStatus}
+`,
+		old: head + `- model: VPrice
+  rows:
+    - {id: 1, name: a, currency_code: '{{ $.VCurrency.eur.Code }}', status_code: '{{ $.VStatus.s0.Code }}'}
+`,
+		next: strings.Replace(head, "label: Dollar", "label: US Dollar", 1) + `- model: VPrice
+  rows:
+    - {id: 1, name: a, currency_code: '{{ $.VCurrency.usd.Code }}', status_code: '{{ $.VStatus.s0.Code }}'}
+    - {id: 2, name: b, currency_code: '{{ $.VCurrency.eur.Code }}', status_code: '{{ $.VStatus.s1.Code }}'}
+`,
+		dump: []string{"v_currencies", "v_statuses", "v_prices"},
+	}.run(t)
+}
+
 // Names that are reserved words, and a mixed-case table and column.
 type VOrder struct {
 	bun.BaseModel `bun:"table:VOrder"`

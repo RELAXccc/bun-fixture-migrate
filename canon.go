@@ -129,7 +129,7 @@ func Canonicalize(ctx context.Context, db bun.IDB, cfg *Config, snap *Snapshot, 
 					e.Cells[col] = fixturechange.RefTo(v.Ref.Model, c)
 				}
 			}
-			if key, err := keyOf(cfg, m, model, e.Cells); err == nil {
+			if key, err := keyOf(cfg, m, model, e.Full(m)); err == nil {
 				e.Key, e.KeyStr = key, keyString(model, key)
 			}
 		}

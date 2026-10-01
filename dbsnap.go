@@ -142,7 +142,7 @@ func DatabaseSnapshot(ctx context.Context, db bun.IDB, cfg *Config, tables map[s
 						model, col, v.Lit, target)
 				}
 			}
-			key, err := keyOf(cfg, m, model, e.Cells)
+			key, err := keyOf(cfg, m, model, e.Full(m))
 			if err != nil {
 				return nil, err
 			}
@@ -328,7 +328,7 @@ func readRows(ctx context.Context, db bun.IDB, cfg *Config, m *Model, table *dbs
 				idCol, _ := table.Column(m.ID)
 				r.id = columnText(idCol.Type, cells[0].String)
 			}
-			if sameScalar(r.id, "0") {
+			if zeroID(m, r.id) {
 				r.id = ""
 			}
 			i = 1
@@ -350,7 +350,9 @@ func readRows(ctx context.Context, db bun.IDB, cfg *Config, m *Model, table *dbs
 	return out, rows.Close()
 }
 
-// keyOf builds a natural key out of already-resolved values.
+// keyOf builds a natural key out of already-resolved values. They include the
+// id (Entry.Full), because the natural key can be the primary key: a currency
+// table keyed by its ISO code.
 func keyOf(cfg *Config, m *Model, model string, values fixturechange.Values) (fixturechange.Values, error) {
 	out := fixturechange.Values{}
 	for _, col := range m.Key {
