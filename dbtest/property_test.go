@@ -785,9 +785,8 @@ func ptDump(t *testing.T, db *bun.DB) string {
 	t.Helper()
 	var parts []string
 	for _, table := range []string{"pt_curs", "pt_nodes", "pt_links"} {
-		parts = append(parts, table+":"+scan[string](t, db,
-			"SELECT coalesce(string_agg((to_jsonb(t) - 'deleted_at')::text, ';' ORDER BY (to_jsonb(t) - 'deleted_at')::text), '') "+
-				"FROM "+table+" t WHERE deleted_at IS NULL"))
+		parts = append(parts, table+":"+scan[string](t, db, "SELECT coalesce(string_agg(r::text, ';' ORDER BY r::text), '') "+
+			"FROM (SELECT to_jsonb(t) - 'deleted_at' AS r FROM "+table+" t WHERE deleted_at IS NULL) s"))
 	}
 	return strings.Join(parts, "\n")
 }

@@ -138,6 +138,13 @@ func sdState(t *testing.T, db *bun.DB) string {
 			',' ORDER BY id) FROM sd_plans))`)
 }
 
+// sdLive is what a column expression holds in the live rows of a table, in
+// id order.
+func sdLive(t *testing.T, db *bun.DB, expr, table string) string {
+	t.Helper()
+	return scan[string](t, db, "SELECT string_agg("+expr+", ',' ORDER BY id) FROM "+table+" WHERE deleted_at IS NULL")
+}
+
 func contains(t *testing.T, what, out string, wants ...string) {
 	t.Helper()
 	for _, want := range wants {
@@ -220,7 +227,8 @@ func TestSoftDeleteThroughGenerateAndBunsMigrator(t *testing.T) {
 	for _, args := range [][]string{{"export", "-o", filepath.Join(c.dir, "export.yml")},
 		{"export", "-all-columns", "-o", filepath.Join(c.dir, "all.yml")}} {
 		out := c.must(0, args...)
-		contains(t, "export", out, "SdCurrency: 2 soft-deleted rows not exported", "SdPlan: 2 soft-deleted rows not exported")
+		contains(t, "export", out, "SdCurrency: 2 soft-deleted rows not exported",
+			"SdPlan: 2 soft-deleted rows not exported")
 		exported := readFileT(t, args[len(args)-1])
 		for _, absent := range []string{"deleted_at", "legacy", "pro", "GBP", "JPY"} {
 			if strings.Contains(exported, absent) {
@@ -280,7 +288,8 @@ func TestSoftDeleteThroughGenerateAndBunsMigrator(t *testing.T) {
 	// The subscription on team still points at it; to bun, at nothing.
 	var subs []SdSub
 	if err := db.NewSelect().Model(&subs).Relation("Plan").Order("sd_sub.id").Scan(ctx); err != nil ||
-		len(subs) != 2 || subs[0].PlanID != 2 || subs[0].Plan != nil || subs[1].Plan == nil || subs[1].Plan.Name != "legacy" {
+		len(subs) != 2 || subs[0].PlanID != 2 || subs[0].Plan != nil || subs[1].Plan == nil ||
+		subs[1].Plan.Name != "legacy" {
 		t.Fatalf("the subscriptions: %v %+v", err, subs)
 	}
 
@@ -318,10 +327,10 @@ func TestSoftDeleteThroughGenerateAndBunsMigrator(t *testing.T) {
 	if ok, out := runMigrator(t, bin, false, "-table", "sd_migrations", "-down"); !ok {
 		t.Fatalf("rollback:\n%s", out)
 	}
-	if got := scan[string](t, db, "SELECT string_agg(name, ',' ORDER BY id) FROM sd_plans WHERE deleted_at IS NULL"); got != "free,team" {
+	if got := sdLive(t, db, "name", "sd_plans"); got != "free,team" {
 		t.Fatalf("after the rollback the live plans are %s", got)
 	}
-	if got := scan[string](t, db, "SELECT string_agg(code, ',' ORDER BY id) FROM sd_currencies WHERE deleted_at IS NULL"); got != "EUR,USD" {
+	if got := sdLive(t, db, "code", "sd_currencies"); got != "EUR,USD" {
 		t.Fatalf("after the rollback the live currencies are %s", got)
 	}
 	c.write("fixtures/fixture.yml", sdV1)
@@ -427,7 +436,8 @@ func TestSoftDeleteWithTheAuditTable(t *testing.T) {
 			t.Fatal("without an audit table, revert restores the row it assumes the migration soft-deleted")
 		}
 		if audit {
-			got := scan[string](t, db, "SELECT string_agg(direction || ':' || (outcomes->0->>'status'), ',' ORDER BY id) FROM sd_audit")
+			got := scan[string](t, db, "SELECT string_agg(direction || ':' || (outcomes->0->>'status'), ',' "+
+				"ORDER BY id) FROM sd_audit")
 			if got != "up:unchanged,down:unchanged" {
 				t.Fatalf("the audit table holds %s", got)
 			}
@@ -547,20 +557,22 @@ func TestSoftDeleteWithOwnership(t *testing.T) {
 		"    references: {currency_id: SdCurrency}\n    mode: upsert\n    ids: database\n", 1))
 	c.write("fixtures/fixture.yml", sdV2)
 	out := c.must(3, "check")
-	contains(t, "check", out, "SdPlan name=legacy (soft-deleted there", "SdPlan: 1 row only in the database, which mode upsert never deletes")
+	contains(t, "check", out, "SdPlan name=legacy (soft-deleted there",
+		"SdPlan: 1 row only in the database, which mode upsert never deletes")
 	c.must(0, "sync", "-yes")
-	if got := scan[string](t, db, "SELECT string_agg(id || ':' || name, ',' ORDER BY id) FROM sd_plans WHERE deleted_at IS NULL"); !strings.HasPrefix(got, "1:free,2:team,3:legacy,") ||
+	if got := sdLive(t, db, "id || ':' || name", "sd_plans"); !strings.HasPrefix(got, "1:free,2:team,3:legacy,") ||
 		!strings.HasSuffix(got, ":pro") {
 		t.Fatalf("the live plans: %s", got)
 	}
 	// GBP comes back under its own id 3, and JPY is still refused by the
 	// full unique index.
-	if got := scan[string](t, db, "SELECT string_agg(id || ':' || code, ',' ORDER BY id) FROM sd_currencies WHERE deleted_at IS NULL"); got != "1:EUR,2:USD,3:GBP" {
+	if got := sdLive(t, db, "id || ':' || code", "sd_currencies"); got != "1:EUR,2:USD,3:GBP" {
 		t.Fatalf("the live currencies: %s", got)
 	}
 	c.write("fixture-migrate.yml", strings.Replace(sdConfig, "    soft_delete: deleted_at\n",
 		"    soft_delete: deleted_at\n    mode: insert\n", 1))
-	if code, stdout, stderr := c.run("check"); code == 0 || !strings.Contains(stdout+stderr, "mode insert, which this version does not support") {
+	if code, stdout, stderr := c.run("check"); code == 0 ||
+		!strings.Contains(stdout+stderr, "mode insert, which this version does not support") {
 		t.Fatalf("mode insert: exit %d\n%s%s", code, stdout, stderr)
 	}
 }

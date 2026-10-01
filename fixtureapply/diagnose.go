@@ -38,9 +38,13 @@ func (r *runner) diagnose(ctx context.Context, c fixturechange.Change, t fixture
 	if byKey == 0 && c.Kind == fixturechange.Delete {
 		// A row soft-deleted already: a second run, or a replica that came
 		// second.
-		if at, err := r.deletedSince(ctx, c.Model, table, c.Key); err != nil || at != "" {
+		at, err := r.deletedSince(ctx, c.Model, table, c.Key)
+		if err != nil {
+			return outcome{}, err
+		}
+		if at != "" {
 			return outcome{problem: problemBenign, message: "the row is already soft-deleted, since " + at +
-				", nothing to delete"}, err
+				", nothing to delete"}, nil
 		}
 		return r.diagnoseGone(ctx, c, t)
 	}

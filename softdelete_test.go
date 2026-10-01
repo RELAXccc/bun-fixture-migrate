@@ -102,9 +102,15 @@ func TestMentions(t *testing.T) {
 // time means one thing to one Go field and another to another.
 func TestAFixtureRowWithItsSoftDeleteSetIsNoMasterData(t *testing.T) {
 	cfg := softConfig(t)
-	text := replace(t, base, "      price_cents: 2000\n", "      price_cents: 2000\n      deleted_at: 2026-02-01T00:00:00Z\n")
+	// team sets deleted_at, to a time or to another value.
+	team := func(value string) string {
+		return replace(t, base, "      price_cents: 2000\n", "      price_cents: 2000\n      deleted_at: "+value+"\n")
+	}
 	// The features of team go with it; the file names team no more.
-	text = text[:strings.Index(text, "    - plan_id: '{{ $.Plan.team.ID }}'")]
+	withoutTeamsFeatures := func(text string) string {
+		return text[:strings.Index(text, "    - plan_id: '{{ $.Plan.team.ID }}'")]
+	}
+	text := withoutTeamsFeatures(team("2026-02-01T00:00:00Z"))
 	s := snap(t, cfg, text, "head")
 	if len(s.Entries["Plan"]) != 1 || s.Entries["Plan"][0].Key["name"].Lit != "free" || s.softDeleted["Plan"] != 1 {
 		t.Fatalf("plans: %+v, %v", s.Entries["Plan"], s.softDeleted)
@@ -114,7 +120,7 @@ func TestAFixtureRowWithItsSoftDeleteSetIsNoMasterData(t *testing.T) {
 			t.Fatalf("the column is never compared: %v", s.Columns["Plan"])
 		}
 	}
-	res, err := Compute(cfg, snap(t, cfg, base[:strings.Index(base, "    - plan_id: '{{ $.Plan.team.ID }}'")], "base"), s)
+	res, err := Compute(cfg, snap(t, cfg, withoutTeamsFeatures(base), "base"), s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,23 +139,22 @@ func TestAFixtureRowWithItsSoftDeleteSetIsNoMasterData(t *testing.T) {
 	}
 
 	// A row naming a soft-deleted row of the file, by template or by id.
-	named := replace(t, base, "      price_cents: 2000\n", "      price_cents: 2000\n      deleted_at: 2026-02-01T00:00:00Z\n")
-	if _, err := FixtureSnapshot(cfg, doc(t, named), "head"); err == nil ||
-		!strings.Contains(err.Error(), "points at a row of Plan that is soft-deleted (deleted_at = 2026-02-01T00:00:00Z)") {
+	named := team("2026-02-01T00:00:00Z")
+	if _, err := FixtureSnapshot(cfg, doc(t, named), "head"); err == nil || !strings.Contains(err.Error(),
+		"points at a row of Plan that is soft-deleted (deleted_at = 2026-02-01T00:00:00Z)") {
 		t.Fatalf("a row naming a soft-deleted row: %v", err)
 	}
 	byID := replace(t, named, "plan_id: '{{ $.Plan.team.ID }}'", "plan_id: 2")
-	if _, err := FixtureSnapshot(cfg, doc(t, byID), "head"); err == nil || !strings.Contains(err.Error(), "soft-deleted") {
+	if _, err := FixtureSnapshot(cfg, doc(t, byID), "head"); err == nil ||
+		!strings.Contains(err.Error(), "soft-deleted") {
 		t.Fatalf("a row naming a soft-deleted row by its id: %v", err)
 	}
 
 	// ~ and an absent column are live; the zero time is ambiguous.
-	live := replace(t, base, "      price_cents: 2000\n", "      price_cents: 2000\n      deleted_at: ~\n")
-	if s := snap(t, cfg, live, "head"); len(s.Entries["Plan"]) != 2 || len(s.Findings) != 0 {
+	if s := snap(t, cfg, team("~"), "head"); len(s.Entries["Plan"]) != 2 || len(s.Findings) != 0 {
 		t.Fatalf("~ is live: %+v %+v", s.Entries["Plan"], s.Findings)
 	}
-	zero := replace(t, base, "      price_cents: 2000\n", "      price_cents: 2000\n      deleted_at: 0001-01-01T00:00:00Z\n")
-	s = snap(t, cfg, zero, "head")
+	s = snap(t, cfg, team("0001-01-01T00:00:00Z"), "head")
 	if len(s.Entries["Plan"]) != 2 || len(s.Findings) != 1 || s.Findings[0].Kind != FindingAmbiguousValue ||
 		!strings.Contains(s.Findings[0].Detail, "the zero time") {
 		t.Fatalf("the zero time: %+v %+v", s.Entries["Plan"], s.Findings)
@@ -194,7 +199,8 @@ func TestSelectQueryOfASoftDeleteModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(query, `"deleted_at" IS NOT NULL ORDER BY "public"."plans"."deleted_at" DESC, "public"."plans"."id"`) {
+	if !strings.Contains(query,
+		`"deleted_at" IS NOT NULL ORDER BY "public"."plans"."deleted_at" DESC, "public"."plans"."id"`) {
 		t.Fatalf("soft-deleted: %s", query)
 	}
 	cols, err := readColumns(m, table, nil)
@@ -223,14 +229,17 @@ func TestSoftDeleteProblem(t *testing.T) {
 		table *dbschema.Table
 		want  string
 	}{
-		"good":        {column(dbschema.Column{Type: "timestamptz", Nullable: true}), ""},
-		"no zone":     {column(dbschema.Column{Type: "timestamp", Nullable: true}), ""},
-		"null":        {column(dbschema.Column{Type: "timestamptz", Nullable: true, Default: "NULL::timestamp with time zone"}), ""},
-		"missing":     {testTables()["public.plans"], "does not have"},
-		"int64":       {column(dbschema.Column{Type: "int8", FullType: "bigint", Nullable: true}), "int64 soft-delete field"},
-		"not null":    {column(dbschema.Column{Type: "timestamptz", Nullable: false}), "NOT NULL"},
-		"a default":   {column(dbschema.Column{Type: "timestamptz", Nullable: true, Default: "now()"}), "born soft-deleted"},
-		"a zero time": {column(dbschema.Column{Type: "timestamptz", Nullable: true, Default: "'0001-01-01 00:00:00+00'::timestamp with time zone"}), "Drop the default"},
+		"good":     {column(dbschema.Column{Type: "timestamptz", Nullable: true}), ""},
+		"no zone":  {column(dbschema.Column{Type: "timestamp", Nullable: true}), ""},
+		"missing":  {testTables()["public.plans"], "does not have"},
+		"int64":    {column(dbschema.Column{Type: "int8", FullType: "bigint", Nullable: true}), "int64 soft-delete field"},
+		"not null": {column(dbschema.Column{Type: "timestamptz", Nullable: false}), "NOT NULL"},
+		"null": {column(dbschema.Column{Type: "timestamptz", Nullable: true,
+			Default: "NULL::timestamp with time zone"}), ""},
+		"a default": {column(dbschema.Column{Type: "timestamptz", Nullable: true, Default: "now()"}),
+			"born soft-deleted"},
+		"a zero time": {column(dbschema.Column{Type: "timestamptz", Nullable: true,
+			Default: "'0001-01-01 00:00:00+00'::timestamp with time zone"}), "Drop the default"},
 	} {
 		got := softDeleteProblem(m, tc.table)
 		if (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {
@@ -293,7 +302,8 @@ func TestCheckSaysARowIsSoftDeletedThere(t *testing.T) {
 	}
 	lines := strings.Join(res.Lines(), "\n")
 	for _, want := range []string{
-		"In the fixture file, not in the database:\n  Plan name=team (soft-deleted there at 2026-02-01T00:00:00Z; a migration restores it)",
+		"In the fixture file, not in the database:\n" +
+			"  Plan name=team (soft-deleted there at 2026-02-01T00:00:00Z; a migration restores it)",
 		"Plan: 3 rows soft-deleted in the database, which soft_delete leaves out of the master data",
 	} {
 		if !strings.Contains(lines, want) {
