@@ -233,6 +233,10 @@ a column with a default) is a fault in the file, and the lint says so.
 When comparing against a database, only the columns the fixture files mention are read. A column no
 fixture row writes is not master data, and a difference in it is not drift.
 
+Every configured model is compared, though. A model the files hold no block of has no rows in a fresh
+seed, so `check` reports its rows as in the database only and `sync` deletes them, under the model's
+`deletes`, as `generate` does when a block leaves the files. Its rows are read by their key alone.
+
 ## What it refuses
 
 Each ends up in the output with the model, the row and a reason; `generate` writes nothing unless

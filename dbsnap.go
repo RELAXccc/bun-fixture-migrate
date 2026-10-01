@@ -22,7 +22,11 @@ type SnapshotOptions struct {
 	// mentions is not master data and a difference in it is not drift.
 	Columns map[string][]string
 	// Order overrides the model order. Nil means the dependency order worked
-	// out from the configured references.
+	// out from the configured references. A comparison passes the fixture
+	// files' order, and every configured model the files hold no block of
+	// is read after those, by its key alone: a fresh seed of the files holds
+	// no row of it, which is what a comparison has to hold the database
+	// against, and what generate makes of a block that left the files.
 	Order []string
 }
 
@@ -62,10 +66,20 @@ func DatabaseSnapshot(ctx context.Context, db bun.IDB, cfg *Config, tables map[s
 	opts SnapshotOptions) (*Snapshot, error) {
 
 	order := opts.Order
+	keyOnly := map[string]bool{}
 	if order == nil {
 		var err error
 		if order, err = cfg.DependencyOrder(); err != nil {
 			return nil, err
+		}
+	} else {
+		given := set(order)
+		order = append([]string(nil), order...)
+		for _, model := range cfg.ModelNames() {
+			if !given[model] {
+				order = append(order, model)
+				keyOnly[model] = true
+			}
 		}
 	}
 	snap := &Snapshot{Source: "the database", Order: order,
@@ -83,7 +97,11 @@ func DatabaseSnapshot(ctx context.Context, db bun.IDB, cfg *Config, tables map[s
 		if table == nil {
 			return nil, notATable(ctx, db, model, cfg.QualifiedTable(m))
 		}
-		cols, err := readColumns(m, table, opts.Columns[model])
+		want := opts.Columns[model]
+		if keyOnly[model] {
+			want = []string{}
+		}
+		cols, err := readColumns(m, table, want)
 		if err != nil {
 			return nil, fmt.Errorf("model %q: %w", model, err)
 		}

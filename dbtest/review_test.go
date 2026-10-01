@@ -11,6 +11,7 @@ import (
 	"time"
 
 	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
+	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
 
 	"github.com/uptrace/bun"
 )
@@ -270,5 +271,72 @@ func TestReviewAKeyAnyOfColumnLeftOutIsNull(t *testing.T) {
 	l.cfg.Policy.Renames = fixturemigrate.RenameUpdate
 	for i := 1; i < len(files); i++ {
 		l.fidelity(files[i-1], files[i])
+	}
+}
+
+type RvColor struct {
+	bun.BaseModel `bun:"table:rv_colors"`
+	ID            int64  `bun:"id,pk"`
+	Name          string `bun:"name,notnull"`
+}
+
+type RvSize struct {
+	bun.BaseModel `bun:"table:rv_sizes"`
+	ID            int64  `bun:"id,pk"`
+	Name          string `bun:"name,notnull"`
+	Rank          int64  `bun:"rank,notnull"`
+}
+
+// A configured model the files hold no block of has no rows in a fresh seed:
+// check and sync hold the database against that, as generate does when a
+// block leaves the files. Before, they read only the models the files hold
+// and agreed with a database the files no longer describe.
+func TestReviewAModelWithoutABlockHasNoRows(t *testing.T) {
+	l := newLab(t, map[string]*fixturemigrate.Model{
+		"RvColor": {Table: "rv_colors"},
+		"RvSize":  {Table: "rv_sizes"},
+	}, "rv_colors",
+		[]string{"DROP TABLE IF EXISTS rv_colors", "DROP TABLE IF EXISTS rv_sizes",
+			"CREATE TABLE rv_colors (id bigint PRIMARY KEY, name text NOT NULL UNIQUE)",
+			"CREATE TABLE rv_sizes (id bigint PRIMARY KEY, name text NOT NULL UNIQUE, rank bigint NOT NULL)"},
+		`SELECT (SELECT coalesce(string_agg(name, ',' ORDER BY name), '') FROM rv_colors) || ' / ' ||
+			(SELECT coalesce(string_agg(name, ',' ORDER BY name), '') FROM rv_sizes)`,
+		(*RvColor)(nil), (*RvSize)(nil))
+	both := "- model: RvColor\n  rows:\n    - {id: 1, name: red}\n- model: RvSize\n  rows:\n    - {id: 1, name: s, rank: 1}\n"
+	colors := "- model: RvColor\n  rows:\n    - {id: 1, name: red}\n"
+	l.seed(both)
+
+	head := l.read(colors)
+	var lines []string
+	readOnlyDo(t, l.db, func(tx bun.Tx, tables map[string]*dbschema.Table) {
+		database, err := fixturemigrate.DatabaseSnapshot(context.Background(), tx, l.cfg, tables,
+			fixturemigrate.SnapshotOptions{Columns: head.Columns, Order: head.Order})
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := fixturemigrate.Check(l.cfg, database, head)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines = res.Lines()
+		if len(res.Changes) != 1 || res.Changes[0].Model != "RvSize" || res.Changes[0].Kind != "delete" {
+			t.Fatalf("expected the size to be in the database only:\n%s", strings.Join(lines, "\n"))
+		}
+		// Read by its key alone, as a column no file writes is no master data.
+		if _, ok := res.Changes[0].Old["rank"]; ok {
+			t.Fatalf("the delete is guarded by a column no file writes: %+v", res.Changes[0].Old)
+		}
+	})
+	// generate says the same of the block that left the files.
+	res, err := fixturemigrate.Compute(l.cfg, fixtureSnapshot(t, l.cfg, both, "old"), fixtureSnapshot(t, l.cfg, colors, "new"))
+	if err != nil || len(res.Changes) != 1 || res.Changes[0].Model != "RvSize" {
+		t.Fatalf("%v %+v", err, res)
+	}
+	files := []fixturemigrate.FixtureFile{{Path: "fixture.yml", Data: []byte(colors)}}
+	if _, err := fixturemigrate.Sync(context.Background(), l.db, l.cfg, files, fixturemigrate.SyncOptions{}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if got, want := l.current(), l.seed(colors); got != want {
+		t.Fatalf("the sync left %q, a seed holds %q", got, want)
 	}
 }
