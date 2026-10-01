@@ -22,6 +22,11 @@ import (
 // refuse runs under, so the refusal is an outcome and not a failed set.
 const softDeleteSavepoint = "bun_fixture_migrate_soft_delete"
 
+// exclusionViolation is PostgreSQL's code for a row an exclusion constraint
+// refuses: EXCLUDE (code WITH =) keeps a second row with a key out as a
+// unique index does.
+const exclusionViolation = "23P01"
+
 // softDelete sets the soft delete column of the row a delete names to the
 // transaction's time, under the guard a delete has: the natural key, the old
 // values, live, and one row holding the key.
@@ -161,9 +166,21 @@ func (r *runner) insertOrRestore(ctx context.Context, c fixturechange.Change, t 
 		return outcome{problem: problemChanged, message: fmt.Sprintf(
 			"%s %s is soft-deleted%s and holds other values than this change writes, so it was not restored, and "+
 				"no row can be inserted beside it under the same %s. Restore it and edit it by hand, or delete it "+
-				"for good, and the change is made on the next run", t.Name, keyLabel(c.Key), cand.label(), t.ID)}, nil
+				"for good%s", t.Name, keyLabel(c.Key), cand.label(), t.ID, r.afterwards(c))}, nil
 	}
 	return r.insertBeside(ctx, c, t, table, cand)
+}
+
+// afterwards ends the advice of a change that is a changed row: whether the
+// migration runs it again once the row is put right. Under changed_row error
+// the set fails and does; under warn it is recorded as applied, and never
+// runs again.
+func (r *runner) afterwards(c fixturechange.Change) string {
+	if modeFor(r.set.PolicyFor(c.Model), problemChanged) == fixturechange.ModeError {
+		return ", and the change is made on the next run"
+	}
+	return "; changed_row is warn, so the migration carries on without the change and is recorded as applied, " +
+		"and does not run again: make the change by hand once the row is put right"
 }
 
 // candidates are the soft-deleted rows an insert can restore, newest first,
@@ -270,8 +287,8 @@ func (r *runner) insertBeside(ctx context.Context, c fixturechange.Change, t fix
 	case refused != "":
 		return outcome{problem: problemChanged, message: fmt.Sprintf(
 			"%s %s is soft-deleted%s with other values than this change writes, and %s refuses a second row: "+
-				"restore it and edit it by hand, or delete it for good, and the change is made on the next run",
-			t.Name, keyLabel(c.Key), d.label(), refused)}, nil
+				"restore it and edit it by hand, or delete it for good%s",
+			t.Name, keyLabel(c.Key), d.label(), refused, r.afterwards(c))}, nil
 	}
 	if out.problem == "" && out.rows > 0 {
 		out.message = "inserted beside the soft-deleted row" + d.label() + ", which holds other values"
@@ -288,7 +305,7 @@ func (r *runner) inSavepoint(ctx context.Context, fn func() (outcome, error)) (o
 		return outcome{}, "", err
 	}
 	out, err := fn()
-	if pgerr.State(err) == pgerr.UniqueViolation {
+	if state := pgerr.State(err); state == pgerr.UniqueViolation || state == exclusionViolation {
 		if _, rerr := r.tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT "+softDeleteSavepoint); rerr != nil {
 			return outcome{}, "", rerr
 		}
@@ -341,8 +358,8 @@ func (r *runner) updateInSavepoint(ctx context.Context, c fixturechange.Change, 
 	}
 	return outcome{problem: problemChanged, message: fmt.Sprintf(
 		"%s %s cannot take the values this change writes, because %s refuses them%s. Restore that row and edit it "+
-			"by hand, or delete it for good, and the change is made on the next run",
-		t.Name, keyLabel(c.Key), refused, holder)}, nil
+			"by hand, or delete it for good%s",
+		t.Name, keyLabel(c.Key), refused, holder, r.afterwards(c))}, nil
 }
 
 // deletedSince is when the newest soft-deleted row of a model holding a

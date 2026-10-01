@@ -1,10 +1,13 @@
 package dbtest_test
 
-// Which soft-deleted row an insert restores: the copy that holds the change's
-// values, not merely the newest with the key, locked until it is restored.
+// Which soft-deleted row an insert restores, and what it says when it cannot:
+// the copy that holds the change's values, not merely the newest with the
+// key; one locked until it is restored; an exclusion constraint taken back as
+// a unique index is; and advice that holds under changed_row warn.
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -133,5 +136,53 @@ func TestACandidateIsLockedUntilItIsRestored(t *testing.T) {
 	}
 	if got, want := sdrRows(t, db), "1:legacy=900, 2:free=0"; got != want {
 		t.Fatalf("plans\n got %s\nwant %s", got, want)
+	}
+}
+
+// Before: an exclusion constraint refusing the row inserted beside a
+// soft-deleted copy failed the whole set with a raw 23P01, where a unique
+// index's refusal is a changed row. The advice to put the row right then
+// said the change is made on the next run, which under changed_row warn,
+// the default, never comes: the migration is recorded as applied.
+func TestAnExclusionConstraintRefusingTheRowBesideIsAChangedRow(t *testing.T) {
+	db := connect(t)
+	run(t, db, "DROP TABLE IF EXISTS sdr_currencies",
+		"CREATE TABLE sdr_currencies (id bigserial PRIMARY KEY, code text NOT NULL, symbol text NOT NULL, "+
+			"deleted_at timestamptz, CONSTRAINT sdr_currencies_code_excl EXCLUDE USING hash (code WITH =))",
+		"INSERT INTO sdr_currencies (code, symbol, deleted_at) VALUES ('EUR', '€', NULL), ('JPY', '¥', '2026-04-01Z')")
+	tables := fixturechange.Tables{"Currency": {Name: "sdr_currencies", ID: "id", Key: "code", Serial: true,
+		SoftDelete: "deleted_at"}}
+	beside := fixturechange.Change{Model: "Currency", Kind: fixturechange.Insert,
+		Key: fixturechange.Values{"code": fixturechange.Lit("JPY")},
+		New: fixturechange.Values{"code": fixturechange.Lit("JPY"), "symbol": fixturechange.Lit("円")}}
+	rename := fixturechange.Change{Model: "Currency", Kind: fixturechange.Update,
+		Key: fixturechange.Values{"code": fixturechange.Lit("EUR")},
+		Old: fixturechange.Values{"code": fixturechange.Lit("EUR")},
+		New: fixturechange.Values{"code": fixturechange.Lit("JPY")}}
+	for _, c := range []fixturechange.Change{beside, rename} {
+		set := fixturechange.Set{Name: "20261001000000_fixture_jpy", Tables: tables,
+			Changes: []fixturechange.Change{c}}
+		outcomes, err := applyReporting(t, db, set)
+		if err != nil {
+			t.Fatalf("%s: %v", c.Kind, err)
+		}
+		if len(outcomes) != 1 || outcomes[0].Status != fixtureapply.StatusSkipped ||
+			outcomes[0].Problem != fixtureapply.ProblemChangedRow ||
+			!strings.Contains(outcomes[0].Message, `"sdr_currencies_code_excl"`) ||
+			strings.Contains(outcomes[0].Message, "next run") ||
+			!strings.Contains(outcomes[0].Message, "does not run again") {
+			t.Fatalf("%s: a changed row naming the constraint, which does not promise a next run: %+v", c.Kind,
+				outcomes)
+		}
+		set.Policy.ChangedRow = fixturechange.ModeError
+		var ce *fixtureapply.ChangeError
+		if _, err := applyReporting(t, db, set); !errors.As(err, &ce) ||
+			!strings.Contains(ce.Outcome.Message, "the change is made on the next run") {
+			t.Fatalf("%s: under changed_row error the set fails, and runs again: %v", c.Kind, err)
+		}
+	}
+	if got := scan[string](t, db, "SELECT string_agg(code || coalesce(' ' || deleted_at::date, ''), ', ' "+
+		"ORDER BY id) FROM sdr_currencies"); got != "EUR, JPY 2026-04-01" {
+		t.Fatalf("currencies: %s", got)
 	}
 }
