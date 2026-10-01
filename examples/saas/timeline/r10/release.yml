@@ -3,14 +3,13 @@ description: |
   feature 7, the other data residency, also as feature 7 (both took the next
   id), and relabels the settings page. Each generates its migration. Merging
   the second conflicts in the feature list and, on purpose, in the state file.
-  The developer follows the runbook: keeps both migrations, resolves the
-  fixture file (data residency becomes feature 8), takes either side of the
-  state file and runs baseline -force. status -offline then reports nothing
-  not migrated, although the data residency migration still inserts feature 7:
-  after baseline -force the state is the merged file, so that check cannot
-  find anything. The plan against production, step 2 of the runbook, does: the
-  insert of feature 7 fails on the id SCIM took. The developer corrects the id
-  in the generated file, and the plan succeeds.
+  Keeping both migrations would not do: each was generated against the state
+  before either, so whichever runs second finds the rows the other changed, and
+  data residency would insert feature 7 on top of SCIM's. The developer follows
+  the runbook: resolves the fixture file (data residency becomes feature 8),
+  keeps the SCIM migration and the state file it left, deletes the data
+  residency migration and generates it again on top of SCIM's. status -offline
+  and a plan against production then confirm both.
 steps:
   - merge:
       branches:
@@ -26,42 +25,29 @@ steps:
               output: ["Feature: 1 insert", "PlanFeature: 2 inserts", "Translation: 1 update"]
       conflicts: [fixtures/catalog.yml, migrations/fixture_state.yml]
       resolve: merged
-      state: theirs
-  # The state file of one side describes that side's fixture files, so the
-  # other side's changes show as not migrated, and status says to generate.
+      state: ours
+  # Both migrations in the directory, the state file as SCIM's left it: the
+  # data residency migration is one the state does not include, generated on
+  # another branch, and status says so rather than pointing at generate.
   - cli: [status, -offline]
     exit: 3
-    output: ["not migrated Feature: 1 insert, 2 updates", "run: bun-fixture-migrate generate"]
-  # Doing so would read feature 7's change of code as a rename (renames:
-  # update) and write it: data_residency renamed to scim on every database.
-  - cli: [generate, -dry-run, -no-lint, -name, merge, -at, "20260916100000"]
-    known: "F9: after a merge, status points at generate, which turns an id both branches took into a rename"
     output:
-      - 'ID: "7",'
-      - 'Old: fixturechange.Values{"code": fixturechange.Lit("data_residency")},'
-      - 'New: fixturechange.Values{"code": fixturechange.Lit("scim")},'
-  # The state file's own header says to run baseline on the merged file;
-  # without -force it refuses, as the runbook expects.
-  - cli: [baseline]
+      - "20260915100000_fixture_data_residency is a generated fixture migration whose changes the state file does not include"
+    absent: ["run: bun-fixture-migrate generate"]
+  # A dry run shows what generate would write, and the same warning.
+  - cli: [generate, -dry-run, -name, merge, -at, "20260916100000"]
+    output: ["warning: 20260915100000_fixture_data_residency is a generated fixture migration whose changes the state file does not include"]
+  - cli: [generate, -name, merge, -at, "20260916100000"]
     exit: 2
-    output: ["baseline would record", "pass -force if a migration you wrote by hand covers them"]
-  - cli: [baseline, -force]
-    output: ["wrote migrations/fixture_state.yml"]
+  # The runbook: keep the migration a database will have applied first, delete
+  # the other, and generate it again from the state the kept one leaves.
+  - remove: [migrations/20260915100000_fixture_data_residency.go]
+  - generate: {name: data residency, at: "20260915100000"}
+    output: ["Feature: 1 insert", "PlanFeature: 2 inserts", "Translation: 1 update"]
+  - file: migrations/20260915100000_fixture_data_residency.go
+    output: ['"id":   fixturechange.Lit("8"),']
   - cli: [status, -offline]
-    known: "F9: after baseline -force the state is the merged file, so step 4 of the runbook can never find a change neither migration makes"
     output: ["not migrated nothing"]
-  - cli: [plan]
-    env: prod
-    exit: 3
-    output:
-      - "20260914100000_fixture_scim: would succeed"
-      - "failed Feature code=data_residency insert [id drift]: features id = 7 is already held by the row id = 7 (code scim)"
-  - edit:
-      file: migrations/20260915100000_fixture_data_residency.go
-      regexp: true
-      old: '"id":(\s+)fixturechange\.Lit\("7"\)'
-      new: '"id":${1}fixturechange.Lit("8")'
-    note: the developer gives data residency the id the merged file has
   - cli: [plan, -strict]
     env: prod
     output:
