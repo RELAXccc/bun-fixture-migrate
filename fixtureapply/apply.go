@@ -181,7 +181,8 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 	}
 
 	r := &runner{tx: tx, set: set, revert: revert, dryRun: o.dryRun, refs: map[string]string{},
-		resync: map[string]bool{}, advanced: map[string]bool{}, types: map[string]map[string]colType{}}
+		resync: map[string]bool{}, advanced: map[string]bool{}, types: map[string]map[string]colType{},
+		sequences: map[string]string{}}
 	order := make([]int, len(set.Changes))
 	for i := range order {
 		order[i] = i
@@ -548,6 +549,9 @@ type runner struct {
 	advanced map[string]bool
 	// types holds, per model, the types of its table's columns, read once.
 	types map[string]map[string]colType
+	// sequences holds, per model, the sequence of its id column, "" for
+	// none, read once.
+	sequences map[string]string
 }
 
 func tableHasRows(ctx context.Context, tx bun.IDB, table string) (bool, error) {

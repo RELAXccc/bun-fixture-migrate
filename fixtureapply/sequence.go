@@ -154,13 +154,25 @@ func (r *runner) syncSequences(ctx context.Context, o options) error {
 	return nil
 }
 
-// advanceSequence moves the sequence of table.col to id when it would hand id
+// sequence is serialSequence of a model's id column, looked up once per run.
+func (r *runner) sequence(ctx context.Context, model, table string) (string, error) {
+	if seq, ok := r.sequences[model]; ok {
+		return seq, nil
+	}
+	seq, err := serialSequence(ctx, r.tx, table, r.set.Tables[model].ID)
+	if err != nil {
+		return "", err
+	}
+	r.sequences[model] = seq
+	return seq, nil
+}
+
+// advanceSequence moves the sequence seq of table to id when it would hand id
 // out again, before a row with that id is written, and reports whether it
-// did. table is quoted already; col is a plain identifier.
-func advanceSequence(ctx context.Context, db bun.IDB, table, col, id string) (bool, error) {
-	seq, err := serialSequence(ctx, db, table, col)
-	if err != nil || seq == "" {
-		return false, err
+// did.
+func advanceSequence(ctx context.Context, db bun.IDB, seq, table, id string) (bool, error) {
+	if seq == "" {
+		return false, nil
 	}
 	res, err := db.ExecContext(ctx, "SELECT setval(?::regclass, ?::bigint) FROM ? q WHERE "+
 		fmt.Sprintf(behind, "?::bigint"), seq, id, bun.Safe(seq), id, id)
