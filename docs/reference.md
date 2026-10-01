@@ -191,9 +191,10 @@ Rows trading the values of a unique index among themselves, two swapping them or
 (positions 1, 2, 3 becoming 2, 3, 1), cannot be updated in any order while the index is checked after
 every statement: whichever row moves first finds its new value still held. Nor can rows whose changes
 two such indexes order in opposite ways. With the database configured, `generate`, `check` and `sync`
-refuse those changes, naming the rows and the index: declare it a `UNIQUE` constraint `DEFERRABLE
-INITIALLY IMMEDIATE`, which a migration checks at its end, and generate again; or move one of the
-rows to a value no row holds in a migration of its own first, and the others in the next. A
+refuse those changes, naming the rows and the index, and any change waiting on one of them, for a
+value it gives up or a row it names: declare it a `UNIQUE` constraint `DEFERRABLE INITIALLY
+IMMEDIATE`, which a migration checks at its end, and generate again; or move one of the rows to a
+value no row holds in a migration of its own first, and the others in the next. A
 `DEFERRABLE` constraint orders nothing, and any trade gets through it. Where the files do not write
 every column of the index, or without the database, where the index is a guess, such a circle is a
 warning instead, and so is one the waits for an index's values close with the waits for the rows
