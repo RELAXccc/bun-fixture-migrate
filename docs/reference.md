@@ -666,8 +666,8 @@ a key ambiguous: under `UNIQUE (name) WHERE deleted_at IS NULL` the live row is 
 | The change | What it does |
 | --- | --- |
 | a delete | `UPDATE … SET deleted_at = now()`, guarded by the key, the old values and one live row; the outcome counts the rows still pointing at it, which bun now loads as nil. A second run finds it soft-deleted already |
-| an insert, a soft-deleted row holding its values | restores the newest such row: the column back to NULL, the row's id and the rows pointing at it kept. When the change writes the id, the row with that id |
-| an insert, the newest soft-deleted row holding other values | inserts a new row beside it, which a unique index over live rows lets in. A unique index over every row refuses it: a `changed row`, under `changed_row`, naming the row and the constraint |
+| an insert, a soft-deleted row holding its values | restores the newest such row, even behind a newer copy holding other values: the column back to NULL, the row's id and the rows pointing at it kept. When the change writes the id, the row with that id. The row is locked from the moment it is chosen until it is restored |
+| an insert, soft-deleted rows holding its key with other values only | inserts a new row beside the newest, which a unique index over live rows lets in. A unique index over every row refuses it: a `changed row`, under `changed_row`, naming the row and the constraint |
 | an insert, no row with the key | inserts, as always |
 | an update | updates the live row. A soft-deleted one is a `missing row` that says so; a value a soft-deleted row holds under a unique index over every row, a rename into its key, is a `changed row` |
 
