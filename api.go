@@ -515,7 +515,7 @@ type ExportOptions struct {
 }
 
 // Exported is what Export wrote from the database, before it is written to
-// disk.
+// disk. Encoded as JSON it is what export -json prints, Written included.
 type Exported struct {
 	// Files are the fixture files as export writes them, in load order, each
 	// under its path as the configuration spells it.

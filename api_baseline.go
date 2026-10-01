@@ -34,6 +34,7 @@ type BaselineOptions struct {
 }
 
 // Baselined is the state file Baseline worked out, before it is written.
+// Encoded as JSON it is what baseline -json prints.
 type Baselined struct {
 	// StatePath is the state file, and State what Write writes into it; nil
 	// when there is nothing to write.

@@ -57,6 +57,31 @@ type jsonCheckChange struct {
 	New   map[string]any `json:"file,omitempty"`
 }
 
+// jsonChange is a change of a migration, from the base to the fixture files.
+type jsonChange struct {
+	Model string         `json:"model"`
+	Kind  string         `json:"kind"`
+	Key   map[string]any `json:"key"`
+	Old   map[string]any `json:"old,omitempty"`
+	New   map[string]any `json:"new,omitempty"`
+}
+
+func jsonChanges(changes []fixturechange.Change) []jsonChange {
+	out := []jsonChange{}
+	for _, c := range changes {
+		out = append(out, jsonChange{c.Model, string(c.Kind), jsonValues(c.Key), jsonValues(c.Old), jsonValues(c.New)})
+	}
+	return out
+}
+
+// orEmpty is a list as JSON writes it: [] for none.
+func orEmpty[T any](list []T) []T {
+	if list == nil {
+		return []T{}
+	}
+	return list
+}
+
 // MarshalJSON is the report as check -json prints it.
 func (r CheckReport) MarshalJSON() ([]byte, error) {
 	out := struct {
@@ -98,4 +123,91 @@ func (r SyncReport) MarshalJSON() ([]byte, error) {
 		out.Findings = []ReportedFinding{}
 	}
 	return json.Marshal(out)
+}
+
+// MarshalJSON is the result as generate -json prints it.
+func (g Generated) MarshalJSON() ([]byte, error) {
+	out := struct {
+		Migration  string            `json:"migration"`
+		DryRun     bool              `json:"dry_run"`
+		Written    []string          `json:"written"`
+		Base       string            `json:"base"`
+		Summary    []string          `json:"summary"`
+		Changes    []jsonChange      `json:"changes"`
+		Findings   []ReportedFinding `json:"findings"`
+		Refusals   []jsonRefusal     `json:"refusals"`
+		Warnings   []jsonRefusal     `json:"warnings"`
+		NotInState []string          `json:"not_in_state"`
+		Problems   []string          `json:"problems"`
+		LeftOut    []string          `json:"left_out"`
+		Notes      []string          `json:"notes"`
+		Source     string            `json:"source,omitempty"`
+	}{Migration: g.ID, DryRun: g.dryRun, Written: orEmpty(g.Written), Summary: []string{},
+		Changes: []jsonChange{}, Refusals: []jsonRefusal{}, Warnings: []jsonRefusal{},
+		NotInState: orEmpty(g.NotInState), Problems: orEmpty(g.Problems), LeftOut: orEmpty(g.LeftOut)}
+	out.Findings = reportFindings(g.cfg, append(append([]Finding{}, g.Findings...), g.Lint...))
+	out.Notes = append(append([]string{}, g.Notes...), g.Warnings...)
+	if g.Diff != nil {
+		out.Base = g.Diff.Base
+		out.Summary = orEmpty(g.Diff.Summary())
+		out.Changes = jsonChanges(g.Diff.Changes)
+		out.Refusals, out.Warnings = jsonRefusals(g.Diff.Refusals), jsonRefusals(g.Diff.Warnings)
+	}
+	if g.dryRun {
+		out.Source = string(g.Source)
+	}
+	return json.Marshal(out)
+}
+
+// MarshalJSON is the result as baseline -json prints it.
+func (b Baselined) MarshalJSON() ([]byte, error) {
+	out := struct {
+		State      string            `json:"state"`
+		Recorded   string            `json:"recorded"`
+		Written    []string          `json:"written"`
+		Unchanged  bool              `json:"unchanged"`
+		Respelled  bool              `json:"respelled"`
+		Summary    []string          `json:"summary"`
+		Refusals   []jsonRefusal     `json:"refusals"`
+		Findings   []ReportedFinding `json:"findings"`
+		Problems   []string          `json:"problems"`
+		NotInState []string          `json:"not_in_state"`
+		LeftOut    []string          `json:"left_out"`
+	}{State: b.StatePath, Recorded: b.Recorded, Written: orEmpty(b.Written), Unchanged: b.Unchanged,
+		Respelled: b.Respelled, Summary: []string{}, Refusals: []jsonRefusal{},
+		Findings: reportFindings(b.cfg, b.Findings), Problems: orEmpty(b.Problems),
+		NotInState: orEmpty(b.NotInState), LeftOut: orEmpty(b.LeftOut)}
+	if b.Diff != nil {
+		out.Summary = orEmpty(b.Diff.Summary())
+		out.Refusals = jsonRefusals(b.Diff.Refusals)
+	}
+	return json.Marshal(out)
+}
+
+// MarshalJSON is the result as export -json prints it.
+func (e Exported) MarshalJSON() ([]byte, error) {
+	out := struct {
+		Written  []string          `json:"written"`
+		Files    []jsonExportFile  `json:"files"`
+		Findings []ReportedFinding `json:"findings"`
+		Notes    []string          `json:"notes"`
+	}{Written: orEmpty(e.Written), Files: []jsonExportFile{}, Notes: orEmpty(e.Notes)}
+	var cfg *Config
+	if e.p != nil {
+		cfg = e.p.Config
+	}
+	out.Findings = reportFindings(cfg, e.Findings)
+	for i, f := range e.Files {
+		file := jsonExportFile{Path: f.Path}
+		if i < len(e.DroppedComments) {
+			file.DroppedComments = e.DroppedComments[i]
+		}
+		out.Files = append(out.Files, file)
+	}
+	return json.Marshal(out)
+}
+
+type jsonExportFile struct {
+	Path            string `json:"path"`
+	DroppedComments int    `json:"dropped_comments"`
 }

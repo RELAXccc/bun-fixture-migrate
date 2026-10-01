@@ -98,6 +98,7 @@ column the table does not have is a sentence naming the model and the column (ex
 | `-o` | write here instead, with one fixture file only |
 | `-stdout` | write to standard output; with several fixture files, each one after a line `# ==> <path> <==`, in load order, as `head` prints several files |
 | `-all-columns` | write every column of every model, not only those the fixture files use |
+| `-json` | say what was written as JSON, see [export](#export-output); not with `-stdout` |
 
 ### check
 
@@ -126,6 +127,7 @@ state file on. The base is the state file; while there is none, git's `HEAD`.
 | `-allow-partial` | write what was accepted when something else was refused |
 | `-no-lint` | skip the checks against the database's columns and defaults, and do not connect for them |
 | `-at <time>` | name the migration as of this time, `YYYYMMDDHHMMSS` or RFC 3339, instead of now: for output that is the same on every run |
+| `-json` | say what was generated and written as JSON, see [generate](#generate-output); with `-dry-run` the migration is in it |
 
 The migration is named with the current time, or one second after the newest migration when that is
 not earlier, and never with the name of another one. A migration whose name sorts after it is warned
@@ -183,6 +185,7 @@ first; and a finding in the fixture files that the policy makes an error.
 | `-force` | replace a differing state, and clear what was left out: a migration you wrote covers the difference |
 | `-offline` | do not ask the database whether a difference is only in how values are written |
 | `-dsn` | the database to ask, instead of the configuration's |
+| `-json` | say what was recorded as JSON, see [baseline](#baseline-output) |
 
 ### status
 
@@ -339,10 +342,18 @@ them later does not change what an existing migration does. A model overrides `d
 
 ## JSON output
 
-`check`, `status`, `plan` and `sync` take `-json`. Values are strings as the database spells them,
-NULL is `null`, and a reference is `{"model": "Currency", "key": "USD"}`, so neither can be mistaken
-for a string. Lists are `[]` rather than `null` when empty, except the fields this page marks as
-left out when empty. Fields may be added; none will change meaning.
+`check`, `export`, `generate`, `baseline`, `status`, `plan` and `sync` take `-json`. Values are
+strings as the database spells them, NULL is `null`, and a reference is
+`{"model": "Currency", "key": "USD"}`, so neither can be mistaken for a string. Lists are `[]` rather
+than `null` when empty, except the fields this page marks as left out when empty. Fields may be
+added; none will change meaning.
+
+With `-json`, standard output is the report and nothing else. A command that refuses (exit 2) or
+finds something (exit 3) prints its report all the same, then says why on standard error. One that
+could not do its job (exit 1) prints none, unless it got far enough to have one: a plan that could
+not finish, a sync that failed halfway. Each report is the encoding of what the
+[Go API](#the-go-packages) returns for the same call, so a program reading the command and one calling
+the library see the same thing.
 
 ### check output
 
@@ -398,7 +409,8 @@ field's type could settle, such as a null inside a sequence), `unknown column`.
   "database": {"table": "bun_migrations", "table_exists": true, "not_in_directory": [],
                "newest_applied": "20260930165255", "locks_table": "bun_migration_locks", "locked": false},
   "problems": [],
-  "notes": []
+  "notes": [],
+  "failures": []
 }
 ```
 
@@ -413,6 +425,89 @@ field's type could settle, such as a null inside a sequence), `unknown column`.
 | `migrations` | `applied` is `null` for a pending migration and for all of them without a database; `out_of_order` is a pending one that sorts before `newest_applied` |
 | `not_in_state` | fixture migrations of the directory the state's history does not include; `problems` says why, and says when the one the state includes last is gone |
 | `database` | `null` when none was asked. `locked` is a row in `locks_table` naming `table`: a migrator running now, or one that died and left it |
+| `failures` | why status fails, one sentence each: the exit code is 3 while there is one, and the last line on standard error joins them |
+
+### generate output
+
+```json
+{
+  "migration": "20260930165255_fixture_plan_prices",
+  "dry_run": false,
+  "written": ["migrations/20260930165255_fixture_plan_prices.go", "migrations/fixture_state.yml"],
+  "base": "the state after 20260921120000_fixture_seats",
+  "summary": ["Plan: 1 insert, 1 update"],
+  "changes": [
+    {"model": "Plan", "kind": "update", "key": {"name": "team"},
+     "old": {"price_cents": "2000"}, "new": {"price_cents": "2500"}}
+  ],
+  "findings": [],
+  "refusals": [],
+  "warnings": [],
+  "not_in_state": [],
+  "problems": [],
+  "left_out": [],
+  "notes": []
+}
+```
+
+| Field | |
+| --- | --- |
+| `migration` | the migration as bun prints it; `""` when there is nothing to write |
+| `written` | the files written, the migration first; `[]` with `-dry-run`, on a refusal, and when nothing changed. When the files differ from the state only in how values are written, the state file alone |
+| `base` | what the fixture files were diffed against, as the generated file's comment names it; `""` when generate stopped before it compared |
+| `summary`, `changes` | what the migration does, one line per model, and each change from the base (`old`) to the files (`new`), in the order it runs; `old` is left out of an insert and `new` of a delete |
+| `findings` | as in [check](#check-output): what the fixture files turn up on their own, then what the lint against the database's columns does |
+| `refusals`, `warnings` | as in [check](#check-output): what needs a hand-written migration, and what the policy lets the migration carry on past |
+| `not_in_state`, `problems` | as in [status](#status-output): fixture migrations the state file's history does not include, and what is wrong, which refuses unless `-dry-run` |
+| `left_out` | the changes the state file records as left out once this run wrote it, `-allow-partial`'s refusals included |
+| `notes` | what generate says and carries on past: no state file yet, so the diff is against `HEAD`; a migration that sorts after this one; a change set written in parts; a missing seed guard; the package it goes into |
+| `source` | with `-dry-run` only: the migration's Go source |
+
+### baseline output
+
+```json
+{
+  "state": "migrations/fixture_state.yml",
+  "recorded": "fixtures/fixture.yml",
+  "written": ["migrations/fixture_state.yml"],
+  "unchanged": false,
+  "respelled": false,
+  "summary": [],
+  "refusals": [],
+  "findings": [],
+  "problems": [],
+  "not_in_state": [],
+  "left_out": []
+}
+```
+
+| Field | |
+| --- | --- |
+| `recorded` | what was recorded: the fixture files, `<rev>:` them with `-from`, or the file `-old` names |
+| `written` | `[]` when the state file records them already (`unchanged`), and on a refusal |
+| `respelled` | the database said the files differ from the state only in how values are written |
+| `summary`, `refusals` | what the files change against the state baseline would replace, when it refuses to record that without `-force` |
+| `findings` | as in [check](#check-output); one the policy makes an error refuses the baseline |
+| `problems` | what refuses the baseline even with `-force`: fixture migrations generated against another state, or the one the state includes last gone from the directory |
+| `not_in_state` | fixture migrations written by hand that the state's history does not include: refused without `-force`, recorded with it |
+| `left_out` | the changes the state records as left out: refused without `-force`, cleared with it |
+
+### export output
+
+```json
+{
+  "written": ["fixtures/fixture.yml"],
+  "files": [{"path": "fixtures/fixture.yml", "dropped_comments": 0}],
+  "findings": [],
+  "notes": []
+}
+```
+
+`written` are the files written, `-o`'s included, and `[]` when the export is refused. `files` are the
+fixture files in load order, each with how many comment lines of the file it replaces it does not
+have. `findings` are as in [check](#check-output): what the database holds that the files would not
+load back as, which the policy may make a refusal. `notes` say that every column and id was
+exported, because the fixture files there do not read.
 
 ### plan output
 

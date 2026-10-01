@@ -25,6 +25,7 @@ func baseline(o streams, args []string) error {
 		oldPath = fs.String("old", "", "record this file instead of the fixture file")
 		force   = fs.Bool("force", false, "replace a state whose content differs: a migration you wrote covers the difference")
 		offline = fs.Bool("offline", false, "do not ask the database whether a difference is only in how values are written")
+		asJSON  = fs.Bool("json", false, "write what was recorded as JSON")
 	)
 	s, err := common(o, fs, args)
 	if err != nil {
@@ -50,6 +51,21 @@ func baseline(o streams, args []string) error {
 	}
 	var refusal *fixturemigrate.RefusedError
 	refused := errors.As(err, &refusal)
+	if *asJSON {
+		if err == nil {
+			if _, err := b.Write(); err != nil {
+				return err
+			}
+		}
+		if err != nil && !refused {
+			return err
+		}
+		if werr := writeJSON(o.stdout, b); werr != nil {
+			return werr
+		}
+		return err
+	}
+
 	switch {
 	case !refused:
 	case len(refusal.Problems) > 0:

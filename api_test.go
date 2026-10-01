@@ -387,10 +387,18 @@ func TestStatusOffline(t *testing.T) {
 	}
 }
 
-// Every list of a report is [] in JSON when it is empty, as a program ranging
-// over it expects.
-func TestTheJSONOfAReportHasNoNullLists(t *testing.T) {
+// Every list of every result is [] in JSON when it is empty, as a program
+// ranging over it expects.
+func TestTheJSONOfAResultHasNoNullLists(t *testing.T) {
+	dir := apiProject(t, apiConfig, apiNew)
+	p := loadProject(t, dir)
+	g, err := p.Generate(context.Background(), nil, GenerateOptions{Name: "x", Old: filepath.Join(dir, "base.yml"),
+		DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for name, v := range map[string]any{
+		"generated": g, "empty generated": &Generated{}, "baselined": &Baselined{}, "exported": &Exported{},
 		"check": &CheckReport{}, "sync": &SyncReport{}, "sync result": &SyncReport{SyncResult: &SyncResult{}},
 	} {
 		data, err := json.Marshal(v)
@@ -400,6 +408,19 @@ func TestTheJSONOfAReportHasNoNullLists(t *testing.T) {
 		if strings.Contains(string(data), "null") {
 			t.Errorf("%s: %s", name, data)
 		}
+	}
+	data, _ := json.Marshal(g)
+	var back struct {
+		Migration, Source string
+		DryRun            bool `json:"dry_run"`
+		Changes           []struct {
+			Old, New map[string]any
+		}
+	}
+	if err := json.Unmarshal(data, &back); err != nil || !back.DryRun || back.Source != string(g.Source) ||
+		len(back.Changes) != 1 || back.Changes[0].Old["price_cents"] != "2000" ||
+		back.Changes[0].New["price_cents"] != "2500" {
+		t.Fatalf("%v %s", err, data)
 	}
 }
 

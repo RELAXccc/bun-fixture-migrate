@@ -284,6 +284,7 @@ func export(o streams, args []string) error {
 		out        = fs.String("o", "", "write here instead of the fixture file of the configuration (one fixture file only)")
 		stdout     = fs.Bool("stdout", false, "write to standard output")
 		allColumns = fs.Bool("all-columns", false, "write every column, not only those the fixture files already use")
+		asJSON     = fs.Bool("json", false, "write what was written as JSON")
 	)
 	s, err := common(o, fs, args)
 	if err != nil {
@@ -293,31 +294,44 @@ func export(o streams, args []string) error {
 	if several && *out != "" {
 		return fmt.Errorf("-o writes one file; with several fixture files, export writes each of them in place")
 	}
+	if *asJSON && *stdout {
+		return fmt.Errorf("-json and -stdout both write to standard output; pass one of them")
+	}
 	db := s.database()
 	defer db.Close()
 	exp, err := s.p.Export(o.ctx, db, fixturemigrate.ExportOptions{AllColumns: *allColumns})
 	if exp == nil {
 		return err
 	}
-	for _, note := range exp.Notes {
-		fmt.Fprintln(o.stderr, "note:", note)
+	if !*asJSON {
+		for _, note := range exp.Notes {
+			fmt.Fprintln(o.stderr, "note:", note)
+		}
 	}
 	if err != nil && !errors.Is(err, fixturemigrate.ErrRefused) {
 		return err
 	}
-	for _, f := range exp.Findings {
-		fmt.Fprintln(o.stderr, string(f.Kind)+":", f.String())
-	}
-	// An export is written from the database, not edited into the file it
-	// replaces: what the file said in comments is gone from it. Written
-	// elsewhere, with -o or to standard output, it replaces nothing.
-	for i, n := range exp.DroppedComments {
-		if n > 0 && *out == "" && !*stdout {
-			fmt.Fprintf(o.stderr, "note: the export does not keep the comments of %s: %s not in it; "+
-				"put back the ones to keep before committing\n", s.fixturePaths[i], plural(n, "comment line"))
+	if !*asJSON {
+		for _, f := range exp.Findings {
+			fmt.Fprintln(o.stderr, string(f.Kind)+":", f.String())
+		}
+		// An export is written from the database, not edited into the file
+		// it replaces: what the file said in comments is gone from it.
+		// Written elsewhere, with -o or to standard output, it replaces
+		// nothing.
+		for i, n := range exp.DroppedComments {
+			if n > 0 && *out == "" && !*stdout {
+				fmt.Fprintf(o.stderr, "note: the export does not keep the comments of %s: %s not in it; "+
+					"put back the ones to keep before committing\n", s.fixturePaths[i], plural(n, "comment line"))
+			}
 		}
 	}
 	if err != nil {
+		if *asJSON {
+			if werr := writeJSON(o.stdout, exp); werr != nil {
+				return werr
+			}
+		}
 		return err
 	}
 	if *stdout {
@@ -347,6 +361,9 @@ func export(o streams, args []string) error {
 			}
 			return err
 		}
+	}
+	if *asJSON {
+		return writeJSON(o.stdout, exp)
 	}
 	for _, path := range exp.Written {
 		fmt.Fprintln(o.stdout, "wrote", path)

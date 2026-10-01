@@ -50,6 +50,7 @@ type GenerateOptions struct {
 }
 
 // Generated is the migration Generate worked out, before anything is written.
+// Encoded as JSON it is what generate -json prints.
 type Generated struct {
 	// Diff is the comparison, the base on the left and the fixture files on
 	// the right: its Changes are what the migration makes, its Refusals what

@@ -24,6 +24,7 @@ func generate(o streams, args []string) error {
 		partial = fs.Bool("allow-partial", false, "write the changes that were accepted even when others were refused")
 		noLint  = fs.Bool("no-lint", false, "do not check the fixture file against the database's columns and defaults")
 		at      = fs.String("at", "", "timestamp the migration as of this time, YYYYMMDDHHMMSS or RFC 3339, instead of now: for output that is the same on every run")
+		asJSON  = fs.Bool("json", false, "write what was generated and written as JSON")
 	)
 	s, err := common(o, fs, args)
 	if err != nil {
@@ -63,6 +64,21 @@ func generate(o streams, args []string) error {
 	toWrite := g.Diff != nil && len(g.Diff.Changes) > 0
 	if atErr != nil && toWrite && !refused && !errors.Is(err, fixturemigrate.ErrNameRequired) {
 		return atErr
+	}
+
+	if *asJSON {
+		if err == nil && !*dryRun {
+			if _, err := g.Write(); err != nil {
+				return err
+			}
+		}
+		if err != nil && !refused {
+			return generateError(err, *fromDB)
+		}
+		if werr := writeJSON(o.stdout, g); werr != nil {
+			return werr
+		}
+		return err
 	}
 
 	// What the fixture files turn up on their own stops generate before
