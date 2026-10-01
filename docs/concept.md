@@ -74,7 +74,7 @@ These decide every trade-off further down.
 | composite primary key, m2m join table | no single id | keyed on the natural key only | done |
 | self-referencing model (`parent_id`) | order inside one model | parents inserted first, children deleted first, exported parents first; read whatever the id order | done |
 | enum types, domains, `citext` | text in, typed out; a domain's own name hides its base type; `Go` and `GO` are one `citext` | PostgreSQL compares; a domain is its base type, its default and `NOT NULL` the column's; keys equal under their type are a duplicate | done |
-| `soft_delete` | a delete is an UPDATE of `deleted_at` | soft-delete aware snapshot and delete | later |
+| `soft_delete` | a delete is an UPDATE of `deleted_at`; bun reads live rows only, and a soft-deleted row comes back by an UPDATE, not an INSERT | `soft_delete: deleted_at`: live rows only, a delete soft-deletes, an insert restores; the zero-time spelling is refused | done |
 | a table the application or tenants insert into too, from one sequence | a fixture file's next id is somebody's row; the rows they add are drift | `mode: upsert` keeps their rows, `ids: database` leaves every id to the sequence | done |
 | a column an admin UI or an operator edits, a price or a flag | every edit is drift, and the file's next change of that column is skipped as a changed row | `insert_only`, or `mode: insert` for a whole table | done |
 | schema-qualified table, mixed-case or reserved-word names | quoting | quoted everywhere | done |
@@ -212,6 +212,13 @@ Each was reproduced before it went into this table.
   fewer changes, so the run time is untouched.
 - **Drift that explains itself.** Where the database holds a column's default and the file a null or
   a zero, `check` says that bun wrote `DEFAULT` there, on an insert and, since v1.2.17, on an update.
+- **Soft deletes.** A model with `soft_delete: deleted_at` is its live rows: check, sync and export
+  read no other, a fixture row that sets the column is no master data, and a soft-deleted row of a
+  key never makes it ambiguous. A migration's delete sets the column, its insert restores the newest
+  soft-deleted row holding its values, with its id and the rows pointing at it, or inserts beside one
+  holding others where a unique index over live rows lets it, and a revert undoes either. The table
+  carries the column in the generated file, `Table.SoftDelete`, which older files leave out and keep
+  their hard deletes. `scaffold` proposes it as a guess, never the other commands.
 
 ### Later
 
@@ -219,8 +226,9 @@ Each was reproduced before it went into this table.
   `RAISE EXCEPTION` per policy) for projects whose migrations are SQL only and for other migrators.
   It cannot take back bun's record of a failure from inside the failed transaction, so with bun it
   needs `WithMarkAppliedOnSuccess(true)`, and says so in the file.
-- **Soft deletes.** A model with `soft_delete: deleted_at` reads only live rows, deletes by setting
-  the column, and undeletes instead of inserting a second copy.
+- **Soft deletes under `mode: insert`.** Refused for now: under it a soft-deleted row is the
+  database's and must not come back, which needs the run time to know the mode. A restore compares
+  `insert_only` columns too, which the run time cannot tell apart; both need a field in the table.
 - **Scoped inserts.** An insert into a model with a `where` clause is checked against it, so a row
   the export would not see again cannot be written.
 - **Batching** for change sets of thousands of rows: one statement per model and kind instead of

@@ -66,6 +66,23 @@ files'. **`model "X": ids is database, so its id differs from one database to th
 `ids: database` the key and the `ref` column cannot be the id; key and name the rows by columns the
 files own.
 
+**`model "X": soft_delete column "deleted_at" is named in where`** (or is the id, part of the key,
+the `ref` column, a reference, or in `ignore`, `derived`, `insert_only` or `defaults`). The
+[`soft_delete`](reference.md#soft-deleted-rows) column says whether a row is live and nothing else.
+Drop `deleted_at IS NULL` from `where`: `soft_delete` limits the model to live rows already, and a
+migration that restores a row has to see the soft-deleted ones. **`is set with deletes: cascade`**:
+a soft delete reaches no row through a foreign key; take `deletes` out. **`is set with mode
+insert, which this version does not support`**: under `mode: insert` a soft-deleted row is the
+database's and must not come back, which a migration cannot tell; use `mode: upsert`, or leave
+`soft_delete` out.
+
+**`soft_delete names deleted_at, a bigint column`** (`check`, `sync`, `export`, `generate`).
+bun's `int64` soft-delete field writes a time into the column and fails on PostgreSQL; only a nullable
+`timestamptz` or `timestamp` column, NULL for a live row, works. **`which is NOT NULL, so no row could
+be live`**: make the column nullable. **`which defaults to now()`**: bun writes the default for a
+`nullzero` field's zero and for a nil pointer, so every row bun inserts is born soft-deleted; drop
+the default. **`does not have`**: the table has no such column.
+
 **`the models A, B reference each other in a circle`.** The `references:` form a cycle, so there is
 no order to insert them in. A self-reference is fine; a cycle across models needs one of the columns
 left out of `references` (and set by hand).
@@ -122,6 +139,14 @@ name a row of the file. Write the reference as a template instead.
 **`key column "code" is missing from a row and has no default`.** Every row needs its natural key.
 Add it, or a `defaults` entry.
 
+**`X.col: {{ $.Y.row.ID }} points at a row of Y that is soft-deleted (deleted_at = …)`.** The row it
+names sets the model's [`soft_delete`](reference.md#soft-deleted-rows) column, so `dbfixture` seeds it
+soft-deleted and bun loads it through no relation. Take `deleted_at` off that row, or point this one
+elsewhere. **`X: col = 3 points at public.y id 3, which is soft-deleted`** (`check`, `sync`,
+`export`) is the same in the database: restore the row, `UPDATE … SET deleted_at = NULL`, or repoint
+the live row. **`whose deleted_at holds the zero time`**: the row is live to a `time.Time` field
+without `nullzero`, which wrote it; see the `soft delete` finding below.
+
 ## Findings
 
 Findings are problems in the fixture files that the configuration's `policy` makes errors (exit 2)
@@ -134,6 +159,8 @@ or warnings.
 | `invalid value` | the column cannot take the value as `dbfixture` writes it: PostgreSQL cannot cast it (`abc` into an integer, `2026-02-30` into a date, an enum label that does not exist, a domain's `CHECK`), it is too long for the column, a single-column `CHECK` refuses it, an integer column gets a fraction; or a `time.Time` and a string field, or two servers, would store two values. The message names them | fix the value; [dates and times](fixture-files.md#dates-and-times) |
 | `unknown column` | the table has no such column | fix the name, or `ignore` it |
 | `duplicate key` | two rows share a natural key, or two keys are one value to the key's type, `Go` and `GO` in `citext` | fix the rows, and give the table a unique index on the key |
+| `soft delete` | a [`soft_delete`](reference.md#soft-deleted-rows) column that is not a nullable timestamp without a default; or rows holding the zero time in it, `N rows hold the zero time in deleted_at`, which a `time.Time` field without `nullzero` writes for a live row and the tool reads as deleted. Always an error | give the field `nullzero` or make it a pointer, and `UPDATE … SET deleted_at = NULL WHERE deleted_at = '0001-01-01 00:00:00+00'` |
+| `ambiguous value` | among others, `deleted_at is the zero time` in a fixture row: a `nullzero` field writes NULL, a live row, a pointer field the zero time, a deleted one | write `~` for a live row, or the time it was deleted |
 
 A generated column, or an explicit id in an `IDENTITY ALWAYS` column, is reported the same way:
 PostgreSQL refuses to write either.
@@ -381,6 +408,13 @@ Messages a generated migration returns through bun's migrator:
 | `the sequence public.plans_id_seq of plans has to be kept past the ids written into the table explicitly, and the role running this ... may not ...: GRANT UPDATE ON SEQUENCE ...` | error, before the id is written: nothing was changed | run the `GRANT` it names; `plan` says the same |
 | `The role running the migration lacks a privilege, or a row-level security policy applies to it` | error: PostgreSQL refused a statement, or a row a trigger wrote did not pass a policy's check | grant what is missing, or run migrations as the tables' owner or a role with `BYPASSRLS` |
 | `exists, but under id 7 and not 3` | id drift | [a migration failed](production.md#a-fixture-migration-failed-during-a-deploy) |
+| `is soft-deleted (id 3, deleted at …) with other values than this change writes, and constraint "plans_name_key" refuses a second row` | changed row: a row coming back that a soft-deleted row holds the key of with other values, under a unique index over every row | [a returning row is soft-deleted with other values](production.md#a-returning-row-is-soft-deleted-with-other-values) |
+| `cannot take the values this change writes, because constraint … refuses them: a soft-deleted row holds code=GBP` | changed row: a rename into a key, or a value, a soft-deleted row holds under a unique index over every row | the same |
+| `It is soft-deleted, since …, and the fixture file still holds it` | missing row: an update of a row soft-deleted in this database | restore it, `UPDATE … SET deleted_at = NULL`, or take it out of the fixture file |
+| `is soft-deleted, since …: restore it, or point the row elsewhere` | error: a change writes a reference to a row soft-deleted in this database | restore that row, or change the fixture file |
+| `the row is already soft-deleted, since …, nothing to delete` | not a problem: a second run, or a replica that came second | nothing |
+| `restored the row soft-deleted at …` / `inserted beside the soft-deleted row` | not a problem: what an insert of a model with a `soft_delete` did | nothing; see [soft-deleted rows](reference.md#soft-deleted-rows) |
+| `still points at it …; bun loads a soft-deleted row through no relation` | not a problem: a soft delete of a row the application's rows point at, which they now load as nil | repoint them, if the application should not |
 | `2 rows of features point at plans name=pro through ...` | referenced | [a migration failed](production.md#a-fixture-migration-failed-during-a-deploy) |
 | `rows of plans hold name=team` | duplicate key: more than one row has the natural key, none is touched | remove the extra rows and add a unique index on the key |
 | `held a lock on a row of plans for longer than the lock timeout` | lock timeout: nothing was changed | the next deploy runs it again; find the long transaction |

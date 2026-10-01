@@ -207,9 +207,33 @@ and held against the database before anything is written, and a difference fails
   `Hello {{ name }}`, is written as a template whose only action is that text as a string literal,
   `'{{ "Hello {{ name }}" }}'`, which evaluates to it.
 
+Of a model with a `soft_delete`, an export writes live rows only and never the column, with
+`-all-columns` too: written without the column, a soft-deleted row would load live in a fresh seed,
+and written with it, it would be no master data anyway. A note counts the rows left out.
+
 **Without a database**, values are compared as the YAML type says: two spellings of one integer or
 one decimal are equal, a string only equals the same string, and a value the column's type would
 have to settle is refused, as above.
+
+## Rows with deleted_at
+
+A model with a [`soft_delete`](reference.md#soft-deleted-rows) column has live rows, where it is
+NULL, and soft-deleted rows. A fixture row that leaves the column out, or writes `~`, is live.
+`dbfixture` writes the column as the field holds it, so a row that sets it is seeded soft-deleted:
+
+```yaml
+- model: Plan
+  rows:
+    - {_id: free, name: free, price_cents: 0}
+    - {_id: legacy, name: legacy, price_cents: 900, deleted_at: 2026-02-01T00:00:00Z}
+```
+
+Such a row is no master data: the tool leaves it out, with a note, and a migration neither writes nor
+compares it. A live row naming it by a template or an id is an error, since bun loads a soft-deleted
+row through no relation. Setting the column on a row the files held live is a delete, which the
+migration makes as a soft delete at the time it runs, not the file's; taking it out again is an
+insert, which restores the row. The zero time, `0001-01-01T00:00:00Z`, is an `ambiguous value`: a
+`nullzero` field writes it as NULL, a live row, and a pointer field as it is, a deleted one.
 
 ## Columns a row leaves out
 

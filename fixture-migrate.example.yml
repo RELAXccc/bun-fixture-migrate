@@ -285,6 +285,16 @@ models:
     # policy.array_nulls for this model's array columns alone: its Go fields
     # are []*string, which keep a null inside a sequence.
     array_nulls: keep
+    # The application retires add-ons with bun's soft delete: the model has
+    # DeletedAt time.Time `bun:",soft_delete,nullzero"`, or a *time.Time.
+    # soft_delete names its column, a nullable timestamptz without a default.
+    # Only live rows, where it is NULL, are master data: check, sync and
+    # export read no other, and never the column. A row that leaves the file
+    # is soft-deleted, not deleted; one that comes back is restored, with its
+    # id and the rows pointing at it. Never set it from the column's name
+    # alone: without the Go tag, bun reads every row. Not with mode insert,
+    # deletes: cascade, or the column named in where.
+    soft_delete: deleted_at
 
   # A table tenants add roles of their own to, numbered by the same sequence.
   Role:

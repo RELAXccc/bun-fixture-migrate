@@ -91,7 +91,9 @@ key and the `ref` column, and the ids only when the rows name them. A column the
 is not master data, and the ids of the database exported from mean nothing in another one; written
 into the file, either would be a change of every row to `generate`. A model the files do not hold
 yet is written whole, ids included, unless a default other than a sequence makes its ids up, as
-`gen_random_uuid()` does. Fixture files that cannot be read are replaced whole, with a note.
+`gen_random_uuid()` does. Fixture files that cannot be read are replaced whole, with a note. Of a
+model with a [`soft_delete`](#soft-deleted-rows), it writes live rows only and never the column, and
+a note counts the rows it left out.
 
 It writes what the fixture files own and nothing the configuration gives to the database (see
 [who owns what](#who-owns-what)): of a model under `mode: upsert` or `insert` the files hold, only
@@ -121,7 +123,9 @@ fixture files write and the table does not have is not read: it is the `unknown 
 
 What the configuration gives to the database (see [who owns what](#who-owns-what)) is no difference
 and leaves the exit code 0; a last block counts it per model, such as `Role: 3 rows only in the
-database, which mode upsert never deletes`, so nobody wonders whether check saw it. A difference in
+database, which mode upsert never deletes`, so nobody wonders whether check saw it; so are the rows
+of a model with a [`soft_delete`](#soft-deleted-rows) the database holds soft-deleted, and a row the
+files hold and the database holds soft-deleted says so. A difference in
 which the database holds the column's literal default and the file a null or the type's zero gets a
 `hint:` line: bun writes `DEFAULT` for a nil pointer, a zero in a `nullzero` field and a zero in a
 field with a `default:` tag, on an `INSERT` and, since bun v1.2.17, on an `UPDATE` of a model, so a
@@ -400,6 +404,7 @@ listed stops every command.
 | `mode` | `policy.mode` | `sync`, `upsert` or `insert`: which of the model's rows the fixture files own; see [who owns what](#who-owns-what) |
 | `insert_only` | | columns an insert writes and the database owns afterwards, an operator's `enabled` on a feature flag: never compared, updated or guarded on. Not a column of the key, the `ref` column, the id, nor one in `ignore` or `derived` |
 | `ids` | `file` | `file`, or `database` for a table the application inserts into too: the database gives every row its id, which a migration never writes, nothing compares and export never writes. The key and the `ref` column cannot be the id |
+| `soft_delete` | | the column of the model's bun `soft_delete` field, `deleted_at`: only live rows, where it is NULL, are master data, and a migration soft-deletes and restores rather than delete and insert; see [soft-deleted rows](#soft-deleted-rows). Never guessed from the catalog |
 
 ### policy
 
@@ -487,7 +492,78 @@ it always does: move the sequence after it with `fixtureapply.SyncSequences`.
 What a revert cannot do: a delete is put back from its guard, which an `insert_only` column is not
 in, so `Revert` inserts the row with the column's default there, and fails where the column is
 `NOT NULL` without one. An insert is taken back by a delete guarded by everything it wrote, so a
-row whose `insert_only` column an operator changed since is skipped as changed.
+row whose `insert_only` column an operator changed since is skipped as changed. A model with a
+`soft_delete` restores the row it soft-deleted instead, which keeps the column.
+
+### Soft-deleted rows
+
+A model whose bun struct has a `soft_delete` field, `DeletedAt time.Time
+bun:",soft_delete,nullzero"` or `DeletedAt *time.Time bun:",soft_delete"`, names its column:
+
+```yaml
+models:
+  Plan:
+    table: plans
+    key: [name]
+    soft_delete: deleted_at   # NULL means live
+```
+
+bun deletes such a row by setting the column, and reads only the rows where it is NULL; so does the
+tool. A row is live while the column is NULL, and only live rows are master data:
+
+| Command | Soft-deleted rows |
+| --- | --- |
+| `check`, `sync` | not drift. A row the files hold and the database holds soft-deleted is a row only the files hold, annotated `(soft-deleted there at T; a migration restores it)`; the last block counts the soft-deleted rows per model |
+| `export` | never written, nor the column, `-all-columns` included: written without it, a fresh seed would load them live. A note counts them |
+| `generate` | a fixture row that sets the column is seeded soft-deleted by `dbfixture`, so it is no master data either: it is left out, with a note. A row going from live to soft-deleted in the files is a delete, and back an insert |
+| `status`, `baseline` | no rows; with a database, the lints below |
+
+The column is never compared, written or exported. A live row pointing at a soft-deleted row, in the
+database or in the files, is an error that names it: bun loads a soft-deleted row through no relation.
+
+**What a migration does.** The generated file carries the column in its tables, as
+`"Plan": {Name: "plans", ID: "id", Key: "name", SoftDelete: "deleted_at"}`, and every statement,
+natural-key lookup and reference of the model sees live rows only. Soft-deleted history never makes
+a key ambiguous: under `UNIQUE (name) WHERE deleted_at IS NULL` the live row is the row.
+
+| The change | What it does |
+| --- | --- |
+| a delete | `UPDATE … SET deleted_at = now()`, guarded by the key, the old values and one live row; the outcome counts the rows still pointing at it, which bun now loads as nil. A second run finds it soft-deleted already |
+| an insert, a soft-deleted row holding its values | restores the newest such row: the column back to NULL, the row's id and the rows pointing at it kept. When the change writes the id, the row with that id |
+| an insert, the newest soft-deleted row holding other values | inserts a new row beside it, which a unique index over live rows lets in. A unique index over every row refuses it: a `changed row`, under `changed_row`, naming the row and the constraint |
+| an insert, no row with the key | inserts, as always |
+| an update | updates the live row. A soft-deleted one is a `missing row` that says so; a value a soft-deleted row holds under a unique index over every row, a rename into its key, is a `changed row` |
+
+The outcome's `action` says which: `soft-deleted`, `restored`, `inserted`. A revert inverts the
+changes as always, so it restores what the migration soft-deleted and soft-deletes what it restored
+or inserted; with an [audit table](#the-audit-table) it leaves alone a row the migration found
+soft-deleted already, and without one it restores it, assuming the migration soft-deleted it.
+
+**What the column has to be.** A nullable `timestamptz` or `timestamp` column without a default.
+check, sync, export and `generate -from-db` refuse any other, and the lint is a `soft delete`
+finding, always an error: bun's `int64` soft-delete field writes a time into the column and fails on
+PostgreSQL, a `NOT NULL` column has no live row, and with a default bun writes it for a `nullzero`
+field's zero and a row is born deleted. Rows holding the zero time are a `soft delete` finding too:
+a `time.Time` field without `nullzero` writes it for a live row, and bun reads such a row as live
+where this configuration reads it as deleted. Give the field `nullzero` or make it a pointer, and set
+those rows to NULL. A fixture row writing the zero time is an `ambiguous value`.
+
+**What it cannot be combined with.** The column is no other column of the model: not the id, the
+key, the `ref` column, a reference, nor in `ignore`, `derived`, `insert_only` or `defaults`. It is not
+named in `where`, which a restore would then never see past: drop `deleted_at IS NULL` from a where
+when you set `soft_delete`. `deletes: cascade` is refused, since a soft delete reaches no row through
+a foreign key, and so is `mode: insert`: a soft-deleted row is the database's under it and must not
+come back, which a migration cannot tell. Under `mode: upsert` nothing is deleted, soft or hard, and
+a row that comes back is restored.
+
+- A model that gains `soft_delete` later keeps the hard deletes of the migrations generated before:
+  their tables do not carry the column.
+- A restore compares every value the insert writes, `insert_only` columns included, which the
+  migration cannot tell apart: a row whose `insert_only` value an operator changed before it was
+  soft-deleted is inserted beside, or is a changed row, rather than restored.
+- `scaffold` proposes `soft_delete` as a guess, for a nullable timestamp column without a default
+  named `deleted_at`, or that a unique index's predicate requires to be NULL. Only the model's Go tag
+  says it is right: without it, bun reads every row, and so must the tool.
 
 ## JSON output
 
@@ -519,7 +595,8 @@ same call, so a program reading the command and one calling the library see the 
      "hints": {"seats": "the column defaults to 1, and bun writes DEFAULT for ..."}}
   ],
   "left_alone": [{"model": "Role", "mode": "upsert", "rows": 3, "changed": 0},
-                 {"model": "Flag", "mode": "sync", "rows": 0, "changed": 0, "columns": {"enabled": 2}}]
+                 {"model": "Flag", "mode": "sync", "rows": 0, "changed": 0, "columns": {"enabled": 2}},
+                 {"model": "Plan", "mode": "sync", "rows": 0, "changed": 0, "soft_deleted": 2}]
 }
 ```
 
@@ -533,7 +610,10 @@ past, such as a renumbered row under `id_drift: warn`; they leave `agree` as it 
 `left_alone` counts, per model, what the configuration gives to the database and is no drift: `rows`
 only the database holds under `mode: upsert` or `insert`, rows `changed` that `mode: insert` never
 updates, and per `insert_only` column the rows holding another value; `columns` is left out when
-there are none.
+there are none. For a model with a [`soft_delete`](#soft-deleted-rows), `soft_deleted` counts the
+database's soft-deleted rows and `file_soft_deleted` the fixture rows that set the column; each is
+left out when 0. An insert whose key the database holds soft-deleted has `soft_deleted`, the time the
+newest such row was deleted: a migration restores it.
 
 The `row` of a finding and the `key` of a refusal name the row for a person, as
 `Model/column=value/…`, with a NULL as `NULL` and a reference as `Model(key)`. Two rows can read
@@ -542,7 +622,9 @@ still two rows.
 
 Finding kinds: `duplicate key`, `duplicate id` (two rows of the file sharing one id), `zero against a default`, `null against a default`,
 `invalid value` (a value the column's type cannot hold), `ambiguous value` (a value only the Go
-field's type could settle, such as a null inside a sequence), `unknown column`.
+field's type could settle, such as a null inside a sequence), `unknown column`, `soft delete` (a
+`soft_delete` column the tool cannot work with, or rows holding the zero time in it; always an
+error).
 
 ### status output
 
@@ -742,6 +824,7 @@ for a revert, which changes it undoes.
 | `index` | the change's position in the set; `-1` for an outcome about the whole set |
 | `model`, `kind`, `key` | which change: `insert`, `update` or `delete`, and the natural key as `col=value,...` |
 | `status` | `applied`, `unchanged` (the database held it already, or, in a revert with an audit table, the migration did not make it here), `skipped` (the policy passed it over), `failed`, `unseeded` (the seed guard table is empty), `sequence` (a sequence moved past explicit ids) |
+| `action` | what an applied change did: `inserted`, `updated`, `deleted`, and for a model with a [`soft_delete`](#soft-deleted-rows) `soft-deleted` (a delete) or `restored` (an insert that brought a soft-deleted row back); left out for any other status |
 | `rows` | rows an applied change touched |
 | `problem` | why it could not be made: `missing row`, `changed row`, `id drift`, `referenced` (a delete other rows point at), `duplicate key` (more than one row holds the natural key), `lock timeout`, `error` |
 | `message` | the sentence a person reads |
@@ -898,6 +981,8 @@ says so about such a set, and that it still runs in one transaction.
 
 `fixturechange.Set` has a `Format`, which a file leaves out while it is 1. A new field needs no new
 format: a file that uses one does not compile against an older `fixtureapply`, which is refusal
-enough. Only a change to what an existing field means raises it, and then an older `fixtureapply`
+enough, and an older `status` or `plan` refuses to read it. `Table.SoftDelete` is one: it changes
+what a delete and an insert of that table do, and only of a table that carries it, so a file
+without it runs as it always did. Only a change to what an existing field means raises it, and then an older `fixtureapply`
 refuses the file, and an older `status` or `plan` cannot read it, with a sentence saying to upgrade
 `github.com/RELAXccc/bun-fixture-migrate`.

@@ -377,3 +377,13 @@ func TestLiveColumn(t *testing.T) {
 		}
 	}
 }
+
+func TestTheExampleConfigurationShowsSoftDelete(t *testing.T) {
+	cfg, err := LoadConfig("fixture-migrate.example.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Models["Addon"].SoftDelete != "deleted_at" || !cfg.Models["Addon"].skip("deleted_at") {
+		t.Fatalf("the example shows soft_delete: %+v", cfg.Models["Addon"])
+	}
+}

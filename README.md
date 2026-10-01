@@ -153,6 +153,9 @@ configuration later does not change what an old migration does. At run time `fix
 - refuses a delete that other rows point at, rather than letting `ON DELETE CASCADE` or `SET NULL`
   reach them, unless the model says `deletes: cascade`, and then says how many rows the delete reached;
   a rollback does not bring those back;
+- soft-deletes and restores the rows of a model bun soft-deletes, `soft_delete: deleted_at`, and
+  sees its live rows only, as bun does, so a returning row keeps its id and the rows pointing at it
+  ([soft-deleted rows](docs/reference.md#soft-deleted-rows));
 - diagnoses every row count of zero, as below, and takes back bun's record of a migration that
   failed;
 - moves the sequence past an explicit id before it writes it, so an insert by the application
