@@ -162,7 +162,7 @@ func unrecord(ctx context.Context, db bun.IDB, set fixturechange.Set, o options,
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 	res, err := bdb.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id IN (?) AND name = ?", table),
-		bun.In(rec.ids), o.migration)
+		bun.List(rec.ids), o.migration)
 	if err != nil {
 		return fmt.Errorf("%w\n\nbun had recorded %s as applied before running it, and the record could not "+
 			"be removed (%v): delete the rows of %s with id %s, or the migration will not run again",
