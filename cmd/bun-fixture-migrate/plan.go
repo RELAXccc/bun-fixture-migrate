@@ -520,6 +520,14 @@ func simulate(o streams, db *bun.DB, targets []planTarget, lockTimeout time.Dura
 			var note string
 			pm.Result, note = judge(err)
 			pm.Error, failed = err.Error(), true
+			// A table or column the database lacks is what a schema migration
+			// the plan did not run would have created.
+			if code := pgerr.State(err); pm.Result == "fails" && len(t.after) > 0 &&
+				(code == pgerr.UndefinedTable || code == pgerr.UndefinedColumn) {
+				pm.Result, note = "inconclusive", "it needs a table or a column this database does not have, "+
+					"and a migration that runs before it in the deploy but was not simulated can create it, so the "+
+					"deploy can succeed where the plan cannot"
+			}
 			if note != "" {
 				pm.Notes = append(pm.Notes, note)
 			}

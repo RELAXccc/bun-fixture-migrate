@@ -151,6 +151,10 @@ changes, run before this one in the deploy but not in the plan. If they change t
 fixture migration touches, run `plan -with-sql` so SQL migrations run too, or plan against a copy
 that already has them.
 
+**`it needs a table or a column this database does not have`.** The same, when the fixture migration
+failed on a missing table or column: one of those migrations may create it, so the plan cannot tell.
+Plan with `-with-sql` if they are SQL migrations, or against a copy that has them applied.
+
 **`when it commits, where PostgreSQL checks the constraints it defers: ...`.** The migration breaks
 a constraint declared `DEFERRABLE INITIALLY DEFERRED`, which PostgreSQL checks at `COMMIT`. Its
 statements succeed and the deploy fails when it commits, as in the plan. `sync` says the same as

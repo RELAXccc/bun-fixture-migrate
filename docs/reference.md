@@ -127,8 +127,8 @@ run. Refused against a standby.
 
 Exit 3 when a migration would fail, or with `-strict` be skipped; exit 1 when the plan could not
 finish (a lock waited for too long, a lost connection, a SQL migration that cannot run in a
-transaction, an enum value a migration in the same plan added), which says nothing about the
-migration.
+transaction, an enum value a migration in the same plan added, a table or column missing after a
+migration plan did not run), which says nothing about the migration.
 
 ### sync
 

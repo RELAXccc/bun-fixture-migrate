@@ -312,3 +312,48 @@ models:
 		t.Fatalf("after the deploy: %s", got)
 	}
 }
+
+// A column the database lacks fails a fixture migration, unless a migration
+// plan did not run comes before it: a Go schema migration can add it, and
+// the deploy then succeeds.
+func TestAMissingColumnIsNoVerdictAfterAMigrationPlanDidNotRun(t *testing.T) {
+	deferredDB(t)
+	c := deferredCLI(t)
+	// The rows written before the column existed hold NULL in it.
+	c.write("fixture-migrate.yml", strings.Replace(deferredConfig, "DItem: {table: d_items, key: [name]}",
+		"DItem: {table: d_items, key: [name], defaults: {color: ~}}", 1))
+	c.write("fixtures/fixture.yml", strings.Replace(deferredFixture, "region_id: 1}", "region_id: 1, color: red}", 1))
+	c.must(0, "generate", "-name", "color", "-no-lint", "-at", "20300101000000")
+	if out := c.must(3, "plan"); !strings.Contains(out, "_fixture_color: would FAIL") ||
+		!strings.Contains(out, `column "color"`) {
+		t.Fatalf("nothing pending before it:\n%s", out)
+	}
+	c.write("migrations/20200101000000_add_color.go", `package migrations
+
+import (
+	"context"
+
+	"github.com/uptrace/bun"
+)
+
+func init() {
+	Migrations.MustRegister(func(ctx context.Context, db *bun.DB) error {
+		_, err := db.ExecContext(ctx, "ALTER TABLE d_items ADD COLUMN color text")
+		return err
+	}, nil)
+}
+`)
+	out := c.must(1, "plan")
+	for _, want := range []string{
+		"_fixture_color: could not be planned",
+		"pending before it and not simulated: 20200101000000_add_color",
+		"a migration that runs before it in the deploy but was not simulated can create it",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("plan is missing %q:\n%s", want, out)
+		}
+	}
+	if ok, deploy := runMigrator(t, projectMigrator(t, filepath.Join(c.dir, "migrations")), false); !ok {
+		t.Fatalf("the deploy:\n%s", deploy)
+	}
+}

@@ -48,4 +48,8 @@ const (
 	SerializationFailure = "40001"
 	// DeadlockDetected is a transaction chosen to break a deadlock.
 	DeadlockDetected = "40P01"
+	// UndefinedTable is a table, view or sequence that does not exist.
+	UndefinedTable = "42P01"
+	// UndefinedColumn is a column that does not exist.
+	UndefinedColumn = "42703"
 )

@@ -125,7 +125,9 @@ generated Go files mix freely. `status` lists both, and reports two migrations b
 one name, which bun's `Discover` only catches between two SQL files.
 
 `plan` cannot run arbitrary Go, so it names pending migrations it did not write and says which
-fixture migration they would run before. `plan -with-sql` runs pending SQL migrations in the same
+fixture migration they would run before. A fixture migration after one of them that finds a table or
+a column missing could be waiting for that migration to create it, so the plan is inconclusive there
+(exit 1) rather than a failure. `plan -with-sql` runs pending SQL migrations in the same
 rolled-back transaction, so a fixture migration that writes a column a pending SQL migration adds is
 planned against that column. It reads each file exactly as bun v1.2.18 does:
 
