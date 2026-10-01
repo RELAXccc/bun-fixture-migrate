@@ -564,3 +564,48 @@ func TestSoftDeleteWithOwnership(t *testing.T) {
 		t.Fatalf("mode insert: exit %d\n%s%s", code, stdout, stderr)
 	}
 }
+
+// A table without an id column, its soft delete a timestamp without a zone:
+// the row is found again by where it is, and the time is UTC whatever the
+// session's TimeZone.
+func TestSoftDeleteWithoutAnIDColumn(t *testing.T) {
+	connect(t) // skips without a database
+	db := openDB(t, os.Getenv("BUN_FIXTURE_MIGRATE_POSTGRES"), map[string]string{"TimeZone": "Asia/Tokyo"})
+	t.Cleanup(func() { db.Close() })
+	ctx := context.Background()
+	if tz := scan[string](t, db, "SHOW TimeZone"); tz != "Asia/Tokyo" {
+		t.Fatalf("the session's TimeZone is %s", tz)
+	}
+	run(t, db, "DROP TABLE IF EXISTS sd_tags",
+		"CREATE TABLE sd_tags (plan text NOT NULL, tag text NOT NULL, label text NOT NULL, deleted_at timestamp, "+
+			"PRIMARY KEY (plan, tag))",
+		"INSERT INTO sd_tags VALUES ('team', 'popular', 'Popular', NULL), ('team', 'new', 'New', NULL)")
+	set := fixturechange.Set{
+		Name:   "20261001000000_fixture_tags",
+		Tables: fixturechange.Tables{"SdTag": {Name: "sd_tags", ID: "id", SoftDelete: "deleted_at"}},
+		Changes: []fixturechange.Change{{Model: "SdTag", Kind: fixturechange.Delete,
+			Key: fixturechange.Values{"plan": fixturechange.Lit("team"), "tag": fixturechange.Lit("new")},
+			Old: fixturechange.Values{"plan": fixturechange.Lit("team"), "tag": fixturechange.Lit("new"),
+				"label": fixturechange.Lit("New")}}},
+	}
+	if err := fixtureapply.Apply(ctx, db, set, quiet()); err != nil {
+		t.Fatal(err)
+	}
+	if off := scan[float64](t, db, "SELECT abs(extract(epoch FROM deleted_at - (now() AT TIME ZONE 'UTC'))) "+
+		"FROM sd_tags WHERE tag = 'new'"); off > 600 {
+		t.Fatalf("the soft delete's time is %v seconds off UTC", off)
+	}
+	var outcomes []fixtureapply.Outcome
+	if err := fixtureapply.Revert(ctx, db, set, quiet(), fixtureapply.WithReport(func(o fixtureapply.Outcome) {
+		outcomes = append(outcomes, o)
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if len(outcomes) != 1 || outcomes[0].Action != fixtureapply.ActionRestored ||
+		strings.Contains(outcomes[0].Message, "(id") {
+		t.Fatalf("revert: %+v", outcomes)
+	}
+	if got := scan[int64](t, db, "SELECT count(*) FROM sd_tags WHERE deleted_at IS NULL"); got != 2 {
+		t.Fatalf("%d live tags", got)
+	}
+}

@@ -119,9 +119,7 @@ func DatabaseSnapshot(ctx context.Context, db bun.IDB, cfg *Config, tables map[s
 			if gone[model], err = readDeleted(ctx, db, cfg, m, table); err != nil {
 				return nil, fmt.Errorf("model %q: %w", model, err)
 			}
-			if err := lintZeroTimes(ctx, db, cfg, m, model, table, snap); err != nil {
-				return nil, fmt.Errorf("model %q: %w", model, err)
-			}
+			lintZeroTimes(m, model, gone[model], snap)
 		}
 	}
 
@@ -314,29 +312,17 @@ func readDeleted(ctx context.Context, db bun.IDB, cfg *Config, m *Model, table *
 	return scanRows(ctx, db, m, table, append(keep, m.SoftDelete), query, hasID)
 }
 
-// lintZeroTimes reports the rows of a model whose soft_delete column holds
-// the zero time. A time.Time field tagged soft_delete without nullzero writes
-// it for a live row, and bun reads such a field's rows as live while it holds
-// it (R1); this configuration reads NULL as live, and the zero time as a row
+// lintZeroTimes reports the soft-deleted rows of a model that hold the zero
+// time. A time.Time field tagged soft_delete without nullzero writes it for a
+// live row, and bun reads such a field's rows as live while they hold it
+// (R1); this configuration reads NULL as live, and the zero time as a row
 // deleted at the start of the year 1.
-func lintZeroTimes(ctx context.Context, db bun.IDB, cfg *Config, m *Model, model string, table *dbschema.Table,
-	snap *Snapshot) error {
-
-	qualified, err := quoteQualified(cfg.QualifiedTable(m))
-	if err != nil {
-		return err
-	}
-	col, err := quoteIdent(m.SoftDelete)
-	if err != nil {
-		return err
-	}
-	query := "SELECT count(*) FROM " + qualified + " WHERE " + col + " = '0001-01-01 00:00:00+00'"
-	if m.Where != "" {
-		query += " AND (" + m.Where + "\n)"
-	}
-	var n int
-	if err := db.QueryRowContext(ctx, query).Scan(&n); err != nil {
-		return fmt.Errorf("%s: %w", query, err)
+func lintZeroTimes(m *Model, model string, rows []*rawRow, snap *Snapshot) {
+	n := 0
+	for _, r := range rows {
+		if zeroTime(r.values[m.SoftDelete].Lit) {
+			n++
+		}
 	}
 	if n > 0 {
 		snap.Findings = append(snap.Findings, Finding{Kind: FindingSoftDelete, Model: model, Row: m.SoftDelete,
@@ -344,7 +330,6 @@ func lintZeroTimes(ctx context.Context, db bun.IDB, cfg *Config, m *Model, model
 				"reads as live and this configuration as deleted. Give the field nullzero or make it a pointer, and "+
 				"set those rows to NULL", plural(n, "row"), m.SoftDelete)})
 	}
-	return nil
 }
 
 // noteDeleted records the natural keys of a model's soft-deleted rows, for
