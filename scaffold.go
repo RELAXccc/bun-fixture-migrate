@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -26,6 +27,11 @@ type ScaffoldOptions struct {
 	// no master data, and the configuration names them.
 	MigrationsTable     string
 	MigrationLocksTable string
+	// LiveIndexes are, per table as "schema.table", the columns a unique
+	// index's predicate requires to be NULL, "(deleted_at IS NULL)", each
+	// with the index: a table that keeps the rows bun's soft delete
+	// deleted, unique among the live ones.
+	LiveIndexes map[string]map[string]string
 }
 
 // LoadScaffoldOptions reads the partitions and the row triggers of a schema.
@@ -54,7 +60,53 @@ ORDER BY 1, 2`, schema)
 	}); err != nil {
 		return opts, fmt.Errorf("read the triggers of %s: %w", schema, err)
 	}
+	if opts.LiveIndexes, err = loadLiveIndexes(ctx, db, schema); err != nil {
+		return opts, err
+	}
 	return opts, nil
+}
+
+// liveColumn is a column a predicate requires to be NULL, as pg_get_expr
+// writes it: "(deleted_at IS NULL)", or with its name quoted.
+var liveColumn = regexp.MustCompile(`\(("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*) IS NULL\)`)
+
+// loadLiveIndexes reads, per table of a schema, the columns a partial unique
+// index's predicate requires to be NULL, with the index.
+func loadLiveIndexes(ctx context.Context, db bun.IDB, schema string) (map[string]map[string]string, error) {
+	rows, err := db.QueryContext(ctx, `
+SELECT n.nspname || '.' || c.relname, ic.relname, pg_get_expr(i.indpred, i.indrelid)
+FROM pg_index i
+JOIN pg_class c ON c.oid = i.indrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_class ic ON ic.oid = i.indexrelid
+WHERE n.nspname = ? AND i.indisunique AND i.indpred IS NOT NULL
+ORDER BY 1, 2`, schema)
+	if err != nil {
+		return nil, fmt.Errorf("read the partial unique indexes of %s: %w", schema, err)
+	}
+	defer rows.Close()
+	out := map[string]map[string]string{}
+	for rows.Next() {
+		var table, index, pred string
+		if err := rows.Scan(&table, &index, &pred); err != nil {
+			return nil, err
+		}
+		for _, m := range liveColumn.FindAllStringSubmatch(pred, -1) {
+			col := m[1]
+			if strings.HasPrefix(col, `"`) {
+				col = strings.ReplaceAll(col[1:len(col)-1], `""`, `"`)
+			}
+			if out[table] == nil {
+				out[table] = map[string]string{}
+			}
+			if _, seen := out[table][col]; !seen {
+				out[table][col] = index
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the partial unique indexes of %s: %w", schema, err)
+	}
+	return out, rows.Close()
 }
 
 // scanPairs hands every row of two text columns to fn. It reports the
@@ -124,7 +176,8 @@ func Scaffold(tables map[string]*dbschema.Table, only []string, schema string, o
 		if i > 0 {
 			b.WriteString("\n")
 		}
-		block := scaffoldModel(tables, tables[name], modelName(tables[name].Name), schema, models, opts.Triggers[name])
+		block := scaffoldModel(tables, tables[name], modelName(tables[name].Name), schema, models, opts.Triggers[name],
+			opts.LiveIndexes[name])
 		if !commented[name] {
 			b.WriteString(block)
 			continue
@@ -217,7 +270,7 @@ func primaryKeyReference(tables map[string]*dbschema.Table, t *dbschema.Table, m
 
 // scaffoldModel is the entry of one model.
 func scaffoldModel(tables map[string]*dbschema.Table, t *dbschema.Table, model, schema string,
-	models map[string]string, triggers []string) string {
+	models map[string]string, triggers []string, live map[string]string) string {
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "  %s:\n", model)
@@ -281,6 +334,8 @@ func scaffoldModel(tables map[string]*dbschema.Table, t *dbschema.Table, model, 
 		b.WriteString("    # The column another model's reference to this one names it by.\n")
 		fmt.Fprintf(&b, "    ref: %s\n", ref)
 	}
+
+	b.WriteString(scaffoldSoftDelete(t, live))
 
 	var refs []string
 	for _, c := range t.Columns {
@@ -360,6 +415,53 @@ func scaffoldModel(tables map[string]*dbschema.Table, t *dbschema.Table, model, 
 			"    # happens when one does: " + strings.Join(hazards, ", ") + "\n")
 	}
 	return b.String()
+}
+
+// scaffoldSoftDelete proposes soft_delete for a table that looks like bun's
+// soft delete keeps its deleted rows in it: a nullable timestamp column
+// without a default that a unique index's predicate requires to be NULL, or
+// that is named deleted_at, the column of bun's DeletedAt field. It is a
+// guess: only the model's Go tag says, and without it bun reads every row.
+func scaffoldSoftDelete(t *dbschema.Table, live map[string]string) string {
+	col, index := guessSoftDelete(t, live)
+	switch {
+	case col == "":
+		return ""
+	case index != "":
+		return fmt.Sprintf("    # GUESS: the unique index %s holds only where %s IS NULL, which is how a\n"+
+			"    # table keeps the rows bun's soft delete deleted: a DeletedAt field tagged\n"+
+			"    # soft_delete. Only live rows are master data then, a delete soft-deletes,\n"+
+			"    # and check and export read live rows only. Delete this line if the\n"+
+			"    # model's field is not tagged soft_delete: bun then reads every row.\n"+
+			"    soft_delete: %s\n", index, col, col)
+	}
+	return fmt.Sprintf("    # GUESS: %s, a nullable timestamp, is the column of bun's DeletedAt field\n"+
+		"    # tagged soft_delete. Only live rows, where it is NULL, are master data then,\n"+
+		"    # a delete soft-deletes, and check and export read live rows only. Delete\n"+
+		"    # this line if the model's field is not tagged soft_delete: bun then reads\n"+
+		"    # every row.\n"+
+		"    soft_delete: %s\n", col, col)
+}
+
+// guessSoftDelete is the column scaffoldSoftDelete proposes, with the index
+// that says so, if one does.
+func guessSoftDelete(t *dbschema.Table, live map[string]string) (string, string) {
+	candidate := func(c dbschema.Column) bool {
+		if c.Type != "timestamptz" && c.Type != "timestamp" || !c.Nullable || c.Generated {
+			return false
+		}
+		_, def := c.NonNullDefault()
+		return !def
+	}
+	for _, c := range t.Columns {
+		if index, ok := live[c.Name]; ok && candidate(c) {
+			return c.Name, index
+		}
+	}
+	if c, ok := t.Column("deleted_at"); ok && candidate(c) {
+		return c.Name, ""
+	}
+	return "", ""
 }
 
 // guessGuard is the seed guard table Scaffold proposes: of the models, the

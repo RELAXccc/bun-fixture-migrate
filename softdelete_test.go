@@ -1,6 +1,8 @@
 package fixturemigrate
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -306,6 +308,72 @@ func TestCheckSaysARowIsSoftDeletedThere(t *testing.T) {
 	for _, want := range []string{`"soft_deleted":"2026-02-01T00:00:00Z"`, `"soft_deleted":3`} {
 		if !strings.Contains(string(data), want) {
 			t.Fatalf("check -json is missing %s:\n%s", want, data)
+		}
+	}
+}
+
+// scaffold proposes soft_delete for a nullable timestamp without a default
+// that a unique index over live rows names, or that is named deleted_at, and
+// for nothing else; what it writes loads.
+func TestScaffoldProposesSoftDelete(t *testing.T) {
+	tables := softTables()
+	currencies := *tables["public.currencies"]
+	currencies.Columns = append(append([]dbschema.Column{}, currencies.Columns...),
+		dbschema.Column{Name: "retired_at", Position: 4, Type: "timestamp", Nullable: true},
+		dbschema.Column{Name: "deleted_at", Position: 5, Type: "timestamptz", Nullable: true, Default: "now()"})
+	tables["public.currencies"] = &currencies
+	features := *tables["public.features"]
+	features.Columns = append(append([]dbschema.Column{}, features.Columns...),
+		dbschema.Column{Name: "deleted_at", Position: 6, Type: "int8", Nullable: true})
+	tables["public.features"] = &features
+
+	data := Scaffold(tables, nil, "public", ScaffoldOptions{LiveIndexes: map[string]map[string]string{
+		"public.currencies": {"retired_at": "currencies_code_live"},
+	}})
+	text := string(data)
+	for _, want := range []string{
+		"    # GUESS: the unique index currencies_code_live holds only where retired_at IS NULL",
+		"    soft_delete: retired_at\n",
+		"    # GUESS: deleted_at, a nullable timestamp, is the column of bun's DeletedAt field",
+		"    soft_delete: deleted_at\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the scaffold is missing %q:\n%s", want, text)
+		}
+	}
+	// The features' deleted_at is a bigint, and the currencies' defaults to
+	// now(): neither is proposed.
+	if n := strings.Count(text, "\n    soft_delete: "); n != 2 {
+		t.Errorf("soft_delete proposed %d times:\n%s", n, text)
+	}
+	path := filepath.Join(t.TempDir(), "fixture-migrate.yml")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("the scaffold has to load: %v\n%s", err, text)
+	}
+	if cfg.Models["Plan"].SoftDelete != "deleted_at" || cfg.Models["Currency"].SoftDelete != "retired_at" ||
+		cfg.Models["Feature"].SoftDelete != "" {
+		t.Fatalf("models: %+v %+v %+v", cfg.Models["Plan"], cfg.Models["Currency"], cfg.Models["Feature"])
+	}
+}
+
+func TestLiveColumn(t *testing.T) {
+	for pred, want := range map[string]string{
+		"(deleted_at IS NULL)":                           "deleted_at",
+		`("Deleted At" IS NULL)`:                         `"Deleted At"`,
+		"((deleted_at IS NULL) AND (tenant_id IS NULL))": "deleted_at,tenant_id",
+		"(deleted_at IS NOT NULL)":                       "",
+		"(status <> 'retired'::text)":                    "",
+	} {
+		var got []string
+		for _, m := range liveColumn.FindAllStringSubmatch(pred, -1) {
+			got = append(got, m[1])
+		}
+		if strings.Join(got, ",") != want {
+			t.Errorf("%s: got %v, want %s", pred, got, want)
 		}
 	}
 }
