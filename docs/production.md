@@ -72,8 +72,12 @@ as applied, whichever way the migrator is built, so the next deploy runs it agai
    migrations and which ones cannot be made, without changing anything.
 2. Decide per problem:
    - **missing row**: the row the change updates or deletes is not there. Somebody deleted or
-     renamed it. Put it back, or, if its absence is right, remove that change from the migration
-     file (it is a plain Go literal) and run `plan` again.
+     renamed it. Put it back, and deploy again. If its absence is right in this database only, set
+     `MissingRow: "warn"` in the `Policy` of that one migration file: here the change is then
+     skipped and the migration recorded, every other database still gets it, and `check` here
+     reports the row the file has and this database does not, which is what you decided. Do not
+     remove the change from the migration: the databases that have not run it yet would never get
+     it, and `status -offline` cannot see that, because the fixture file still has it.
    - **id drift**: the row is there under another id than the file says, or the file's id belongs
      to another row. Something outside the database may name these ids; find out before touching
      them.
