@@ -45,6 +45,7 @@ import (
 	"time"
 
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+	"github.com/RELAXccc/bun-fixture-migrate/internal/pgerr"
 
 	"github.com/uptrace/bun"
 )
@@ -139,6 +140,13 @@ const (
 	// ProblemReferenced is a delete of a row that rows of another table, or
 	// of the same one, still point at.
 	ProblemReferenced Problem = "referenced"
+	// ProblemDuplicateKey is more than one row holding the natural key the
+	// change finds its row by. None of them is touched.
+	ProblemDuplicateKey Problem = "duplicate key"
+	// ProblemLockTimeout is a statement that waited longer than the set's
+	// LockTimeout for a lock another session holds. The set fails whatever
+	// the policy says, and runs again on the next deploy.
+	ProblemLockTimeout Problem = "lock timeout"
 	// ProblemError is a statement that failed outright.
 	ProblemError Problem = "error"
 )
@@ -310,6 +318,10 @@ func Revert(ctx context.Context, db bun.IDB, set fixturechange.Set, opts ...Opti
 
 var identPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_$]*$`)
 
+// lockTimeoutPattern is a lock_timeout PostgreSQL reads as a duration. A
+// bare number would be milliseconds, which is too easy to misread.
+var lockTimeoutPattern = regexp.MustCompile(`^[0-9]+(ms|s|min|h|d)$`)
+
 // quoteIdent double-quotes a plain, optionally schema-qualified identifier and
 // rejects anything else. Generated files only ever contain names that came from
 // the configuration, but this is the line between the file and the database and
@@ -377,6 +389,10 @@ func Validate(set fixturechange.Set) error {
 			return fmt.Errorf("migrations table %w", err)
 		}
 	}
+	if set.LockTimeout != "" && !lockTimeoutPattern.MatchString(set.LockTimeout) {
+		return fmt.Errorf("lock timeout %q is not a whole number with a unit PostgreSQL knows: ms, s, min, h or d, "+
+			"as in 5s", set.LockTimeout)
+	}
 	for i, c := range set.Changes {
 		if _, ok := set.Tables[c.Model]; !ok {
 			return fmt.Errorf("change %d: unknown model %q", i, c.Model)
@@ -389,10 +405,18 @@ func Validate(set fixturechange.Set) error {
 				if _, err := quoteIdent(col); err != nil {
 					return fmt.Errorf("change %d (%s): %w", i, c.Model, err)
 				}
-				if ref := values[col].Ref; ref != nil {
+				v := values[col]
+				if ref := v.Ref; ref != nil {
 					if _, ok := set.Tables[ref.Model]; !ok {
 						return fmt.Errorf("change %d (%s.%s): reference to unknown model %q", i, c.Model, col, ref.Model)
 					}
+				}
+				// PostgreSQL's text cannot hold a NUL. bun v1.2.18 drops it from
+				// a bound string without a word, so the database would hold
+				// something other than the file; later versions refuse it.
+				if strings.ContainsRune(v.Lit, 0) || (v.Ref != nil && strings.ContainsRune(v.Ref.Key, 0)) {
+					return fmt.Errorf("change %d (%s.%s): the value holds a NUL character, which PostgreSQL "+
+						"cannot store", i, c.Model, col)
 				}
 			}
 		}
@@ -451,6 +475,13 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(?)", advisoryLock); err != nil {
 		return fmt.Errorf("wait for another change set to finish: %w", err)
 	}
+	// Only now: waiting for another replica's change set is not the wait
+	// lock_timeout is about.
+	if set.LockTimeout != "" {
+		if restore, err = withLockTimeout(ctx, tx, set.LockTimeout, restore); err != nil {
+			return err
+		}
+	}
 	if set.SeedGuardTable != "" {
 		seeded, err := tableHasRows(ctx, tx, set.SeedGuardTable)
 		if err != nil {
@@ -485,6 +516,12 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 		res, err := r.exec(ctx, c)
 		if err != nil {
 			out.Status, out.Problem, out.Message = StatusFailed, ProblemError, err.Error()
+			if pgerr.State(err) == pgerr.LockNotAvailable && set.LockTimeout != "" {
+				err = fmt.Errorf("another session held a lock on a row of %s for longer than the lock timeout "+
+					"of %s, so nothing was changed; the change set runs again on the next deploy: %w",
+					set.Tables[c.Model].Name, set.LockTimeout, err)
+				out.Problem, out.Message = ProblemLockTimeout, err.Error()
+			}
 			o.report(out)
 			return fmt.Errorf("%s: %w", where, err)
 		}
@@ -539,6 +576,29 @@ func session(ctx context.Context, tx bun.IDB) (func(context.Context) error, erro
 	}, nil
 }
 
+// withLockTimeout sets lock_timeout for the rest of the transaction, and
+// returns a restore that also puts the caller's value back.
+func withLockTimeout(ctx context.Context, tx bun.IDB, timeout string,
+	restore func(context.Context) error) (func(context.Context) error, error) {
+
+	var old string
+	if err := tx.QueryRowContext(ctx, "SELECT current_setting('lock_timeout')").Scan(&old); err != nil {
+		return nil, fmt.Errorf("read the session's lock_timeout: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "SELECT set_config('lock_timeout', ?, true)", timeout); err != nil {
+		return nil, fmt.Errorf("set lock_timeout to %s: %w", timeout, err)
+	}
+	return func(ctx context.Context) error {
+		if err := restore(ctx); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, "SELECT set_config('lock_timeout', ?, true)", old); err != nil {
+			return fmt.Errorf("restore the session's lock_timeout: %w", err)
+		}
+		return nil
+	}, nil
+}
+
 // problem names the three materially different reasons a guarded statement
 // matches nothing, plus the benign one. They are kept apart because an operator
 // does something different about each: put the row back, look at who changed
@@ -554,6 +614,8 @@ const (
 	// always an error: the delete would cascade into, detach, or be refused
 	// by rows the change set knows nothing about.
 	problemReferenced problem = "referenced"
+	// problemDuplicate is a natural key more than one row holds.
+	problemDuplicate problem = "duplicate"
 )
 
 func (p problem) exported() Problem {
@@ -566,6 +628,8 @@ func (p problem) exported() Problem {
 		return ProblemIDDrift
 	case problemReferenced:
 		return ProblemReferenced
+	case problemDuplicate:
+		return ProblemDuplicateKey
 	}
 	return ""
 }
@@ -589,6 +653,10 @@ func modeFor(p fixturechange.Policy, pr problem) fixturechange.Mode {
 		return fixturechange.ModeWarn
 	case problemIDDrift:
 		if p.IDDrift == fixturechange.ModeWarn || p.IDDrift == fixturechange.ModeIgnore {
+			return fixturechange.ModeWarn
+		}
+	case problemDuplicate:
+		if p.DuplicateKey == fixturechange.ModeWarn {
 			return fixturechange.ModeWarn
 		}
 	}
@@ -782,6 +850,10 @@ func (r *runner) update(ctx context.Context, c fixturechange.Change, t fixturech
 		return outcome{}, err
 	}
 	args = append(args, whereArgs...)
+	where, args, err = r.onlyRow(ctx, c, table, where, args)
+	if err != nil {
+		return outcome{}, err
+	}
 	n, err := r.run(ctx, fmt.Sprintf("UPDATE %s SET %s WHERE %s", table, strings.Join(sets, ", "), where), args)
 	if err != nil {
 		return outcome{}, err
@@ -800,6 +872,10 @@ func (r *runner) delete(ctx context.Context, c fixturechange.Change, t fixturech
 	if out, err := r.referenced(ctx, c, t, table, where, args); err != nil || out.problem != "" {
 		return out, err
 	}
+	where, args, err = r.onlyRow(ctx, c, table, where, args)
+	if err != nil {
+		return outcome{}, err
+	}
 	n, err := r.run(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s", table, where), args)
 	if err != nil {
 		return outcome{}, err
@@ -808,6 +884,29 @@ func (r *runner) delete(ctx context.Context, c fixturechange.Change, t fixturech
 		return outcome{rows: n}, nil
 	}
 	return r.diagnose(ctx, c, t, table, nil)
+}
+
+// onlyRow narrows a guard to a natural key exactly one row holds. Without it
+// an update or a delete matching on a key that two rows share -- an admin
+// tool inserted it twice, there is no unique index -- changes both and
+// reports success. With it the statement matches nothing, and diagnose says
+// why. The subquery reads the table as it was before the statement, which is
+// what the count has to be about.
+func (r *runner) onlyRow(ctx context.Context, c fixturechange.Change, table, where string, args []any) (string, []any, error) {
+	keyWhere, keyArgs, err := r.match(ctx, c.Model, c.Key)
+	if err != nil {
+		return "", nil, err
+	}
+	return fmt.Sprintf("%s AND (SELECT count(*) FROM %s WHERE %s) = 1", where, table, keyWhere),
+		append(append([]any{}, args...), keyArgs...), nil
+}
+
+// duplicate is the outcome for a natural key n rows hold.
+func duplicate(t fixturechange.Table, c fixturechange.Change, n int64) outcome {
+	return outcome{problem: problemDuplicate, message: fmt.Sprintf(
+		"%d rows of %s hold %s. A change finds its row by the natural key, and nothing says which of them the "+
+			"fixture file means, so none was touched. Remove the extra rows, and add a unique index on the key so "+
+			"they cannot come back", n, t.Name, keyLabel(c.Key))}
 }
 
 // incoming is one foreign key pointing at a table.
@@ -919,6 +1018,9 @@ func (r *runner) diagnose(ctx context.Context, c fixturechange.Change, t fixture
 	if err != nil {
 		return outcome{}, err
 	}
+	if byKey > 1 {
+		return duplicate(t, c, byKey), nil
+	}
 	if byKey == 0 {
 		if c.Kind == fixturechange.Delete {
 			return outcome{problem: problemBenign, message: "the row is already gone, nothing to delete"}, nil
@@ -963,6 +1065,13 @@ func (r *runner) diagnose(ctx context.Context, c fixturechange.Change, t fixture
 func (r *runner) diagnoseInsert(ctx context.Context, c fixturechange.Change, t fixturechange.Table,
 	table string) (outcome, error) {
 
+	byKey, err := r.count(ctx, c.Model, table, c.Key)
+	if err != nil {
+		return outcome{}, err
+	}
+	if byKey > 1 {
+		return duplicate(t, c, byKey), nil
+	}
 	same, err := r.count(ctx, c.Model, table, c.Key, withoutColumn(c.New, t.ID))
 	if err != nil {
 		return outcome{}, err

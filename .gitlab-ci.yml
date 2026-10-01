@@ -61,7 +61,7 @@ unit:
   image: golang:$GO_VERSION
   parallel:
     matrix:
-      - GO_VERSION: ["1.24", "1"]
+      - GO_VERSION: ["1.24", "1.26", "1"]
   script:
     - go test -race -coverprofile=coverage.out ./...
     - go tool cover -func=coverage.out | tail -1
@@ -79,15 +79,32 @@ fuzz:
 postgres:
   stage: test
   extends: .postgres
+  image: golang:$GO_VERSION
   parallel:
     matrix:
       - PG_VERSION: ["12", "13", "14", "15", "16", "17", "18"]
         BUN_FIXTURE_MIGRATE_DRIVER: pgdriver
+        GO_VERSION: "1"
       - PG_VERSION: ["12", "18"]
         BUN_FIXTURE_MIGRATE_DRIVER: pgx
+        GO_VERSION: "1"
+      - PG_VERSION: "18"
+        BUN_FIXTURE_MIGRATE_DRIVER: pgdriver
+        GO_VERSION: "1.24"
   script:
     - cd dbtest
     - go test -race ./...
+
+# The next PostgreSQL release, from its first beta: allowed to fail until it
+# ships.
+postgres next:
+  extends: postgres
+  parallel:
+    matrix:
+      - PG_VERSION: 19beta4
+        BUN_FIXTURE_MIGRATE_DRIVER: pgdriver
+        GO_VERSION: "1"
+  allow_failure: true
 
 # bun's master branch: every premise the tool rests on has a test, so a change
 # upstream shows here before it ships. The cause of a failure is outside this

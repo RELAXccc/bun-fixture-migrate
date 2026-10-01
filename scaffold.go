@@ -279,6 +279,12 @@ migrations_table: bun_migrations
 # yet, and dbfixture is about to load the new state by itself. Remove this only
 # if your migration chain never runs before the seed.
 seed_guard_table: ""
+# How long a generated migration waits for a lock another session holds on a
+# row it writes, an admin's open transaction say, before it fails, rolls back
+# and leaves the migration to the next deploy. Without it the deploy waits as
+# long as that transaction stays open, and the application's own writes to
+# those rows queue up behind it.
+lock_timeout: 10s
 # Where export, check and scaffold connect. "env:NAME" reads the DSN from an
 # environment variable, which is how the password stays out of the repository.
 database: env:DATABASE_URL
@@ -340,8 +346,8 @@ policy:
   null_default: error
 
   # Two rows of one model share a natural key in the database.
-  #   error  refuse (default)
-  #   warn   report it
+  #   error  refuse, and at run time fail the migration (default)
+  #   warn   report it; at run time leave those rows alone and carry on
   # Every guard and every reference this tool writes matches on that key, so
   # two rows holding it make the lookup pick one of them at random. There is no
   # setting that makes that safe; warn exists so you can see the whole list

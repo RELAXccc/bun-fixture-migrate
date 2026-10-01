@@ -239,6 +239,8 @@ func (r *setReader) set(lit *ast.CompositeLit) (fixturechange.Set, error) {
 			set.SeedGuardTable, err = r.str(value)
 		case "MigrationsTable":
 			set.MigrationsTable, err = r.str(value)
+		case "LockTimeout":
+			set.LockTimeout, err = r.str(value)
 		case "Tables":
 			set.Tables, err = r.tables(value)
 		case "Policy":
@@ -325,6 +327,8 @@ func (r *setReader) policy(expr ast.Expr) (fixturechange.Policy, error) {
 			p.ChangedRow = mode
 		case "IDDrift":
 			p.IDDrift = mode
+		case "DuplicateKey":
+			p.DuplicateKey = mode
 		default:
 			err = r.errorf(value, "unknown field %s", key)
 		}

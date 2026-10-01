@@ -58,6 +58,28 @@ func TestValidateRejects(t *testing.T) {
 				{Model: "Plan", Kind: fixturechange.Delete,
 					Key: fixturechange.Values{"name\"; DROP TABLE plans; --": fixturechange.Lit("x")}},
 			}}, "plain SQL identifier"},
+		// bun v1.2.18 drops a NUL from a bound string, so the database
+		// would hold something else than the file says.
+		"NUL in a value": {
+			fixturechange.Set{Tables: tables(), Changes: []fixturechange.Change{
+				{Model: "Plan", Kind: fixturechange.Insert,
+					Key: fixturechange.Values{"name": fixturechange.Lit("te\x00am")},
+					New: fixturechange.Values{"name": fixturechange.Lit("te\x00am")}},
+			}}, "NUL"},
+		"NUL in a reference": {
+			fixturechange.Set{Tables: tables(), Changes: []fixturechange.Change{
+				{Model: "Feature", Kind: fixturechange.Insert,
+					Key: fixturechange.Values{"code": fixturechange.Lit("sso")},
+					New: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "a\x00")}},
+			}}, "NUL"},
+		"lock timeout without a unit": {
+			fixturechange.Set{Tables: tables(), LockTimeout: "5000"}, "ms, s, min, h or d"},
+		"lock timeout in Go's spelling": {
+			fixturechange.Set{Tables: tables(), LockTimeout: "1m30s"}, "ms, s, min, h or d"},
+		"lock timeout with SQL in it": {
+			fixturechange.Set{Tables: tables(), LockTimeout: "5s'; DROP TABLE x; --"}, "ms, s, min, h or d"},
+		"duplicate key policy": {
+			fixturechange.Set{Tables: tables(), Policy: fixturechange.Policy{DuplicateKey: "ignore"}}, "DuplicateKey"},
 		"table that is not an identifier": {
 			fixturechange.Set{Tables: fixturechange.Tables{"Plan": {Name: "plans; DROP TABLE x", ID: "id", Key: "name"}}},
 			"plain SQL identifier"},
@@ -107,6 +129,14 @@ func TestValidateRejects(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsLockTimeouts(t *testing.T) {
+	for _, timeout := range []string{"", "500ms", "5s", "2min", "1h", "1d"} {
+		if err := Validate(fixturechange.Set{Tables: tables(), LockTimeout: timeout}); err != nil {
+			t.Errorf("%q: %v", timeout, err)
+		}
+	}
+}
+
 func TestQuoteIdent(t *testing.T) {
 	for in, want := range map[string]string{
 		"items":         `"items"`,
@@ -152,7 +182,7 @@ func TestInvert(t *testing.T) {
 // a statement could not do its job is to fail and roll back.
 func TestModeForIsStrictByDefault(t *testing.T) {
 	var strict fixturechange.Policy
-	for _, pr := range []problem{problemMissing, problemIDDrift} {
+	for _, pr := range []problem{problemMissing, problemIDDrift, problemDuplicate, problemReferenced} {
 		if got := modeFor(strict, pr); got != "error" {
 			t.Errorf("modeFor(zero, %q) = %q, want error", pr, got)
 		}
@@ -170,7 +200,10 @@ func TestModeForIsStrictByDefault(t *testing.T) {
 }
 
 func TestModeForFollowsThePolicy(t *testing.T) {
-	p := fixturechange.Policy{MissingRow: "warn", ChangedRow: "error", IDDrift: "ignore"}
+	p := fixturechange.Policy{MissingRow: "warn", ChangedRow: "error", IDDrift: "ignore", DuplicateKey: "warn"}
+	if got := modeFor(p, problemDuplicate); got != "warn" {
+		t.Errorf("duplicate: %q", got)
+	}
 	if got := modeFor(p, problemMissing); got != "warn" {
 		t.Errorf("missing: %q", got)
 	}

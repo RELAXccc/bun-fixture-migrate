@@ -132,6 +132,15 @@ type Set struct {
 	// policy and a later change to the configuration does not silently change
 	// what an old migration does.
 	Policy Policy
+	// LockTimeout, when set, is how long a statement of the change set waits
+	// for a lock another session holds on a row or table it writes, in
+	// PostgreSQL's spelling: "5s", "500ms", "1min". The change set then fails
+	// and rolls back instead of waiting behind, say, an admin's open
+	// transaction while the application's own writes queue up behind it; the
+	// next deploy runs it again. Waiting for another change set to finish is
+	// not affected. Empty means the session's own lock_timeout, which is
+	// usually none.
+	LockTimeout string
 }
 
 // DefaultMigrationsTable is the table bun's migrator uses when it was not built
@@ -182,6 +191,12 @@ type Policy struct {
 	// IDDrift is what happens when the id in the change set is not the id the
 	// database gave the row: ModeError (the default), ModeWarn or ModeIgnore.
 	IDDrift Mode
+	// DuplicateKey is what happens when more than one row holds the natural
+	// key a change finds its row by: ModeError (the default) or ModeWarn,
+	// which leaves all of them alone and carries on. A change is never made
+	// to more than one row; nothing can say which of them the fixture file
+	// means.
+	DuplicateKey Mode
 }
 
 // Validate reports a policy field holding something this package does not
@@ -200,6 +215,7 @@ func (p Policy) Validate() error {
 		{"MissingRow", p.MissingRow, []Mode{ModeError, ModeWarn}},
 		{"ChangedRow", p.ChangedRow, []Mode{ModeError, ModeWarn}},
 		{"IDDrift", p.IDDrift, []Mode{ModeError, ModeWarn, ModeIgnore}},
+		{"DuplicateKey", p.DuplicateKey, []Mode{ModeError, ModeWarn}},
 	} {
 		if f.value == "" || f.value.valid(f.allowed...) {
 			continue

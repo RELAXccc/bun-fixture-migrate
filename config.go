@@ -25,6 +25,9 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/RELAXccc/bun-fixture-migrate/fixtureapply"
+	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -62,6 +65,14 @@ type Config struct {
 	// not been seeded yet and dbfixture will load the new state by itself.
 	// Leave it out only if the migration chain never runs before the seed.
 	SeedGuardTable string `yaml:"seed_guard_table"`
+	// LockTimeout is how long a generated migration waits for a lock another
+	// session holds on a row it writes before it fails and rolls back, in
+	// PostgreSQL's spelling: "5s", "500ms", "1min". Without it a migration
+	// can wait behind an open admin transaction for as long as that stays
+	// open, with the application's writes to the same rows queued behind the
+	// migration. The failed migration runs again on the next deploy. Empty
+	// means no limit of the tool's own.
+	LockTimeout string `yaml:"lock_timeout"`
 	// Database is the PostgreSQL DSN the export, check and scaffold commands
 	// read. "env:NAME" reads it from an environment variable, which is how you
 	// keep a password out of the repository. The generate command needs it
@@ -297,6 +308,9 @@ func (c *Config) Prepare() error {
 	}
 	if c.MigrationsTable == "" {
 		c.MigrationsTable = "bun_migrations"
+	}
+	if err := fixtureapply.Validate(fixturechange.Set{LockTimeout: c.LockTimeout}); err != nil {
+		return err
 	}
 	if _, err := quoteQualified(c.MigrationsTable); err != nil {
 		return fmt.Errorf("migrations_table: %w", err)

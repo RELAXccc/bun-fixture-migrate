@@ -87,12 +87,14 @@ func Render(cfg *Config, name, stamp string, res *Result) ([]byte, error) {
 		Name:            strings.TrimSuffix(FileName(stamp, name), ".go"),
 		SeedGuardTable:  cfg.SeedGuardTable,
 		MigrationsTable: cfg.MigrationsTable,
+		LockTimeout:     cfg.LockTimeout,
 		Tables:          res.Tables,
 		Changes:         res.Changes,
 		Policy: fixturechange.Policy{
-			MissingRow: fixturechange.Mode(cfg.Policy.MissingRow),
-			ChangedRow: fixturechange.Mode(cfg.Policy.ChangedRow),
-			IDDrift:    fixturechange.Mode(cfg.Policy.IDDrift),
+			MissingRow:   fixturechange.Mode(cfg.Policy.MissingRow),
+			ChangedRow:   fixturechange.Mode(cfg.Policy.ChangedRow),
+			IDDrift:      fixturechange.Mode(cfg.Policy.IDDrift),
+			DuplicateKey: fixturechange.Mode(cfg.Policy.DuplicateKey),
 		},
 	}
 	if err := fixtureapply.Validate(set); err != nil {
@@ -139,6 +141,9 @@ func Render(cfg *Config, name, stamp string, res *Result) ([]byte, error) {
 	if set.MigrationsTable != "" {
 		fmt.Fprintf(&b, "\tMigrationsTable: %q,\n", set.MigrationsTable)
 	}
+	if set.LockTimeout != "" {
+		fmt.Fprintf(&b, "\tLockTimeout: %q,\n", set.LockTimeout)
+	}
 	b.WriteString("\tTables: fixturechange.Tables{\n")
 	for _, model := range sortedKeys(res.Tables) {
 		t := res.Tables[model]
@@ -155,8 +160,8 @@ func Render(cfg *Config, name, stamp string, res *Result) ([]byte, error) {
 		b.WriteString("},\n")
 	}
 	b.WriteString("\t},\n")
-	fmt.Fprintf(&b, "\tPolicy: fixturechange.Policy{MissingRow: %q, ChangedRow: %q, IDDrift: %q},\n",
-		set.Policy.MissingRow, set.Policy.ChangedRow, set.Policy.IDDrift)
+	fmt.Fprintf(&b, "\tPolicy: fixturechange.Policy{\n\t\tMissingRow: %q, ChangedRow: %q, IDDrift: %q, DuplicateKey: %q,\n\t},\n",
+		set.Policy.MissingRow, set.Policy.ChangedRow, set.Policy.IDDrift, set.Policy.DuplicateKey)
 	b.WriteString("\tChanges: []fixturechange.Change{\n")
 	for _, c := range res.Changes {
 		fmt.Fprintf(&b, "\t\t{Model: %q, Kind: fixturechange.%s,\n", c.Model, kindIdent(c.Kind))

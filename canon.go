@@ -2,12 +2,12 @@ package fixturemigrate
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+	"github.com/RELAXccc/bun-fixture-migrate/internal/pgerr"
 
 	"github.com/uptrace/bun"
 )
@@ -204,7 +204,7 @@ func castValues(ctx context.Context, db bun.IDB, column dbschema.Column,
 				if !dataException(err) {
 					return nil, nil, err
 				}
-				invalid[v] = pgMessage(err)
+				invalid[v] = pgerr.Message(err)
 			}
 		}
 	}
@@ -254,34 +254,8 @@ func castInto(ctx context.Context, db bun.IDB, column dbschema.Column, values []
 	return nil
 }
 
-// sqlState is the SQLSTATE of a PostgreSQL error from pgdriver or pgx, "" for
-// any other error.
-func sqlState(err error) string {
-	var withState interface{ SQLState() string }
-	if errors.As(err, &withState) {
-		return withState.SQLState()
-	}
-	var withField interface{ Field(byte) string }
-	if errors.As(err, &withField) {
-		return withField.Field('C')
-	}
-	return ""
-}
-
 // dataException reports an error of class 22, PostgreSQL's "the value is not
 // one of this type": invalid input syntax, out of range, too long.
 func dataException(err error) bool {
-	return strings.HasPrefix(sqlState(err), "22")
-}
-
-// pgMessage is the primary message of a PostgreSQL error, without the driver's
-// decoration.
-func pgMessage(err error) string {
-	var withField interface{ Field(byte) string }
-	if errors.As(err, &withField) {
-		if m := withField.Field('M'); m != "" {
-			return m
-		}
-	}
-	return err.Error()
+	return strings.HasPrefix(pgerr.State(err), "22")
 }
