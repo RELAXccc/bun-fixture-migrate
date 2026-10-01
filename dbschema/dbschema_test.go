@@ -147,3 +147,42 @@ func TestNamesAreSorted(t *testing.T) {
 		t.Fatalf("Names = %v", names)
 	}
 }
+
+// A length is read out of the type modifier the way each type keeps it.
+func TestDeclaredLength(t *testing.T) {
+	for _, tc := range []struct {
+		col    Column
+		typmod int
+		want   int
+	}{
+		{Column{Type: "varchar"}, 9, 5},
+		{Column{Type: "bpchar"}, 5, 1},
+		{Column{Type: "bpchar"}, -1, 0},
+		{Column{Type: "bit"}, 3, 3},
+		{Column{Type: "varbit"}, -1, 0},
+		{Column{Type: "_bpchar", Category: "A", ElemType: "bpchar"}, 7, 3},
+		{Column{Type: "_bit", Category: "A", ElemType: "bit"}, 8, 8},
+		{Column{Type: "numeric"}, 655366, 0},
+		{Column{Type: "text"}, -1, 0},
+	} {
+		if got := declaredLength(tc.col, tc.typmod); got != tc.want {
+			t.Errorf("%+v %d: %d, want %d", tc.col, tc.typmod, got, tc.want)
+		}
+	}
+}
+
+// A domain is its base type to the zero check, and its default is the
+// column's when the column has none: the catalog query puts it in Default.
+func TestADomainIsItsBaseType(t *testing.T) {
+	qty := Column{Type: "int4", Domain: "qty", FullType: "qty", Default: "1"}
+	if zero, ok := qty.ZeroText(); !ok || zero != "0" {
+		t.Fatalf("%q %v", zero, ok)
+	}
+	if hazard, stored := qty.ZeroIsNotDefault(); !hazard || stored != "1" {
+		t.Fatalf("a zero against the domain's default 1: %v %q", hazard, stored)
+	}
+	code := Column{Type: "varchar", Domain: "code", Category: "S"}
+	if !code.StringField() {
+		t.Fatal("a domain over varchar is written from a string field")
+	}
+}

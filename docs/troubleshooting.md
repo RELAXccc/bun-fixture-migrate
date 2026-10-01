@@ -29,7 +29,8 @@ happens. `scaffold` writes entries for every table.
 
 **`model "X": the configuration says Y, which is not a table in this database`.** `table:` names a
 table the database does not have in `schema` (default `public`). Qualify it, `billing.plans`, or set
-`schema`.
+`schema`. When Y is a view, a materialized view or a foreign table the message says so: only a table
+holds master data, so name the table whose rows it shows.
 
 **`policy missing_row is "warning", it has to be one of error, warn`.** Every policy value is checked;
 a typo is not read as the nearest value, because the generated migration copies it and nobody reads
@@ -95,10 +96,10 @@ or warnings.
 | Kind | Means | Fix |
 | --- | --- | --- |
 | `zero against a default` | a `0`, `false` or `""` into a column whose default is something else; bun writes `DEFAULT` for it | write the default's value, drop the column default, or `policy.zero_default` |
-| `null against a default` | `~` into a column with a default; a nil pointer or `nullzero` field writes `DEFAULT` | leave the column out, write the value, or `policy.null_default` if your models use `sql.Null*` types |
-| `invalid value` | PostgreSQL cannot cast the value to the column's type: `abc` into an integer, `2026-02-30` into a date, an enum label that does not exist | fix the value |
+| `null against a default` | `~` into a column with a default; a nil pointer or `nullzero` field writes `DEFAULT`. In a `json` or `jsonb` column, `~` is the JSON null to a map field and NULL to a pointer | leave the column out, write the value, or `policy.null_default` if your models use `sql.Null*` types or pointers |
+| `invalid value` | the column cannot take the value as `dbfixture` writes it: PostgreSQL cannot cast it (`abc` into an integer, `2026-02-30` into a date, an enum label that does not exist, a domain's `CHECK`), it is too long for the column, a single-column `CHECK` refuses it, an integer column gets a fraction; or a `time.Time` and a string field, or two servers, would store two values. The message names them | fix the value; [dates and times](fixture-files.md#dates-and-times) |
 | `unknown column` | the table has no such column | fix the name, or `ignore` it |
-| `duplicate key` | two rows share a natural key | fix the rows, and give the table a unique index on the key |
+| `duplicate key` | two rows share a natural key, or two keys are one value to the key's type, `Go` and `GO` in `citext` | fix the rows, and give the table a unique index on the key |
 
 A generated column, or an explicit id in an `IDENTITY ALWAYS` column, is reported the same way:
 PostgreSQL refuses to write either.

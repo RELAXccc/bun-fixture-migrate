@@ -60,8 +60,7 @@ func DatabaseSnapshot(ctx context.Context, db bun.IDB, cfg *Config, tables map[s
 		}
 		table := tables[cfg.QualifiedTable(m)]
 		if table == nil {
-			return nil, fmt.Errorf("model %q: the configuration says %s, which is not a table in this database",
-				model, cfg.QualifiedTable(m))
+			return nil, notATable(ctx, db, model, cfg.QualifiedTable(m))
 		}
 		cols, err := readColumns(m, table, opts.Columns[model])
 		if err != nil {
@@ -117,7 +116,22 @@ func DatabaseSnapshot(ctx context.Context, db bun.IDB, cfg *Config, tables map[s
 		snap.reportDuplicates(model)
 	}
 	reportDuplicateRefs(cfg, snap)
+	if err := reportEqualKeys(ctx, db, cfg, snap, tables); err != nil {
+		return nil, err
+	}
 	return snap, nil
+}
+
+// notATable is the error for a model whose table Load did not find: a view,
+// a materialized view or a foreign table says what it is, because only a
+// table holds master data.
+func notATable(ctx context.Context, db bun.IDB, model, qualified string) error {
+	kind, err := dbschema.NotATable(ctx, db, qualified)
+	if err != nil || kind == "" {
+		return fmt.Errorf("model %q: the configuration says %s, which is not a table in this database", model, qualified)
+	}
+	return fmt.Errorf("model %q: the configuration says %s, which is %s: only a table holds master data, so name "+
+		"the table whose rows it shows", model, qualified, kind)
 }
 
 // readColumns is the column list to read for a model: the projection the caller
@@ -230,6 +244,12 @@ func selectQuery(cfg *Config, m *Model, table *dbschema.Table, cols []string) (s
 // money's text depends on the locale, so it is read as the number it is; and
 // an array is read as JSON, which is what a YAML sequence in the fixture file
 // becomes, and what an export writes back as one.
+//
+// The elements of a char(n) array are read without their padding, the way a
+// char(n) column's own value is, so "AB " and "AB" are one value on both
+// sides. An array whose lower bound is not 1, '[0:1]={7,8}', has no JSON and
+// no YAML spelling: it is read as PostgreSQL's own text, which differs from
+// every sequence, and an export refuses it.
 func readExpr(c dbschema.Column, expr string) string {
 	switch {
 	case c.Type == "json":
@@ -237,7 +257,12 @@ func readExpr(c dbschema.Column, expr string) string {
 	case c.Type == "money":
 		return "(" + expr + ")::numeric::text"
 	case c.Category == "A":
-		return "to_jsonb(" + expr + ")::text"
+		elems := "(" + expr + ")"
+		if c.ElemType == "bpchar" {
+			elems = "(" + expr + ")::text[]"
+		}
+		return "CASE WHEN (" + expr + ")::text LIKE '[%' THEN (" + expr + ")::text ELSE to_jsonb(" + elems +
+			")::text END"
 	}
 	return "(" + expr + ")::text"
 }
@@ -274,7 +299,7 @@ func readRows(ctx context.Context, db bun.IDB, cfg *Config, m *Model, table *dbs
 		if hasID {
 			if cells[0].Valid {
 				idCol, _ := table.Column(m.ID)
-				r.id = columnText(idCol.Type, cells[0].String)
+				r.id = columnText(idCol, cells[0].String)
 			}
 			if sameScalar(r.id, "0") {
 				r.id = ""
@@ -288,7 +313,7 @@ func readRows(ctx context.Context, db bun.IDB, cfg *Config, m *Model, table *dbs
 				continue
 			}
 			column, _ := table.Column(col)
-			r.values[col] = fixturechange.Lit(columnText(column.Type, c.String))
+			r.values[col] = fixturechange.Lit(columnText(column, c.String))
 		}
 		out = append(out, r)
 	}

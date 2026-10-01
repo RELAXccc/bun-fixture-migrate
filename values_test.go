@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -98,7 +100,7 @@ func TestColumnTextComparesOnlyNumbersAsNumbers(t *testing.T) {
 		{"text", "01234", "01234"},
 		{"varchar", " x ", " x "},
 	} {
-		if got := columnText(tc.typ, tc.in); got != tc.want {
+		if got := columnText(dbschema.Column{Type: tc.typ}, tc.in); got != tc.want {
 			t.Errorf("columnText(%s, %q) = %q, want %q", tc.typ, tc.in, got, tc.want)
 		}
 	}

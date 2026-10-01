@@ -7,6 +7,10 @@ it means to `dbfixture` and PostgreSQL. Each rule below is checked against the r
 
 - [Templates, anchors and order](#templates-anchors-and-order)
 - [Values](#values)
+  - [Dates and times](#dates-and-times)
+  - [JSON and jsonb](#json-and-jsonb)
+  - [Lengths, domains and constraints](#lengths-domains-and-constraints)
+  - [What export writes](#what-export-writes)
 - [Columns a row leaves out](#columns-a-row-leaves-out)
 - [What it refuses](#what-it-refuses)
 - [Limitations](#limitations)
@@ -45,12 +49,15 @@ as written, and any other field the value it resolves to:
 | `True`, `false` | `True`, `false` | a boolean. `yes` and `on` are strings in YAML 1.2 |
 | `2026-03-04 10:00:00` | `2026-03-04 10:00:00` | that instant, in UTC; unquoted, because a quoted one decodes into a `time.Time` only in RFC 3339 |
 | `2026-03-04` | `2026-03-04` | a date |
-| `~`, `null` | NULL (and see `null_default`) | NULL |
-| a mapping `{sso: true}` or a sequence | | in `json` or `jsonb` the JSON document; in an array column the array |
+| `~`, `null` | NULL (and see `null_default`) | NULL; in `json` and `jsonb` [a finding](#json-and-jsonb) |
+| `!!binary SGk=` | the text it encodes, `Hi` | the text it encodes |
+| `1.5` in an integer column | | a finding: an integer field holds `1`, a string field is refused |
+| a mapping `{sso: true}` or a sequence | | in `json` or `jsonb` the JSON document; in an array column the array, nested for a multidimensional one; in `bytea` the bytes of a sequence of byte values, the only YAML a `[]byte` field loads |
 
 The tool keeps both readings of such a value and lets the column decide: a column of a string type,
 a domain over one, an enum, or an array of any of them takes the value as written, everything else
-the resolved one. The column's type comes from the database, so **without one** (`generate` with no
+the resolved one. A domain is its base type throughout: a domain over integer is a number, one over
+`jsonb` a JSON document, and its default is the column's when the column has none. The column's type comes from the database, so **without one** (`generate` with no
 `database` configured or with `-no-lint`, `status -offline`, `baseline`) a change that carries a
 value whose two readings differ is refused with a reason, and so is a value only respelled (`1.10`
 before, `1.1` after), which is a change in a text column and none in a numeric one. To have neither
@@ -66,6 +73,96 @@ cannot hold is an `invalid value` finding before anything is generated.
 
 **At run time** a migration compares through the column's type too: `json` through `jsonb`, arrays
 as their type, and the few types without an equality operator (`point`, `xml`) through their text.
+
+### Dates and times
+
+The Go field decides what a date or a time becomes, and the tool cannot see it: bun writes a
+`time.Time` in UTC, cut to microseconds, and PostgreSQL reads a string in the `TimeZone` and
+`DateStyle` of the session that seeds. A value is accepted when it is one value either way; when it
+is not, it is an `invalid value` finding that names both and says how to write the one you mean.
+`check`, `generate` with a database, and `sync` read every value of a `date`, `timestamp`,
+`timestamptz`, `time` or `timetz` column, or of an array of them, under other session settings too.
+
+| In the file | Column | |
+| --- | --- | --- |
+| `2026-01-01 10:00:00`, `2026-01-01T10:00:00Z`, `"2026-01-01T10:00:00Z"` | `timestamp` | 10:00 |
+| `2026-01-01T10:00:00+02:00`, quoted or not | `timestamptz` | that instant |
+| `2026-01-01 10:00:00`, unquoted | `timestamptz` | 10:00 UTC: the column is taken to be written from a `time.Time`, to which yaml.v3 hands a timestamp without a zone in UTC |
+| `2026-01-01`, `2026-01-01T10:00:00+02:00` | `date` | the 1st |
+| `"10:00:00"`, `"10:00:00+02"` | `time`, `timetz` | that time; `time` drops the offset whoever writes it |
+| `"infinity"` | any of them | infinity, which only a string field or a type that reads it holds |
+| `2026-01-01T10:00:00+02:00`, quoted or not | `timestamp` | refused: 08:00 through a `time.Time`, 10:00 through a string |
+| `2026-01-01T23:30:00-05:00` | `date` | refused: the 2nd through a `time.Time`, the 1st through a string |
+| `2026-01-01T10:00:00.1234567Z` | any | refused: bun cuts to `.123456`, PostgreSQL rounds to `.123457` |
+| `"2026-01-01 10:00:00"`, `2026-01-01`, `"10:00"` | `timestamptz`, `timetz` | refused: a string is read in the seeding session's time zone |
+| `"01/02/2026"` | any | refused: January or February by `DateStyle` |
+| `"now"`, `"today"`, `"tomorrow"` | any | refused: a different value every day |
+
+Write a date as `2026-01-02`, a `timestamp` without an offset, a `timestamptz` or `timetz` with one,
+and at most six fractional digits. `export` writes every value that way.
+
+### JSON and jsonb
+
+A mapping or sequence in a `json` or `jsonb` column is what a `map[string]any` or `any` field makes of
+it, as `encoding/json` marshals that: a key as it is written (`017: x` is the key `"017"`), a number
+as a `float64` (`0.1234567890123456789` is stored as `0.12345678901234568`, an integer beyond 64 bits
+the same way), a timestamp as the `time.Time` yaml.v3 makes of it (`2026-01-01` is
+`"2026-01-01T00:00:00Z"`, an offset is kept), `!!binary` as the text it encodes. Two documents are
+compared as `jsonb` compares them, with every number written canonically, so `{"a": 1.0}` written by
+SQL and `{a: 1}` in the file agree.
+
+A scalar is the document a string field hands bun when it is JSON (`'{"a": 1}'`, `1.5`, `true`), and
+the JSON string an `any` field makes of it when it is not (`hello` is `"hello"`).
+
+`~` is the JSON null to a map, slice or `any` field and SQL NULL, or the column default, to a nil
+pointer or a `nullzero` field, so in a column without a default it is a `null against a default`
+finding under `policy.null_default`. Set the policy to `warn` if your models write NULL there, and the
+tool reads `~` as NULL. For the JSON null, leave the column out of the row and give the model
+`defaults: {settings: 'null'}`.
+
+### Lengths, domains and constraints
+
+`check`, `generate` with a database, and `sync` cast every value of the file to its column's type,
+domain and length included, and hold it against what an `INSERT` would do, which is not always what
+a cast does:
+
+- A value longer than `varchar(n)` or `char(n)` is an `invalid value`, unless what is past the length
+  is spaces: an `INSERT` drops those, and so does the migration, so `"abc    "` is `abc  ` in a
+  `varchar(5)`. `char(n)` is compared without its padding, in an array too.
+- A bit string has to be exactly as long as `bit(n)`, and no longer than `bit varying(n)`; a cast
+  would pad or cut it without a word.
+- Any error PostgreSQL gives casting a value is that value's `invalid value`, with its message: a
+  domain's `CHECK`, a syntax error in an `hstore`, `ltree` or `tsquery`, an enum label that does not
+  exist. A domain's `NOT NULL` makes the column one that takes no NULL.
+- A table's `CHECK` constraint that names one column is evaluated against each value of it, and a
+  value it refuses is an `invalid value`. A constraint over several columns, a unique index, a foreign
+  key and a trigger are not evaluated: `plan` runs the migration and reports what they refuse, and
+  without it the deploy fails.
+- Two natural keys that differ as text but are one value to the key's type, `Go` and `GO` in a
+  `citext` column, are a `duplicate key`.
+
+### What export writes
+
+Every value is written so that `dbfixture` loads it back through the field a bun model has for the
+column's type, and the tool reads it back as the same value; the export is parsed back with yaml.v3
+and held against the database before anything is written, and a difference fails it.
+
+- Numbers in decimal, `NaN` and `Infinity` of a float as `.nan`, `.inf`, `-.inf`. A `numeric` `NaN` or
+  `Infinity` is refused: a string field and a `float64` load different spellings.
+- Instants in RFC 3339 UTC, dates as dates. `infinity` is written as `"infinity"`, with a comment
+  that a `time.Time` cannot hold it.
+- `bytea` as the sequence of its bytes, `[72, 105]`, which is what a `[]byte` field loads.
+- `json` and `jsonb` documents as flow mappings and sequences, numbers canonical. A number with more
+  digits than a `float64` holds, a top-level string that is itself JSON, and the JSON null are
+  refused: no spelling reads back as itself. A model with `defaults: {settings: 'null'}` gets its JSON
+  nulls left out of the rows instead, which is what a map field leaves there. SQL NULL is `~`,
+  refused unless `policy.null_default` is `warn`, because a map field loads `~` as the JSON null.
+- Arrays as sequences, a multidimensional one as nested sequences. An array whose lower bound is not
+  1, `[0:1]={7,8}`, is refused.
+- Text double-quoted, everything YAML would refuse or fold escaped: control characters, DEL, the C1
+  range, NEL, U+2028 and U+2029, U+FFFE. Text that `dbfixture` would evaluate as a template,
+  `Hello {{ name }}`, is written as a template whose only action is that text as a string literal,
+  `'{{ "Hello {{ name }}" }}'`, which evaluates to it.
 
 **Without a database**, values are compared as the YAML type says: two spellings of one integer or
 one decimal are equal, a string only equals the same string, and a value the column's type would
@@ -116,6 +213,13 @@ Each ends up in the output with the model, the row and a reason; `generate` writ
   column: PostgreSQL refuses to write either.
 - **A value only the column's type can settle**, such as `1.10` or `017`, in a change computed
   without a database; see [values](#values).
+- **A value the column cannot take as `dbfixture` writes it**, an `invalid value`: one PostgreSQL
+  refuses to cast, one too long for the column, one a single-column `CHECK` refuses, a fraction in
+  an integer column. See [lengths, domains and constraints](#lengths-domains-and-constraints).
+- **A value whose stored value the model or the server decides**: a date or time a `time.Time` and a
+  string field store differently, or the seeding session reads ([dates and times](#dates-and-times)),
+  and `~` in a `json` or `jsonb` column ([JSON](#json-and-jsonb)).
+- **A model whose table is a view** or a materialized view: only a table holds master data.
 
 The answer is always the same: configure what the tool cannot know, or write that one migration by
 hand and `baseline -force`. See the [runbook](production.md#generate-refused-a-change).
@@ -127,8 +231,21 @@ hand and `baseline -force`. See the [runbook](production.md#generate-refused-a-c
 - Only `{{ $.Model.row.Field }}` templates are understood, and the field is mapped to a column by
   bun's default naming. A template naming a field whose column is spelled otherwise is an error, not
   a guess.
-- A structured value (mapping or sequence) is supported in `json`, `jsonb` and array columns, and not
-  as a reference.
+- A structured value (mapping or sequence) is supported in `json`, `jsonb`, array and `bytea` columns,
+  and not as a reference. A mapping in an `hstore` column, which a `map[string]string` field loads, is
+  an `invalid value`.
+- A `json` column is written in `jsonb`'s spelling: equal as JSON, but not byte for byte what bun
+  writes.
+- A top-level string that is itself JSON, in a `json` or `jsonb` column, is taken as that document,
+  which is what a string field stores; an `any` field stores it as a JSON string.
+- The two readings of a date or time are compared in scalar columns. Inside an array a date or time is
+  what a `[]time.Time` field makes of it, and only the seeding session is checked.
+- Keys equal under their type are found for the type's own equality; a column's nondeterministic
+  collation is not considered.
+- A `CHECK` over several columns, a unique index, a foreign key and a trigger are checked by `plan`,
+  not by `check` or `generate`.
+- Two `bytea` readings meet in a sequence: a quoted string that is a JSON array of byte values, in a
+  `bytea` column, is taken for the sequence.
 - Values never become part of the SQL the tool writes: they are passed as arguments, which bun quotes
   and escapes, and PostgreSQL casts them to the column's type. `where` is your SQL, used as written;
   every other identifier comes from the catalog or the configuration, checked and quoted.

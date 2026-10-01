@@ -73,7 +73,7 @@ These decide every trade-off further down.
 | `GENERATED ALWAYS AS IDENTITY` | an explicit id cannot be inserted, by anyone | export leaves the id out; lint | done |
 | composite primary key, m2m join table | no single id | keyed on the natural key only | done |
 | self-referencing model (`parent_id`) | order inside one model | file order, reverse for deletes | done |
-| enum types, domains, `citext` | text in, typed out | PostgreSQL compares | enum done; domains and `citext` follow their base type, untested |
+| enum types, domains, `citext` | text in, typed out; a domain's own name hides its base type; `Go` and `GO` are one `citext` | PostgreSQL compares; a domain is its base type, its default and `NOT NULL` the column's; keys equal under their type are a duplicate | done |
 | `soft_delete` | a delete is an UPDATE of `deleted_at` | soft-delete aware snapshot and delete | later |
 | schema-qualified table, mixed-case or reserved-word names | quoting | quoted everywhere | done |
 
@@ -110,6 +110,22 @@ Each was reproduced before it went into this table.
 | `plan` against a hot standby | "would FAIL" for the wrong reason | misleading | detect `pg_is_in_recovery()` | done |
 | `1.10`, `01234`, `True` unquoted in a text column | dbfixture stores the text as written; the tool resolved it to 1.1, 668, true and saw drift, and a migration would have written those | **silent corruption** | keep both readings, let the column's type decide, refuse without one | done |
 | explicit ids from a dbfixture seed | the sequence stays behind; the application's first insert fails | failed insert | `fixtureapply.SyncSequences` after the seed | done |
+| `char(n)` array elements shorter than n | padded on the database side, not on the file side | phantom drift | both read without the padding | done |
+| a domain over integer or `jsonb` | the domain's name was asked instead of its base type: exported as `"5"` and as a quoted string, a zero against the domain's default unreported | broken export, wrong value | the base type everywhere; the domain's default is the column's | done |
+| a value too long for `varchar(n)`, `char(n)`, `bit(n)` | an explicit cast cut it without a word, so it was no finding | failed deploy, **silent truncation** | an `INSERT`'s length rules: an `invalid value`, trailing spaces dropped | done |
+| a domain `CHECK`, an `hstore`, `ltree` or `tsquery` syntax error | not of class 22, so the command stopped with a raw error | outage noise | any error casting one value is an `invalid value` | done |
+| an offset into `timestamp` or `date`, more than six fractional digits, a zone-less string into `timestamptz`, `01/02/2026` | a `time.Time` and a string field store different values, or the seeding session decides | **silent corruption** | an `invalid value` naming both, unless every reading agrees | done |
+| nested timestamps and long numbers in `jsonb` through `map[string]any` | `encoding/json` writes a `time.Time` and a `float64` its own way | phantom drift, wrong value | written as `encoding/json` writes them | done |
+| `~` in a `json` or `jsonb` column | the JSON null through a map field, NULL through a pointer | phantom drift | a `null against a default` finding | done |
+| `bytea` through `[]byte` | the sequence's JSON text was cast to `bytea`; the export wrote `"\x48..."` | **silent corruption**, broken export | the sequence's bytes; exported as a sequence | done |
+| `!!binary` | the base64 text was kept | wrong value | the text it encodes | done, but in a string column it needs the reader to drop the as-written base64 |
+| NEL, DEL, the C1 range, U+FFFE in exported text | NEL folded into a space, the rest unparseable | broken export | escaped; every export is parsed back before it is written | done |
+| `NaN`, `Infinity`, timestamp `infinity`, `jsonb` strings and null, `Hello {{ name }}` in an export | written so dbfixture could not load them, or refused needlessly | broken export | YAML's spellings, a string-literal template, or a refusal with the reason | done |
+| `{"a": 1.0}` in `jsonb`, written by SQL | compared as text with the file's `1` | phantom drift | numbers canonical on both sides | done |
+| a 2-D array; an array numbered from 0 | an invalid value after export; `[0:1]={7,8}` exported as `[7, 8]` | broken export, **silent corruption** | the array literal built from nested JSON; another lower bound refused | done |
+| a table `CHECK` the new value violates | generate wrote it, the deploy failed | failed deploy | a single-column `CHECK` is an `invalid value`; others `plan` reports | done |
+| `1.5` in an integer column | dbfixture stores 1 | phantom drift | an `invalid value` saying so | done |
+| a view named as a model's table | "not a table" | misleading | says it is a view, and that only tables hold master data | done |
 
 ## 4. Features
 
