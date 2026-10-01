@@ -7,18 +7,20 @@ import (
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 )
 
-// A value is cast to the column's type without a length for the character
-// types: an explicit cast to varchar(3) truncates without a word.
+// A value is cast to the column's type with its length and its domain: an
+// INSERT refuses a value that is too long, and tooLong says so before the
+// cast can cut it.
 func TestCastType(t *testing.T) {
 	for _, tc := range []struct {
 		col  dbschema.Column
 		want string
 	}{
 		{dbschema.Column{Type: "numeric", FullType: "numeric(10,2)"}, "numeric(10,2)"},
-		{dbschema.Column{Type: "varchar", FullType: "character varying(3)"}, "varchar"},
-		{dbschema.Column{Type: "bpchar", FullType: "character(3)"}, "bpchar"},
-		{dbschema.Column{Type: "_varchar", FullType: "character varying(3)[]"}, "varchar[]"},
-		{dbschema.Column{Type: "_int8", FullType: "bigint[]"}, "bigint[]"},
+		{dbschema.Column{Type: "varchar", FullType: "character varying(3)", Length: 3}, "character varying(3)"},
+		{dbschema.Column{Type: "bpchar", FullType: "character(3)", Length: 3}, "character(3)"},
+		{dbschema.Column{Type: "_bpchar", FullType: "character(3)[]", Category: "A", ElemType: "bpchar"},
+			"character(3)[]"},
+		{dbschema.Column{Type: "int4", Domain: "qty", FullType: "qty"}, "qty"},
 	} {
 		if got := castType(tc.col); got != tc.want {
 			t.Errorf("%+v: %s, want %s", tc.col, got, tc.want)

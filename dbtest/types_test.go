@@ -227,6 +227,186 @@ func seedErr(db *bun.DB, text string) error {
 	return tryLoad(db, text)
 }
 
+type TyDom struct {
+	bun.BaseModel `bun:"table:ty_dom"`
+
+	ID   int64          `bun:"id,pk"`
+	Name string         `bun:"name,notnull"`
+	Q    int64          `bun:"q,notnull,default:1"`
+	Code string         `bun:"code"`
+	S    map[string]any `bun:"s,type:jsonb"`
+}
+
+// A domain is its base type to everything the tool asks of a column: what
+// its zero is, how it is exported, what its default is. Before, the catalog's
+// name of the domain was asked, a domain over integer was exported as "5",
+// which an int64 cannot load, and a zero against the domain's default went
+// unreported.
+func TestTypesDomains(t *testing.T) {
+	l := newLab(t, map[string]*fixturemigrate.Model{"TyDom": {Table: "ty_dom", Key: []string{"name"}}}, "ty_dom",
+		// The domains are created once: a domain dropped and created again
+		// under a pool of connections leaves pgx's prepared statements
+		// pointing at a type that no longer exists.
+		[]string{"DROP TABLE IF EXISTS ty_dom",
+			createOnce("CREATE DOMAIN ty_qty AS integer CHECK (VALUE >= 0) DEFAULT 1"),
+			createOnce("CREATE DOMAIN ty_doc AS jsonb"),
+			createOnce("CREATE DOMAIN ty_code AS varchar(3)"),
+			"CREATE TABLE ty_dom (id bigint PRIMARY KEY, name text NOT NULL UNIQUE, q ty_qty NOT NULL, code ty_code, s ty_doc)"},
+		`SELECT string_agg(concat_ws('|', name, q, '['||code||']', s::text), E'\n' ORDER BY name) FROM ty_dom`,
+		(*TyDom)(nil))
+
+	tables := schemaOf(t, l.db)
+	q, _ := tables["public.ty_dom"].Column("q")
+	code, _ := tables["public.ty_dom"].Column("code")
+	s, _ := tables["public.ty_dom"].Column("s")
+	if q.Type != "int4" || q.Domain != "ty_qty" || q.Default != "1" || code.Type != "varchar" || code.Length != 3 ||
+		s.Type != "jsonb" {
+		t.Fatalf("the domains are not followed to their base types: %+v %+v %+v", q, code, s)
+	}
+
+	const v1 = `- model: TyDom
+  rows:
+    - {id: 1, name: a, q: 5, code: abc, s: {k: 1, at: 2026-01-01T10:00:00+02:00}}
+`
+	l.seed(v1)
+	l.check(v1)
+	export := l.roundTrip()
+	if !strings.Contains(export, "q: 5\n") || !strings.Contains(export, `s: {"k": 1, "at": "2026-01-01T10:00:00+02:00"}`) {
+		t.Fatalf("a domain over integer is a number and one over jsonb a mapping:\n%s", export)
+	}
+
+	v2 := v1 + `    - {id: 2, name: b, q: 2, code: "xy ", s: {k: 2.50}}
+`
+	l.fidelity(v1, v2)
+
+	l.refused(v1+"    - {id: 2, name: b, q: 0, code: x, s: {}}\n", "q is 0, but the column defaults to 1")
+	l.refused(v1+"    - {id: 2, name: b, q: -1, code: x, s: {}}\n", `q is "-1", which the column's type, ty_qty, cannot hold`)
+	l.refused(v1+"    - {id: 2, name: b, q: 1, code: abcd, s: {}}\n", `code is "abcd", which is longer than the 3 characters`)
+}
+
+type TyLen struct {
+	bun.BaseModel `bun:"table:ty_len"`
+
+	ID   int64  `bun:"id,pk"`
+	Name string `bun:"name,notnull"`
+	V5   string `bun:"v5,nullzero"`
+	C3   string `bun:"c3,nullzero"`
+	B3   string `bun:"b3,nullzero"`
+	Vb   string `bun:"vb,nullzero"`
+}
+
+type TyCharArr struct {
+	bun.BaseModel `bun:"table:ty_chararr"`
+
+	ID      int64    `bun:"id,pk"`
+	Name    string   `bun:"name,notnull"`
+	Aliases []string `bun:"aliases,array"`
+}
+
+// A length is held against a value the way an INSERT holds it, not the way an
+// explicit cast does, which cuts without a word: too long for varchar(n) or
+// char(n) is a finding unless only spaces are cut, which the database drops;
+// a bit string has to be as long as bit(n). Before, the length was dropped for
+// the cast and a value too long failed the deploy, "abc    " drifted forever
+// in a varchar(5), and a bit string was cut into the migration.
+func TestTypesLengths(t *testing.T) {
+	l := newLab(t, map[string]*fixturemigrate.Model{"TyLen": {Table: "ty_len", Key: []string{"name"}}}, "ty_len",
+		[]string{"DROP TABLE IF EXISTS ty_len",
+			"CREATE TABLE ty_len (id bigint PRIMARY KEY, name text NOT NULL UNIQUE, v5 varchar(5), c3 char(3), b3 bit(3), vb varbit(3))"},
+		`SELECT string_agg(concat_ws('|', name, '['||v5||']', '['||c3::text||']', octet_length(c3), b3, vb), E'\n' ORDER BY name) FROM ty_len`,
+		(*TyLen)(nil))
+
+	const v1 = `- model: TyLen
+  rows:
+    - {id: 1, name: a, v5: abc, c3: ab, b3: "101", vb: "10"}
+`
+	l.seed(v1)
+	l.check(v1)
+	l.roundTrip()
+
+	// Trailing spaces past the length are dropped by an INSERT, and the
+	// migration writes what is left, as the seed stores it.
+	v2 := strings.Replace(v1, "v5: abc,", `v5: "abc    ",`, 1) + `    - {id: 2, name: b, v5: x, c3: "ab   ", b3: "111", vb: "1"}
+`
+	l.fidelity(v1, v2)
+
+	l.refused(v1+"    - {id: 2, name: b, v5: abcdef, c3: x, b3: \"101\", vb: \"1\"}\n",
+		`v5 is "abcdef", which is longer than the 5 characters the column's type, character varying(5), holds`)
+	l.refused(v1+"    - {id: 2, name: b, v5: x, c3: abcd, b3: \"101\", vb: \"1\"}\n",
+		`c3 is "abcd", which is longer than the 3 characters`)
+	l.refused(v1+"    - {id: 2, name: b, v5: x, c3: x, b3: \"1010\", vb: \"1\"}\n",
+		`b3 is "1010", which is not 3 bits long`)
+	l.refused(v1+"    - {id: 2, name: b, v5: x, c3: x, b3: \"10\", vb: \"1\"}\n",
+		`b3 is "10", which is not 3 bits long`)
+	l.refused(v1+"    - {id: 2, name: b, v5: x, c3: x, b3: \"101\", vb: \"x5\"}\n",
+		`vb is "x5", which is longer than the 3 bits`)
+	for _, text := range []string{
+		v1 + "    - {id: 2, name: b, v5: abcdef, c3: x, b3: \"101\", vb: \"1\"}\n",
+		v1 + "    - {id: 2, name: b, v5: x, c3: x, b3: \"1010\", vb: \"1\"}\n",
+	} {
+		l.reset()
+		if err := seedErr(l.db, text); err == nil {
+			t.Fatalf("dbfixture loaded what the tool refuses:\n%s", text)
+		}
+	}
+
+	// The elements of a char(n) array are read without their padding on
+	// both sides, so a seed agrees with its file.
+	a := newLab(t, map[string]*fixturemigrate.Model{"TyCharArr": {Table: "ty_chararr", Key: []string{"name"}}},
+		"ty_chararr", []string{"DROP TABLE IF EXISTS ty_chararr",
+			"CREATE TABLE ty_chararr (id bigint PRIMARY KEY, name text NOT NULL UNIQUE, aliases char(3)[])"},
+		`SELECT string_agg(concat_ws('|', name, aliases::text), E'\n' ORDER BY name) FROM ty_chararr`,
+		(*TyCharArr)(nil))
+	const arr = `- model: TyCharArr
+  rows:
+    - {id: 1, name: germany, aliases: [DE, "D ", GER]}
+`
+	a.seed(arr)
+	a.check(arr)
+	a.roundTrip()
+	a.refused(arr+"    - {id: 2, name: spain, aliases: [ESPA]}\n", `aliases is "[\"ESPA\"]", which is longer than the 3 characters`)
+}
+
+type TyCast struct {
+	bun.BaseModel `bun:"table:ty_cast"`
+
+	ID   int64  `bun:"id,pk"`
+	Name string `bun:"name,notnull"`
+	Tq   string `bun:"tq,nullzero"`
+	Lt   string `bun:"lt,nullzero"`
+	Hs   string `bun:"hs,nullzero"`
+}
+
+// Any error PostgreSQL gives casting one value is that value being invalid,
+// whatever its class: hstore, ltree and tsquery refuse input with 42601, a
+// domain's CHECK with 23514. Before, those stopped the command with a raw
+// error instead of a finding.
+func TestTypesEveryCastErrorIsAFinding(t *testing.T) {
+	db := connect(t)
+	for _, ext := range []string{"hstore", "ltree"} {
+		if _, err := db.ExecContext(context.Background(), "CREATE EXTENSION IF NOT EXISTS "+ext); err != nil {
+			t.Skipf("%s: %v", ext, err)
+		}
+	}
+	l := newLab(t, map[string]*fixturemigrate.Model{"TyCast": {Table: "ty_cast", Key: []string{"name"}}}, "ty_cast",
+		[]string{"DROP TABLE IF EXISTS ty_cast",
+			"CREATE TABLE ty_cast (id bigint PRIMARY KEY, name text NOT NULL UNIQUE, tq tsquery, lt ltree, hs hstore)"},
+		`SELECT string_agg(concat_ws('|', name, tq, lt, hs), E'\n' ORDER BY name) FROM ty_cast`,
+		(*TyCast)(nil))
+	const v1 = `- model: TyCast
+  rows:
+    - {id: 1, name: a, tq: "cat & dog", lt: a.b, hs: "k=>v"}
+`
+	l.seed(v1)
+	l.check(v1)
+	l.refused(`- model: TyCast
+  rows:
+    - {id: 1, name: a, tq: "cat & & dog", lt: "a..b", hs: {k: v}}
+`, `tq is "cat & & dog", which the column's type, tsquery, cannot hold: syntax error in tsquery`,
+		`lt is "a..b", which the column's type, ltree, cannot hold`,
+		`hs is "{\"k\":\"v\"}", which the column's type, hstore, cannot hold`)
+}
+
 type TyBin struct {
 	bun.BaseModel `bun:"table:ty_bin"`
 
@@ -255,6 +435,44 @@ func TestTypesBinaryTagInATextColumn(t *testing.T) {
 		t.Skip("the fixture reader still takes a !!binary scalar's base64 text for what a string field gets")
 	}
 	b.fidelity(b1, b3)
+}
+
+type TyCheck struct {
+	bun.BaseModel `bun:"table:ty_check"`
+
+	ID    int64  `bun:"id,pk"`
+	Name  string `bun:"name,notnull"`
+	Price int64  `bun:"price"`
+	Lo    int64  `bun:"lo"`
+	Hi    int64  `bun:"hi"`
+	I     int64  `bun:"i"`
+}
+
+// A CHECK constraint over one column is held against each value, so a value
+// it refuses is a finding rather than a failed deploy. One over several
+// columns is not: plan runs the migration and reports it. A fraction in an
+// integer column is what yaml.v3 makes of it for an integer field, which
+// dbfixture stores without a word, and a finding.
+func TestTypesCheckConstraintsAndFractions(t *testing.T) {
+	l := newLab(t, map[string]*fixturemigrate.Model{"TyCheck": {Table: "ty_check", Key: []string{"name"}}}, "ty_check",
+		[]string{"DROP TABLE IF EXISTS ty_check",
+			`CREATE TABLE ty_check (id bigint PRIMARY KEY, name text NOT NULL UNIQUE, price int NOT NULL CHECK (price < 100),
+				lo int NOT NULL, hi int NOT NULL, i int NOT NULL, CHECK (lo <= hi))`},
+		`SELECT string_agg(concat_ws('|', name, price, lo, hi, i), E'\n' ORDER BY name) FROM ty_check`, (*TyCheck)(nil))
+	const v1 = "- model: TyCheck\n  rows:\n    - {id: 1, name: a, price: 10, lo: 1, hi: 2, i: 1}\n"
+	l.seed(v1)
+	l.check(v1)
+	l.refused("- model: TyCheck\n  rows:\n    - {id: 1, name: a, price: 150, lo: 1, hi: 2, i: 1}\n",
+		`price is "150", which the column's check constraint ty_check_price_check (price < 100) refuses`)
+	if f := l.findings("- model: TyCheck\n  rows:\n    - {id: 1, name: a, price: 10, lo: 5, hi: 2, i: 1}\n"); f != "" {
+		t.Fatalf("a constraint over two columns is plan's to find: %s", f)
+	}
+
+	fraction := "- model: TyCheck\n  rows:\n    - {id: 1, name: a, price: 10, lo: 1, hi: 2, i: 1.5}\n"
+	l.refused(fraction, `i is "1.5", which an integer field holds as 1, because yaml.v3 drops the fraction`)
+	if got := l.seed(fraction); got != "a|10|1|2|1" {
+		t.Fatalf("dbfixture stores %s: the premise changed", got)
+	}
 }
 
 // A model naming a view is told it is one.
