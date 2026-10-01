@@ -243,7 +243,7 @@ what changing it does. Unknown keys are an error.
 | `migrations_table` | `bun_migrations` | the migrator's table, when it is built `WithTableName`; may be schema-qualified |
 | `migration_locks_table` | `bun_migration_locks` | the migrator's locks table, when it is built `WithLocksTableName`; `status` reports a lock left in it |
 | `state` | `<out>/fixture_state.yml` | the state file |
-| `seed_guard_table` | | a table never empty in a seeded database; while it is empty a fixture migration does nothing |
+| `seed_guard_table` | | a table never empty in a seeded database; while it is empty a fixture migration does nothing. Written into the migration in `schema` when it names none and `schema` is not `public` |
 | `database` | | a DSN, or `env:NAME` to read one from the environment |
 | `schema` | `public` | the schema of tables named without one |
 | `policy` | | see below |
@@ -267,13 +267,13 @@ listed stops every command.
 | `derived` | | columns the application recalculates: never compared, written or exported |
 | `ignore` | | columns that take no part |
 | `deletes` | `policy.deletes` | `allow`, `refuse` or `cascade` |
-| `where` | | an SQL predicate limiting which rows are master data; your SQL, used as written |
+| `where` | | an SQL predicate limiting which rows are master data; your SQL, used as written. A generated migration carries it: every statement, natural-key lookup and reference for the model sees only those rows, and a row it writes must hold it. A `;` or a parenthesis it does not open is refused |
 
 ### policy
 
 | Key | Values | Default | Decides |
 | --- | --- | --- | --- |
-| `id_drift` | error, warn, ignore | error | a row under another id than the file's, or the file's id held by another row |
+| `id_drift` | error, warn, ignore | error | a row under another id than the file's, or the file's id held by another row. Under warn and ignore a rename finds its row by the old natural key alone, and warn says when its id is not the file's |
 | `missing_row` | error, warn | error | an update or delete whose row is not there. `warn` loses the change for good under bun's migrator |
 | `changed_row` | error, warn | warn | a row somebody changed in this database; `warn` keeps their change |
 | `zero_default` | error, warn, ignore | error | a zero in a column whose default is not that zero, which bun replaces with the default |
@@ -398,7 +398,7 @@ transaction was open.
 | `model`, `kind`, `key` | which change: `insert`, `update` or `delete`, and the natural key as `col=value,...` |
 | `status` | `applied`, `unchanged` (the database held it already), `skipped` (the policy passed it over), `failed`, `unseeded` (the seed guard table is empty), `sequence` (a sequence moved past explicit ids) |
 | `rows` | rows an applied change touched |
-| `problem` | why it could not be made: `missing row`, `changed row`, `id drift`, `referenced` (a delete other rows point at), `error` |
+| `problem` | why it could not be made: `missing row`, `changed row`, `id drift`, `referenced` (a delete other rows point at), `duplicate key` (more than one row holds the natural key), `lock timeout`, `error` |
 | `message` | the sentence a person reads |
 
 ## The Go packages
@@ -415,19 +415,45 @@ does, and is tested under `pgdriver` and `pgx`.
 
 | Function | |
 | --- | --- |
+| `Up(set, opts...)`, `Down(set, opts...)` | the up and down functions a generated file registers with `MustRegister`; they run `Apply` and `Revert`, and `Up` knows the migration's name from the file it is called in |
 | `Apply(ctx, db, set, opts...)` | run a change set in one transaction; see [what a migration does](../README.md#what-a-generated-migration-does) |
-| `Revert(ctx, db, set, opts...)` | the same set backwards, every change inverted |
+| `Revert(ctx, db, set, opts...)` | the same set backwards, every change inverted; it assumes `Apply` made every change on this database ([rolling back](production.md#rolling-back)) |
 | `Validate(set)` | check a set without a database |
 | `SyncSequences(ctx, db, tables...)` | move the sequences of serial and identity columns past the values present, forward only; after a `dbfixture` seed |
 | `WithLogger(fn)` | where the per-row lines go; default `log.Printf` |
+| `WithSlog(logger)` | write the per-row report to a `*slog.Logger` instead, one record per change with the outcome's fields as attributes; a skipped change is a warning |
 | `WithReport(fn)` | receive every `Outcome` as it happens |
-| `WithMigrationName(name)` | the migration name, when `Apply` is not called from a file bun registered |
+| `WithMigrationName(name)` | the migration name, when `Apply` is called by hand from outside the file bun registered |
 | `WithDryRun()` | for a caller that rolls back: sequences are reported, not moved |
+
+A change that fails the set comes back as a `*fixtureapply.ChangeError`, which `errors.As` finds in
+the error bun's migrator returns: its `Outcome` says which change and why, and it unwraps to the
+statement's own error, such as PostgreSQL's, or to nothing when the policy made a problem with the
+row fatal. When `Apply` took back bun's record of the failed migration, `errors.Is(err,
+fixtureapply.ErrRecordRemoved)` holds: the migration is pending again.
 
 `Apply` takes a `bun.IDB`. Given a `*bun.DB` it opens its own transaction; given a `bun.Tx` it runs
 in a savepoint inside it, which is how a migration that also does other work keeps it all in one
 transaction. Only on the migrator's `*bun.DB` does a failure take back bun's record of the
 migration.
+
+### Generated files over time
+
+A generated migration stays in your repository for good, and is compiled against whichever version
+of `fixtureapply` the application uses later. Every version reads, compiles and runs the files the
+earlier ones wrote: the repository keeps one of each shape, unchanged, under `testdata/generated`,
+and its tests run them all under bun's migrator.
+
+A change set of more than a thousand changes is written as one function per hundred changes,
+joined by `fixturechange.Concat`: the Go compiler took 77 seconds and 1.3 GB over one literal of
+4,800 changes, and takes 8 seconds over the same changes in parts. `fixturemigrate.RenderWarnings`
+says so about such a set, and that it still runs in one transaction.
+
+`fixturechange.Set` has a `Format`, which a file leaves out while it is 1. A new field needs no new
+format: a file that uses one does not compile against an older `fixtureapply`, which is refusal
+enough. Only a change to what an existing field means raises it, and then an older `fixtureapply`
+refuses the file, and an older `status` or `plan` cannot read it, with a sentence saying to upgrade
+`github.com/RELAXccc/bun-fixture-migrate`.
 
 `fixturemigrate.Sync(ctx, db, cfg, files, SyncOptions{DryRun, Logf})` is the `sync` command,
 returning a `*SyncResult` with the diff, the findings and the outcomes; `ErrSyncRefused` wraps a

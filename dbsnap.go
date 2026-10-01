@@ -219,7 +219,8 @@ func selectQuery(cfg *Config, m *Model, table *dbschema.Table, cols []string) (s
 	}
 	query := "SELECT " + strings.Join(selects, ", ") + " FROM " + qualified
 	if m.Where != "" {
-		query += " WHERE (" + m.Where + ")"
+		// The line break ends a -- comment the predicate may close with.
+		query += " WHERE (" + m.Where + "\n)"
 	}
 	var orderBy []string
 	if hasID {

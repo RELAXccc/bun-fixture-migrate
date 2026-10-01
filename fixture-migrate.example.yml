@@ -79,7 +79,8 @@ policy:
   missing_row: error
 
   # The row is there, but no longer holds the values the migration was
-  # generated against, because somebody changed it in this database.
+  # generated against: somebody edited it in this database, or another
+  # migration changed it first.
   #   warn   keep their change, apply nothing, say so (default)
   #   error  fail and roll back
   # warn is right when an admin UI edits this data in production: their edit is

@@ -228,6 +228,9 @@ func generate(o streams, args []string) error {
 	if err != nil {
 		return err
 	}
+	for _, w := range fixturemigrate.RenderWarnings(res) {
+		fmt.Fprintln(o.stderr, "warning:", w)
+	}
 	if *dryRun {
 		return writeOut(o.stdout, src)
 	}

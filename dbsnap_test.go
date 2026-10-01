@@ -62,8 +62,10 @@ func TestSelectQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The line break keeps a predicate's closing -- comment from swallowing
+	// the parenthesis and the ORDER BY.
 	const want = `SELECT ("id")::text, ("name")::text, ("price_cents")::text ` +
-		`FROM "public"."plans" WHERE (archived_at IS NULL) ORDER BY "id", "name"`
+		"FROM \"public\".\"plans\" WHERE (archived_at IS NULL\n) ORDER BY \"id\", \"name\""
 	if query != want {
 		t.Fatalf("selectQuery =\n%s\nwant\n%s", query, want)
 	}

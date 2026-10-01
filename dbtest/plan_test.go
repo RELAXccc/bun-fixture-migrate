@@ -140,11 +140,12 @@ func TestPlanAndSyncCheckDeferredConstraints(t *testing.T) {
 	c.write("fixtures/fixture.yml", withSaw)
 	c.must(0, "generate", "-name", "saw", "-at", "20300101000001")
 
+	// A fixture migration checks the constraints it deferred before it
+	// finishes, so the plan finds the violation inside the migration itself.
 	out := c.must(3, "plan")
 	for _, want := range []string{
 		"20300101000000_fixture_hammer: would succeed",
 		"20300101000001_fixture_saw: would FAIL",
-		"when it commits, where PostgreSQL checks the constraints it defers",
 		"d_items_region_fkey",
 	} {
 		if !strings.Contains(out, want) {
@@ -152,7 +153,8 @@ func TestPlanAndSyncCheckDeferredConstraints(t *testing.T) {
 		}
 	}
 	if out := c.must(1, "sync"); !strings.Contains(out, "would apply DItem name=saw insert") ||
-		!strings.Contains(out, "would fail when committed") || strings.Contains(out, "run it again with -yes") {
+		!strings.Contains(out, "a constraint did not hold, so nothing was changed") ||
+		!strings.Contains(out, "d_items_region_fkey") || strings.Contains(out, "run it again with -yes") {
 		t.Fatalf("sync without -yes:\n%s", out)
 	}
 	if out := c.must(1, "sync", "-yes"); !strings.Contains(out, "d_items_region_fkey") {

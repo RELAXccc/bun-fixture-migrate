@@ -45,7 +45,7 @@ go install github.com/RELAXccc/bun-fixture-migrate/cmd/bun-fixture-migrate@lates
 ```
 
 Build it with a supported Go release. Use the same version of the command as of the
-`fixtureapply` package your migrations import, which needs bun and `gopkg.in/yaml.v3` and nothing
+`fixtureapply` package your migrations import, which needs bun and nothing
 else.
 
 ## In five minutes
@@ -69,7 +69,7 @@ read it, run plan against a copy of production, then deploy
 $ bun-fixture-migrate plan
 20260921120000_fixture_plan_prices: would succeed
   applied  Plan name=pro insert (1 row)
-  skipped  Plan name=team update [changed row]: plans name=team no longer holds the values this change was generated against, so somebody changed it in this database. It was left alone. Compare it with the fixture file and decide which one is right
+  skipped  Plan name=team update [changed row]: plans name=team no longer holds the values this change was generated against: it was changed in this database, or by a migration that ran before this one. It was left alone. Compare it with the fixture file and decide which one is right
 
 rolled back: nothing was changed, except that an id an insert drew from a sequence stays drawn, which only leaves a gap
 ```
@@ -83,6 +83,13 @@ reports drift. [`examples/basic`](examples/basic) is the whole loop in a runnabl
 It is a plain Go file meant to be read:
 
 ```go
+func init() {
+	Migrations.MustRegister(
+		fixtureapply.Up(fixtureChanges20260921120000PlanPrices),
+		fixtureapply.Down(fixtureChanges20260921120000PlanPrices),
+	)
+}
+
 var fixtureChanges20260921120000PlanPrices = fixturechange.Set{
 	Name:            "20260921120000_fixture_plan_prices",
 	SeedGuardTable:  "plans",
@@ -91,7 +98,9 @@ var fixtureChanges20260921120000PlanPrices = fixturechange.Set{
 		"Currency": {Name: "currencies", ID: "id", Key: "code"},
 		"Plan":     {Name: "plans", ID: "id", Key: "name", Serial: true},
 	},
-	Policy: fixturechange.Policy{MissingRow: "error", ChangedRow: "warn", IDDrift: "error"},
+	Policy: fixturechange.Policy{
+		MissingRow: "error", ChangedRow: "warn", IDDrift: "error", DuplicateKey: "error",
+	},
 	Changes: []fixturechange.Change{
 		{Model: "Plan", Kind: fixturechange.Insert,
 			Key: fixturechange.Values{"name": fixturechange.Lit("pro")},
@@ -112,6 +121,10 @@ var fixtureChanges20260921120000PlanPrices = fixturechange.Set{
 }
 ```
 
+Values are Go string literals, and whatever the file's comments quote from the data, such as the key
+and reason of a refused row, has its control and invisible characters escaped: a value holding a line
+break cannot end a comment and become code in your migrations package.
+
 No ids in the `Key` maps, and `currency_id` is a name, not a number: rows are found by their
 natural key and references are resolved against the database the migration runs on, because ids
 drift between databases and names do not. The policy is written into the file, so changing the
@@ -120,21 +133,31 @@ configuration later does not change what an old migration does. At run time `fix
 - does nothing while `seed_guard_table` is empty: that database has not been seeded, and
   `dbfixture` will load the new state by itself;
 - runs the whole set in one transaction, under an advisory lock, so two replicas applying it at once
-  cannot both insert a row;
-- resolves every reference to a real id first, and fails if one matches no row or more than one;
+  cannot both insert a row, and checks `DEFERRABLE` constraints once the whole set is done, so a
+  rename of a code a foreign key points at can be followed by the rows pointing at it;
+- resolves every reference to a real id first. One it writes fails the migration if it matches no
+  row or more than one; one a guard compares with, whose row was renamed or removed here, matches
+  nothing, which is a missing or changed row under the policy like any other;
 - inserts only when no row with that natural key exists, and updates or deletes only while the row
   still holds the values the change was generated against, so a hand edit survives and a second run
   is a no-op;
 - compares through each column's type: `jsonb` as JSON, arrays as arrays, `numeric` as numbers,
   timestamps as instants whatever the session's time zone;
 - refuses a delete that other rows point at, rather than letting `ON DELETE CASCADE` or `SET NULL`
-  reach them, unless the model says `deletes: cascade`;
+  reach them, unless the model says `deletes: cascade`, and then says how many rows the delete reached;
+  a rollback does not bring those back;
 - diagnoses every row count of zero, as below, and takes back bun's record of a migration that
   failed;
-- moves the sequence past any explicit id it wrote;
-- logs one line per row, or hands every row's outcome to `fixtureapply.WithReport`.
+- moves the sequence past an explicit id before it writes it, so an insert by the application
+  meanwhile cannot draw that id;
+- logs one line per row, or writes it to a `log/slog` logger with `fixtureapply.WithSlog`, or hands
+  every row's outcome to `fixtureapply.WithReport`; a change that fails the migration is a
+  `*fixtureapply.ChangeError` that `errors.As` finds.
 
-`Revert` is the same set backwards, every change inverted and guarded the same way.
+`Revert` is the same set backwards, every change inverted and guarded the same way. A rename finds
+its row under the name it gave it, so it reverts, and a second run finds it already made. It assumes
+the migration made every change on this database, including those it found already made; see
+[rolling back](docs/production.md#rolling-back).
 
 ## Three things about bun you may not know
 
@@ -208,20 +231,24 @@ production was not in the state it expected is lost for good: fix the data, depl
 `migrate` has nothing to do.
 
 A generated migration fails on purpose whenever it cannot do what it says (below), so it has to
-handle this. When `fixtureapply.Apply` fails under bun's migrator, it deletes the record the migrator
-made of it a moment before: the newest row of `bun_migrations`, only if it carries this migration's
-name and was written within the hour, and only through the migrator's own `*bun.DB`. The error says
-so:
+handle this. Under bun's migrator, `fixtureapply.Apply` first looks for the record the migrator made
+of it a moment before: the newest row of `bun_migrations`, if it carries this migration's name and
+was written in the last minute. If the change set fails, it deletes that row, and only that row,
+through the migrator's own `*bun.DB`. A record another replica writes while this one runs is not the
+row it found, and is left alone. The error says so:
 
 ```
 migrate: 20260921120000: up: …: no row of items has name=anvil. …
 
-bun had recorded migration 20260921120000 as applied before running it (the migrator was not built
-WithMarkAppliedOnSuccess(true)); that record was removed, so the migration runs again once this is fixed
+bun had recorded migration 20260921120000 as applied before running it, as its migrator
+does unless built WithMarkAppliedOnSuccess(true); that record was removed, so the migration runs again
+once this is fixed
 ```
 
-It reads the name off the call stack exactly as bun's `Register` does, from the migration's file
-name, so renaming the file keeps working. With `WithMarkAppliedOnSuccess(true)` there is no such
+The file registers `fixtureapply.Up(set)` and `fixtureapply.Down(set)`, and `Up` reads the name from
+the file that registers it exactly as bun's `Register` does, from the migration's file name, so
+renaming the file keeps working. Files written by earlier versions, which register functions calling
+`Apply` and `Revert`, keep working: `Apply` finds the name on the call stack. With `WithMarkAppliedOnSuccess(true)` there is no such
 record and nothing is deleted. Set `migrations_table` if your migrator uses `WithTableName`.
 
 ### Why a generated migration fails at all

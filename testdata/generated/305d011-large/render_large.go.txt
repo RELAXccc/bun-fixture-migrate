@@ -1,0 +1,56 @@
+package fixturemigrate
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"testing"
+
+	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+)
+
+// TestRenderLargeCorpus renders a set of 1001 changes with this commit's
+// generator: a third inserts, a third updates, a third deletes.
+func TestRenderLargeCorpus(t *testing.T) {
+	out := os.Getenv("CORPUS_OUT")
+	if out == "" {
+		t.Skip("CORPUS_OUT")
+	}
+	cfg := &Config{Fixture: "fixture.yml", Out: "migrations", SeedGuardTable: "corpus_translations",
+		Models: map[string]*Model{"Translation": {Table: "corpus_translations", Key: []string{"locale", "key"},
+			Ref: "key", Serial: true}}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	res := &Result{Tables: fixturechange.Tables{"Translation": {Name: "corpus_translations", ID: "id", Key: "key",
+		Serial: true}}, Head: "fixture.yml", Base: "the state file"}
+	for i := 0; i <= 1000; i++ {
+		k := fmt.Sprintf("k%05d", i)
+		key := fixturechange.Values{"locale": fixturechange.Lit("de"), "key": fixturechange.Lit(k)}
+		switch i % 3 {
+		case 0:
+			res.Changes = append(res.Changes, fixturechange.Change{Model: "Translation", Kind: fixturechange.Insert,
+				Key: key, New: fixturechange.Values{"id": fixturechange.Lit(strconv.Itoa(100000 + i)),
+					"locale": fixturechange.Lit("de"), "key": fixturechange.Lit(k),
+					"value": fixturechange.Lit(fmt.Sprintf("Wert %d", i)), "note": fixturechange.Null()}})
+		case 1:
+			res.Changes = append(res.Changes, fixturechange.Change{Model: "Translation", Kind: fixturechange.Update,
+				Key: key, Old: fixturechange.Values{"value": fixturechange.Lit("alt"), "note": fixturechange.Null()},
+				New: fixturechange.Values{"value": fixturechange.Lit(fmt.Sprintf("neu %d", i)),
+					"note": fixturechange.Lit("x")}})
+		default:
+			res.Changes = append(res.Changes, fixturechange.Change{Model: "Translation", Kind: fixturechange.Delete,
+				Key: key, Old: fixturechange.Values{"id": fixturechange.Lit(strconv.Itoa(i)),
+					"locale": fixturechange.Lit("de"), "key": fixturechange.Lit(k), "value": fixturechange.Lit("weg"),
+					"note": fixturechange.Null()}})
+		}
+	}
+	src, err := Render(cfg, "many translations", "20260104000000", res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(out, FileName("20260104000000", "many translations")), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}

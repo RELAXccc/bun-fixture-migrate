@@ -54,14 +54,16 @@ problem, for example:
 ```
 20260930165255: up: 20260930165255_fixture_plan_prices: Plan name=team update: no row of plans has
 name=team. The row this change updates is not in the database, so the change cannot be made. Put the
-row back, or drop this change from the migration
+row back; or, if it is meant to be gone in this database, set MissingRow to "warn" in this migration's
+Policy, and the change is recorded as done here without being made
 ```
 
 Under a migrator built without `WithMarkAppliedOnSuccess(true)` it goes on:
 
 ```
-bun had recorded migration 20260930165255 as applied before running it (the migrator was not built
-WithMarkAppliedOnSuccess(true)); that record was removed, so the migration runs again once this is fixed
+bun had recorded migration 20260930165255 as applied before running it, as its migrator
+does unless built WithMarkAppliedOnSuccess(true); that record was removed, so the migration runs again
+once this is fixed
 ```
 
 **What happened.** The migration found the database in a state it was not generated against, and the
@@ -74,12 +76,14 @@ as applied, whichever way the migrator is built, so the next deploy runs it agai
    migrations and which ones cannot be made, without changing anything.
 2. Decide per problem:
    - **missing row**: the row the change updates or deletes is not there. Somebody deleted or
-     renamed it. Put it back, and deploy again. If its absence is right in this database only, set
-     `MissingRow: "warn"` in the `Policy` of that one migration file: here the change is then
-     skipped and the migration recorded, every other database still gets it, and `check` here
-     reports the row the file has and this database does not, which is what you decided. Do not
-     remove the change from the migration: the databases that have not run it yet would never get
-     it, and `status -offline` cannot see that, because the fixture file still has it.
+     renamed it, or renamed a row its natural key points at, which the message then names. Put it
+     back, and deploy again. If its absence is right in this database only, set
+     `MissingRow: "warn"` in the `Policy` of that one migration file and run `plan` again: here the
+     change is then skipped and the migration recorded, every other database still gets it, and
+     `check` here reports the row the file has and this database does not, which is what you
+     decided. Do not remove the change from the migration: the databases that have not run it yet
+     would never get it, and `status -offline` cannot see that, because the fixture file still has
+     it.
    - **id drift**: the row is there under another id than the file says, or the file's id belongs
      to another row. Something outside the database may name these ids; find out before touching
      them.
@@ -95,12 +99,13 @@ migrations table by hand before the next deploy, or the migration will not run a
 ## A change was skipped
 
 **Symptom.** The migration succeeded and logged a line such as
-`skipped Plan name=team update [changed row]: ... somebody changed it in this database. It was left
-alone.`
+`skipped Plan name=team update [changed row]: ... it was changed in this database, or by a migration
+that ran before this one. It was left alone.`
 
-**What happened.** The row no longer held the values the migration expected, because somebody
-edited it in this database. Under `changed_row: warn`, the default, their edit wins and the
-migration moves on. The migration is recorded as applied; that change will not be attempted again.
+**What happened.** The row no longer held the values the migration expected: somebody edited it in
+this database, or a migration that ran before this one changed it, as when two branches each
+generated a migration for the same row and the older one was merged last. Under `changed_row: warn`,
+the default, the row as it is wins and the migration moves on. The migration is recorded as applied; that change will not be attempted again.
 
 **Steps.** Run `check`. It lists the row with the database's and the file's values side by side.
 Then decide which one is right:
@@ -223,7 +228,19 @@ next deploy runs it. Set `migration_locks_table` if the migrator is built `WithL
 
 `migrator.Rollback` runs each migration's down function. For a fixture migration that is `Revert`:
 the changes backwards, every one inverted and guarded like the original, so a rollback that finds a
-row changed since the migration ran reports it rather than overwriting it.
+row changed since the migration ran reports it rather than overwriting it. A rename is looked up
+under the name it gave the row, and named back.
+
+A rollback puts back the rows the migration deleted, and nothing a delete reached through a foreign
+key under `deletes: cascade`: the subscriptions that went with a plan stay gone, and the log of the
+rollback says so for every such row. The log of the migration said how many there were.
+
+A rollback assumes the migration made every one of its changes on this database: nothing records
+which ones it made. A change the migration found already made -- the row already held the new value
+through some other path, or was already there -- is rolled back all the same: the update writes the
+old value, which this database may never have held, and the inserted row is deleted. Before rolling
+back a database where the migration reported `unchanged` changes, look at those rows. Where a row
+does not hold what the migration writes, the change is not rolled back and the log says so.
 
 A rolled-back migration is pending again, and the next deploy runs it again. To undo the change for
 good, revert the commit that brought the migration, the fixture edit and the state file, together,

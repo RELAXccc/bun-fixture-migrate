@@ -44,6 +44,11 @@ func TestAGeneratedFileReadsBackAsTheSetItRuns(t *testing.T) {
 	if len(res.Refusals) != 0 {
 		t.Fatalf("refusals: %+v", res.Refusals)
 	}
+	// The diff fills Where from the configuration; whatever it carries is
+	// written and read back.
+	plan := res.Tables["Plan"]
+	plan.Where = `"tenant_id" IS NULL AND kind <> 'x'`
+	res.Tables["Plan"] = plan
 	src, err := Render(cfg, "all kinds", "20260921120000", res)
 	if err != nil {
 		t.Fatal(err)
@@ -91,6 +96,7 @@ func TestAHandEditedFileReadsBack(t *testing.T) {
 import fc "github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 
 var set = fc.Set{
+	Format: 1,
 	Name:   "x",
 	Tables: fc.Tables{"Plan": fc.Table{Name: "plans", ID: "id", Serial: false}},
 	Policy: fc.Policy{MissingRow: fc.ModeWarn},
@@ -106,9 +112,51 @@ var set = fc.Set{
 	if err != nil || !isFixture {
 		t.Fatalf("%v %v", isFixture, err)
 	}
+	if set.Format != 1 {
+		t.Fatalf("Format: %d", set.Format)
+	}
 	if set.Policy.MissingRow != fixturechange.ModeWarn || set.Changes[0].Kind != fixturechange.Update ||
 		!set.Changes[0].Old["note"].IsNull {
 		t.Fatalf("%+v", set)
+	}
+}
+
+// A file registers its set in one of the two shapes generate has written, and
+// has to register the set it declares: a copy of another migration with only
+// the set renamed would run the other set under this file's name, while status
+// and plan describe this one.
+func TestReadChangeSetReadsTheRegistration(t *testing.T) {
+	const set = `
+var mine = fixturechange.Set{Name: "x", Tables: fixturechange.Tables{"Plan": {Name: "plans", ID: "id"}}}
+`
+	for name, tc := range map[string]struct{ init, want string }{
+		"Up and Down": {`func init() { Migrations.MustRegister(fixtureapply.Up(mine), fixtureapply.Down(mine)) }`, ""},
+		"Apply and Revert": {`func init() {
+	Migrations.MustRegister(func(ctx context.Context, db *bun.DB) error {
+		return fixtureapply.Apply(ctx, db, mine)
+	}, func(ctx context.Context, db *bun.DB) error {
+		return fixtureapply.Revert(ctx, db, mine)
+	})
+}`, ""},
+		"options": {`func init() {
+	Migrations.MustRegister(fixtureapply.Up(mine, fixtureapply.WithLogger(nil)), fixtureapply.Down(mine))
+}`, ""},
+		"another set handed to Up": {`func init() { Migrations.MustRegister(fixtureapply.Up(theirs), fixtureapply.Down(mine)) }`,
+			"fixtureapply.Up is handed theirs, and the change set this file declares is mine"},
+		"another set handed to Revert": {`func init() {
+	Migrations.MustRegister(func(ctx context.Context, db *bun.DB) error {
+		return fixtureapply.Apply(ctx, db, mine)
+	}, func(ctx context.Context, db *bun.DB) error {
+		return fixtureapply.Revert(ctx, db, theirs)
+	})
+}`, "fixtureapply.Revert is handed theirs"},
+	} {
+		src := "package migrations\n\nimport (\n\t\"github.com/RELAXccc/bun-fixture-migrate/fixtureapply\"\n" +
+			"\t\"github.com/RELAXccc/bun-fixture-migrate/fixturechange\"\n)\n\n" + tc.init + "\n" + set
+		_, isFixture, err := ReadChangeSet([]byte(src))
+		if !isFixture || (tc.want == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), tc.want)) {
+			t.Errorf("%s: %v %v, want %q", name, isFixture, err, tc.want)
+		}
 	}
 }
 
@@ -123,7 +171,32 @@ import "github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 var s = fixturechange.Set{
 	Owner: "x",
 }
-`, "line 4: unknown field Owner"},
+`, "line 4: unknown field Owner; the file may have been written by a newer version"},
+		"unknown table field": {`package m
+import "github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+var s = fixturechange.Set{Tables: fixturechange.Tables{"Plan": {Name: "plans", Partition: "x"}}}
+`, "unknown field Partition; the file may have been written by a newer version"},
+		"unknown value": {`package m
+import "github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+var s = fixturechange.Set{Changes: []fixturechange.Change{{Key: fixturechange.Values{"a": fixturechange.Expr("now()")}}}}
+`, "not Lit, Null or RefTo but Expr; the file may have been written by a newer version"},
+		"a part that does more than return": {`package m
+import "github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+var s = fixturechange.Set{Changes: fixturechange.Concat(part1())}
+func part1() []fixturechange.Change { x := 1; _ = x; return nil }
+`, "part1 is not a function of this file that only returns its changes"},
+		"a part from elsewhere": {`package m
+import "github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+var s = fixturechange.Set{Changes: fixturechange.Concat(other.Part())}
+`, "a part of Changes that is not a call of a function of this file"},
+		"another function": {`package m
+import "github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+var s = fixturechange.Set{Changes: append(part1())}
+`, "neither a literal nor fixturechange.Concat"},
+		"newer format": {`package m
+import "github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+var s = fixturechange.Set{Format: 2}
+`, "the change set is in format 2, and this version of bun-fixture-migrate reads formats up to 1: upgrade it"},
 		"two sets": {`package m
 import "github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 var a, b = fixturechange.Set{}, fixturechange.Set{}

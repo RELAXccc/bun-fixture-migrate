@@ -122,11 +122,16 @@ Four details matter:
 | `Rollback` | runs the generated down function, which reverts the change set with the same guards |
 
 The record removal only happens when `Apply` runs under bun's migrator, on the migrator's own
-`*bun.DB`, and the newest row of the migrations table carries the migration's name and was written
-within the hour. The name is read the way bun's `Register` reads it, from the innermost file on the
-call stack named like a migration, so a helper in another file is fine. An up function that is
-defined outside any migration-named file needs `fixtureapply.WithMigrationName`; without it nothing
-is removed, and a failure leaves bun's record in place.
+`*bun.DB`, and only to the row that, before the change set ran, was the newest of the migrations
+table, carried the migration's name and had been written in the last minute: the record bun's
+default mode makes just before calling the migration. A generated file registers
+`fixtureapply.Up(set)` and `fixtureapply.Down(set)`; `Up` reads the migration's name from the file
+that calls it, as bun's `Register` reads it from the same file, so both are called in the
+migration's own file. Files from earlier versions register functions that call `Apply` and `Revert`
+themselves, and `Apply` finds the name on the call stack instead: the innermost file named like a
+migration, so a helper in another file is fine. An up function that calls `Apply` from outside any
+migration-named file needs `fixtureapply.WithMigrationName`; without it nothing is removed, and a
+failure leaves bun's record in place.
 
 ## Where the migrations run
 

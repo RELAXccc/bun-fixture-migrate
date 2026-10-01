@@ -175,6 +175,43 @@ func TestInvert(t *testing.T) {
 	if back.Old["seats"].Lit != "2" || back.New["seats"].Lit != "1" {
 		t.Fatalf("an update reverts by swapping, got %+v", back)
 	}
+	if back.Key["name"].Lit != "pro" {
+		t.Fatalf("an update that leaves the key alone keeps it, got %+v", back)
+	}
+}
+
+// A rename leaves its row under the new key, so that is where the revert
+// finds it. Keyed on the old one, it looked for a row named both ways at once.
+func TestInvertARename(t *testing.T) {
+	rename := fixturechange.Change{Model: "Feature", Kind: fixturechange.Update, ID: "7",
+		Key: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "team"), "code": fixturechange.Lit("api")},
+		Old: fixturechange.Values{"code": fixturechange.Lit("api")},
+		New: fixturechange.Values{"code": fixturechange.Lit("rest")}}
+	back := invert(rename)
+	if back.Key["code"].Lit != "rest" || back.Key["plan_id"].Ref == nil || back.Key["plan_id"].Ref.Key != "team" {
+		t.Fatalf("the revert has to find the row under the key the rename gave it, got %+v", back.Key)
+	}
+	if back.ID != "7" || back.Old["code"].Lit != "rest" || back.New["code"].Lit != "api" {
+		t.Fatalf("the revert renames it back under the same id guard, got %+v", back)
+	}
+	if rename.Key["code"].Lit != "api" {
+		t.Fatal("the change itself has to be left alone")
+	}
+	if again := invert(back); keyLabel(again.Key) != keyLabel(rename.Key) {
+		t.Fatalf("inverting twice is the rename again, got %s", keyLabel(again.Key))
+	}
+}
+
+func TestMovedKey(t *testing.T) {
+	key := fixturechange.Values{"name": fixturechange.Lit("team"), "region": fixturechange.Lit("eu")}
+	if got, moved := movedKey(key, fixturechange.Values{"price": fixturechange.Lit("2")}); moved ||
+		keyLabel(got) != "name=team,region=eu" {
+		t.Fatalf("no key column written: %s, %v", keyLabel(got), moved)
+	}
+	if got, moved := movedKey(key, fixturechange.Values{"name": fixturechange.Lit("crew")}); !moved ||
+		keyLabel(got) != "name=crew,region=eu" {
+		t.Fatalf("a rename: %s, %v", keyLabel(got), moved)
+	}
 }
 
 // A guard that matched nothing is not success. bun records a migration as
@@ -339,5 +376,76 @@ func TestBunsMigrationFilePattern(t *testing.T) {
 		if got != want {
 			t.Errorf("%s: %q, want %q", file, got, want)
 		}
+	}
+}
+
+// A model's Where is written into every statement for it, inside parentheses.
+// One that could reach outside them would change which rows a guard matches,
+// so a migration would write rows it was never generated for.
+func TestValidateChecksAWhere(t *testing.T) {
+	for _, ok := range []string{
+		"tenant_id IS NULL",
+		"(kind = 'global') AND deleted_at IS NULL",
+		"flags ? 'global'",
+		"note <> 'a) OR (b;'",
+		`"weird)name" IS NULL`,
+		"note <> E'it\\'s ) here'",
+		"note <> $$ ) ; $$ AND x <> $t$ ( $t$",
+		"tenant_id IS NULL -- global rows only ) ;",
+		"tenant_id IS NULL /* not (a tenant's ;) /* nested ) */ */",
+		"price$usd > 0",
+	} {
+		set := fixturechange.Set{Tables: fixturechange.Tables{"Tag": {Name: "tags", ID: "id", Where: ok}}}
+		if err := Validate(set); err != nil {
+			t.Errorf("%q: %v", ok, err)
+		}
+	}
+	for bad, want := range map[string]string{
+		"tenant_id IS NULL) OR (true":                     "closes a parenthesis",
+		"(tenant_id IS NULL":                              "does not close",
+		"tenant_id IS NULL; DROP TABLE tags":              "holds a ;",
+		"note <> 'unterminated":                           "quote that does not end",
+		"note <> E'it\\'s":                                "quote that does not end",
+		`"unterminated IS NULL`:                           "quoted name",
+		"x <> $q$ never closed":                           "dollar quote",
+		"x /* never closed":                               "comment that does not end",
+		"(x -- the closing parenthesis is in a comment )": "does not close",
+		"x\x00": "NUL",
+	} {
+		set := fixturechange.Set{Tables: fixturechange.Tables{"Tag": {Name: "tags", ID: "id", Where: bad}}}
+		if err := Validate(set); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: want an error containing %q, got %v", bad, want, err)
+		}
+	}
+}
+
+// A set written for a format this version does not know is refused rather than
+// run with a meaning it may not have; 0, a set from before formats were
+// numbered, is format 1.
+func TestValidateKnowsItsFormats(t *testing.T) {
+	for _, format := range []int{0, fixturechange.CurrentFormat} {
+		if err := Validate(fixturechange.Set{Format: format, Tables: tables()}); err != nil {
+			t.Errorf("format %d: %v", format, err)
+		}
+	}
+	for _, format := range []int{-1, fixturechange.CurrentFormat + 1} {
+		err := Validate(fixturechange.Set{Format: format, Tables: tables()})
+		if err == nil || !strings.Contains(err.Error(), "upgrade github.com/RELAXccc/bun-fixture-migrate") {
+			t.Errorf("format %d: %v", format, err)
+		}
+	}
+}
+
+// standInForUp calls registeringMigration from where Up does.
+func standInForUp() string { return registeringMigration() }
+
+// Up reads the migration's name from the file that calls it, the file bun's
+// Register reads it from, so a failure never has to find it on the stack.
+func TestUpReadsTheNameOfTheFileThatRegisters(t *testing.T) {
+	if got := fromAMigrationFile(); got != "20260921120000" {
+		t.Fatalf("from a migration's file: %q", got)
+	}
+	if got := standInForUp(); got != "" {
+		t.Fatalf("from a file not named like a migration: %q", got)
 	}
 }

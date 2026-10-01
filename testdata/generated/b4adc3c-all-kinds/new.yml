@@ -1,0 +1,33 @@
+- model: Currency
+  rows:
+    - {_id: eur, id: 1, code: EUR, symbol: "€"}
+    - {_id: usd, id: 2, code: USD, symbol: "$"}
+- model: Plan
+  rows:
+    - _id: free
+      id: 1
+      name: free
+      currency_id: '{{ $.Currency.eur.ID }}'
+      price_cents: 0
+      settings: {sso: false}
+      tags: [basic]
+    - _id: team
+      id: 2
+      name: crew
+      currency_id: '{{ $.Currency.eur.ID }}'
+      price_cents: 2500
+      note: ~
+      settings: {sso: true, seats: 10}
+      tags: [team, popular, "new"]
+    - _id: pro
+      id: 3
+      name: pro
+      currency_id: '{{ $.Currency.usd.ID }}'
+      price_cents: 9000
+      settings: {sso: true, seats: 100, why: "a `backquote`"}
+      tags: []
+- model: Feature
+  rows:
+    - {plan_id: '{{ $.Plan.team.ID }}', code: api, quota: 5000}
+    - {plan_id: '{{ $.Plan.team.ID }}', code: sso, quota: 2}
+    - {plan_id: '{{ $.Plan.pro.ID }}', code: api, quota: 50000}

@@ -344,6 +344,14 @@ func (c *Config) Prepare() error {
 		if m.Table == "" {
 			return fmt.Errorf("model %q: no table", name)
 		}
+		// The run time refuses a where that could reach past its own
+		// parentheses; better here than in the first migration that uses it.
+		if m.Where != "" {
+			set := fixturechange.Set{Tables: fixturechange.Tables{name: {Name: m.Table, Where: m.Where}}}
+			if err := fixtureapply.Validate(set); err != nil {
+				return err
+			}
+		}
 		if m.ID == "" {
 			m.ID = "id"
 		}

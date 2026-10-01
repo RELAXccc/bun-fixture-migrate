@@ -151,6 +151,14 @@ func ReadMigrations(dir string) (*Migrations, error) {
 // So it understands what Render writes and what a person editing that by hand
 // is likely to write -- dropping a change, fixing a value -- and says so,
 // naming the position, about anything else.
+//
+// It also reads how the file registers the set, in either shape a version of
+// this tool has written: fixtureapply.Up(set) and fixtureapply.Down(set), or
+// functions that call fixtureapply.Apply and fixtureapply.Revert with it. A
+// file that hands them another variable than the set it declares -- a copy of
+// another migration with only the set renamed -- runs that other set under
+// this file's name, while status and plan would describe this one; that is
+// an error. A registration in any other shape is left alone.
 func ReadChangeSet(src []byte) (fixturechange.Set, bool, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "", src, parser.SkipObjectResolution)
@@ -171,7 +179,12 @@ func ReadChangeSet(src []byte) (fixturechange.Set, bool, error) {
 	if pkg == "" {
 		return fixturechange.Set{}, false, nil
 	}
-	r := &setReader{fset: fset, pkg: pkg}
+	r := &setReader{fset: fset, pkg: pkg, funcs: map[string]*ast.FuncDecl{}}
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil {
+			r.funcs[fn.Name.Name] = fn
+		}
+	}
 	var found []*ast.CompositeLit
 	ast.Inspect(file, func(n ast.Node) bool {
 		if lit, ok := n.(*ast.CompositeLit); ok && r.isType(lit.Type, "Set") {
@@ -188,12 +201,79 @@ func ReadChangeSet(src []byte) (fixturechange.Set, bool, error) {
 		return fixturechange.Set{}, true, fmt.Errorf("%d change sets in one file", len(found))
 	}
 	set, err := r.set(found[0])
-	return set, true, err
+	if err != nil {
+		return set, true, err
+	}
+	return set, true, r.registers(file, found[0])
+}
+
+// registers checks that every fixtureapply.Up, Down, Apply and Revert in the
+// file is handed the variable the change set is declared as.
+func (r *setReader) registers(file *ast.File, lit *ast.CompositeLit) error {
+	declared := ""
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs := spec.(*ast.ValueSpec)
+			for i, v := range vs.Values {
+				if v == ast.Expr(lit) && i < len(vs.Names) {
+					declared = vs.Names[i].Name
+				}
+			}
+		}
+	}
+	apply := ""
+	for _, imp := range file.Imports {
+		if path, _ := strconv.Unquote(imp.Path.Value); path == "github.com/RELAXccc/bun-fixture-migrate/fixtureapply" {
+			apply = "fixtureapply"
+			if imp.Name != nil {
+				apply = imp.Name.Name
+			}
+		}
+	}
+	if declared == "" || apply == "" {
+		return nil
+	}
+	var err error
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || err != nil {
+			return err == nil
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != apply {
+			return true
+		}
+		arg := -1
+		switch sel.Sel.Name {
+		case "Up", "Down":
+			arg = 0
+		case "Apply", "Revert":
+			arg = 2
+		}
+		if arg < 0 || arg >= len(call.Args) {
+			return true
+		}
+		if id, ok := call.Args[arg].(*ast.Ident); ok && id.Name != declared {
+			err = r.errorf(call, "fixtureapply.%s is handed %s, and the change set this file declares is %s: bun "+
+				"would run %s under this file's name", sel.Sel.Name, id.Name, declared, id.Name)
+		}
+		return true
+	})
+	return err
 }
 
 type setReader struct {
 	fset *token.FileSet
 	pkg  string
+	// funcs are the file's functions, by name, where a large set's parts are.
+	funcs map[string]*ast.FuncDecl
 }
 
 func (r *setReader) errorf(n ast.Node, format string, args ...any) error {
@@ -233,6 +313,12 @@ func (r *setReader) set(lit *ast.CompositeLit) (fixturechange.Set, error) {
 	err := r.fields(lit, func(key string, value ast.Expr) error {
 		var err error
 		switch key {
+		case "Format":
+			set.Format, err = r.integer(value)
+			if err == nil && (set.Format < 0 || set.Format > fixturechange.CurrentFormat) {
+				err = r.errorf(value, "the change set is in format %d, and this version of bun-fixture-migrate reads "+
+					"formats up to %d: upgrade it", set.Format, fixturechange.CurrentFormat)
+			}
 		case "Name":
 			set.Name, err = r.str(value)
 		case "SeedGuardTable":
@@ -248,7 +334,7 @@ func (r *setReader) set(lit *ast.CompositeLit) (fixturechange.Set, error) {
 		case "Changes":
 			set.Changes, err = r.changes(value)
 		default:
-			err = r.errorf(value, "unknown field %s", key)
+			err = r.unknown(value, key)
 		}
 		return err
 	})
@@ -299,8 +385,10 @@ func (r *setReader) tables(expr ast.Expr) (fixturechange.Tables, error) {
 				t.Serial, err = r.boolean(value)
 			case "Cascade":
 				t.Cascade, err = r.boolean(value)
+			case "Where":
+				t.Where, err = r.str(value)
 			default:
-				err = r.errorf(value, "unknown field %s", key)
+				err = r.unknown(value, key)
 			}
 			return err
 		})
@@ -330,7 +418,7 @@ func (r *setReader) policy(expr ast.Expr) (fixturechange.Policy, error) {
 		case "DuplicateKey":
 			p.DuplicateKey = mode
 		default:
-			err = r.errorf(value, "unknown field %s", key)
+			err = r.unknown(value, key)
 		}
 		return err
 	})
@@ -353,6 +441,9 @@ func (r *setReader) mode(expr ast.Expr) (fixturechange.Mode, error) {
 }
 
 func (r *setReader) changes(expr ast.Expr) ([]fixturechange.Change, error) {
+	if call, ok := expr.(*ast.CallExpr); ok {
+		return r.parts(call)
+	}
 	lit, ok := expr.(*ast.CompositeLit)
 	if !ok {
 		return nil, r.errorf(expr, "Changes is not written out as a literal")
@@ -383,7 +474,7 @@ func (r *setReader) changes(expr ast.Expr) ([]fixturechange.Change, error) {
 			case "New":
 				c.New, err = r.values(value)
 			default:
-				err = r.errorf(value, "unknown field %s", key)
+				err = r.unknown(value, key)
 			}
 			return err
 		})
@@ -391,6 +482,42 @@ func (r *setReader) changes(expr ast.Expr) ([]fixturechange.Change, error) {
 			return nil, err
 		}
 		out = append(out, c)
+	}
+	return out, nil
+}
+
+// parts reads the Changes of a large set: fixturechange.Concat of calls to
+// functions of the same file, each of which returns a literal and does
+// nothing else.
+func (r *setReader) parts(call *ast.CallExpr) ([]fixturechange.Change, error) {
+	if sel, ok := call.Fun.(*ast.SelectorExpr); !ok || !r.isType(sel, "Concat") {
+		return nil, r.errorf(call, "Changes is neither a literal nor fixturechange.Concat of parts")
+	}
+	var out []fixturechange.Change
+	for _, arg := range call.Args {
+		var id *ast.Ident
+		if part, ok := arg.(*ast.CallExpr); ok && len(part.Args) == 0 {
+			id, _ = part.Fun.(*ast.Ident)
+		}
+		if id == nil {
+			return nil, r.errorf(arg, "a part of Changes that is not a call of a function of this file")
+		}
+		fn := r.funcs[id.Name]
+		if fn == nil || fn.Type.Params.NumFields() != 0 || fn.Body == nil || len(fn.Body.List) != 1 {
+			return nil, r.errorf(arg, "%s is not a function of this file that only returns its changes", id.Name)
+		}
+		ret, ok := fn.Body.List[0].(*ast.ReturnStmt)
+		if !ok || len(ret.Results) != 1 {
+			return nil, r.errorf(fn, "%s is not a function of this file that only returns its changes", id.Name)
+		}
+		if _, ok := ret.Results[0].(*ast.CompositeLit); !ok {
+			return nil, r.errorf(ret, "%s does not return its changes written out as a literal", id.Name)
+		}
+		changes, err := r.changes(ret.Results[0])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, changes...)
 	}
 	return out, nil
 }
@@ -405,7 +532,8 @@ func (r *setReader) kind(expr ast.Expr) (fixturechange.Kind, error) {
 		case "Delete":
 			return fixturechange.Delete, nil
 		}
-		return "", r.errorf(expr, "unknown kind %s", sel.Sel.Name)
+		return "", r.errorf(expr, "unknown kind %s; the file may have been written by a newer version of "+
+			"bun-fixture-migrate, which this one cannot read: upgrade it", sel.Sel.Name)
 	}
 	s, err := r.str(expr)
 	return fixturechange.Kind(s), err
@@ -464,6 +592,10 @@ func (r *setReader) value(expr ast.Expr) (fixturechange.Value, error) {
 		return fixturechange.Null(), nil
 	case sel.Sel.Name == "RefTo" && len(args) == 2:
 		return fixturechange.RefTo(args[0], args[1]), nil
+	case sel.Sel.Name != "Lit" && sel.Sel.Name != "Null" && sel.Sel.Name != "RefTo":
+		return fixturechange.Value{}, r.errorf(expr, "a value that is not Lit, Null or RefTo but %s; the file may "+
+			"have been written by a newer version of bun-fixture-migrate, which this one cannot read: upgrade it",
+			sel.Sel.Name)
 	}
 	return fixturechange.Value{}, r.errorf(expr, "a value that is not Lit, Null or RefTo")
 }
@@ -474,6 +606,27 @@ func (r *setReader) str(expr ast.Expr) (string, error) {
 		return "", r.errorf(expr, "expected a string literal")
 	}
 	return strconv.Unquote(lit.Value)
+}
+
+func (r *setReader) integer(expr ast.Expr) (int, error) {
+	lit, ok := expr.(*ast.BasicLit)
+	if !ok || lit.Kind != token.INT {
+		return 0, r.errorf(expr, "expected a whole number")
+	}
+	n, err := strconv.ParseInt(lit.Value, 0, 32)
+	if err != nil {
+		return 0, r.errorf(expr, "%v", err)
+	}
+	return int(n), nil
+}
+
+// unknown is the error for a field this version does not know. A file names
+// one when somebody edited it by hand, or when a newer version wrote it: a new
+// field is how the format grows, and then this version cannot read the file
+// and the application's fixtureapply cannot compile it.
+func (r *setReader) unknown(n ast.Node, field string) error {
+	return r.errorf(n, "unknown field %s; the file may have been written by a newer version of bun-fixture-migrate, "+
+		"which this one cannot read: upgrade it", field)
 }
 
 func (r *setReader) boolean(expr ast.Expr) (bool, error) {
