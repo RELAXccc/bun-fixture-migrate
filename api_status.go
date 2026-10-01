@@ -169,6 +169,7 @@ func reportFindings(cfg *Config, findings []Finding) []ReportedFinding {
 // not be worked out: with no state file and no git to read HEAD from, nothing
 // says what the fixture files change.
 func (p *Project) Status(ctx context.Context, db bun.IDB, opts StatusOptions) (*StatusReport, error) {
+	db = orNil(db)
 	if db == nil && opts.RequireApplied {
 		return nil, errors.New("RequireApplied needs the database")
 	}

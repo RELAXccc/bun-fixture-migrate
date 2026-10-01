@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+
+	"github.com/uptrace/bun"
 )
 
 const apiConfig = `fixture: fixtures/fixture.yml
@@ -151,6 +153,19 @@ func TestMethodsThatNeedADatabaseSaySo(t *testing.T) {
 	}
 	if err := ReadOnly(ctx, nil, nil); err == nil {
 		t.Error("ReadOnly without a database")
+	}
+	// A *bun.DB that was declared and never set is no database: offline
+	// where the method can be.
+	var none *bun.DB
+	if _, err := p.Check(ctx, none); err == nil || !strings.Contains(err.Error(), "Check needs a database") {
+		t.Errorf("Check of a nil *bun.DB: %v", err)
+	}
+	if err := ReadOnly(ctx, none, nil); err == nil {
+		t.Error("ReadOnly of a nil *bun.DB")
+	}
+	if _, err := p.Generate(ctx, none, GenerateOptions{Name: "x", Old: filepath.Join(p.Dir, "base.yml"),
+		DryRun: true}); err != nil {
+		t.Errorf("Generate with a nil *bun.DB is offline: %v", err)
 	}
 }
 

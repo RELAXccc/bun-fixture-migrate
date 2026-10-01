@@ -86,6 +86,7 @@ type Baselined struct {
 // a difference to settle. A refusal comes back as a *RefusedError with the
 // result; any other error with the result as far as it got, or nil.
 func (p *Project) Baseline(ctx context.Context, db bun.IDB, opts BaselineOptions) (*Baselined, error) {
+	db = orNil(db)
 	statePath := p.StatePath()
 	if statePath == "" {
 		return nil, errors.New("no state file: set out, or state, in the configuration")

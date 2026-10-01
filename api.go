@@ -191,6 +191,27 @@ func errNoDatabase(method string) error {
 	return fmt.Errorf("%s needs a database: pass a *bun.DB, a bun.Conn or a bun.Tx", method)
 }
 
+// orNil is db, or nil for a nil *bun.DB, *bun.Conn or *bun.Tx, which an
+// interface holding it does not compare equal to: a program that declared
+// var db *bun.DB and connected nothing means offline.
+func orNil(db bun.IDB) bun.IDB {
+	switch d := db.(type) {
+	case *bun.DB:
+		if d == nil {
+			return nil
+		}
+	case *bun.Conn:
+		if d == nil {
+			return nil
+		}
+	case *bun.Tx:
+		if d == nil {
+			return nil
+		}
+	}
+	return db
+}
+
 // readSavepoint is the savepoint ReadOnly reads under in a caller's
 // transaction.
 const readSavepoint = "bun_fixture_migrate_read"
@@ -215,19 +236,12 @@ const readSavepoint = "bun_fixture_migrate_read"
 // without them, and a migration generated from it deletes them everywhere
 // else.
 func ReadOnly(ctx context.Context, db bun.IDB, fn func(tx bun.Tx) error) error {
-	switch d := db.(type) {
+	switch d := orNil(db).(type) {
 	case nil:
 		return errors.New("no database to read")
-	case *bun.DB:
-		if d == nil {
-			return errors.New("no database to read")
-		}
 	case bun.Tx:
 		return readInTx(ctx, d, fn)
 	case *bun.Tx:
-		if d == nil {
-			return errors.New("no database to read")
-		}
 		return readInTx(ctx, *d, fn)
 	}
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
@@ -470,6 +484,7 @@ func (r *CheckReport) Lines() []string {
 // hold them, lints them against the columns, reads the master data the files
 // describe, and compares.
 func (p *Project) Check(ctx context.Context, db bun.IDB) (*CheckReport, error) {
+	db = orNil(db)
 	_, head, err := p.head()
 	if err != nil {
 		return nil, err
@@ -549,6 +564,7 @@ type Exported struct {
 // database it was taken from, such as one writing a zero bun replaces with the
 // column's default, unless the policy makes that a warning.
 func (p *Project) Export(ctx context.Context, db bun.IDB, opts ExportOptions) (*Exported, error) {
+	db = orNil(db)
 	// With several files, each model goes back into the file that holds it.
 	current := slices.Clone(p.files)
 	for _, err := range p.errs {

@@ -112,6 +112,7 @@ type Generated struct {
 // with the result, which says what was refused; any other error with the
 // result as far as it got, or nil.
 func (p *Project) Generate(ctx context.Context, db bun.IDB, opts GenerateOptions) (*Generated, error) {
+	db = orNil(db)
 	chosen := 0
 	for _, set := range []bool{opts.FromDB, opts.Old != "", opts.Base != ""} {
 		if set {
