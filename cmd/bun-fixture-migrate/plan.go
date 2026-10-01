@@ -323,10 +323,13 @@ func judge(err error) (result, note string) {
 	case code == pgerr.ActiveSQLTransaction:
 		return "inconclusive", "it cannot run inside a transaction, so plan cannot simulate it or what " +
 			"follows it; plan without -with-sql"
-	case code == pgerr.InsufficientPrivilege, code == pgerr.ReadOnlyTransaction:
-		// The plan's role, not the migration: a read-only role, one without
-		// the grants, or one a row-level security policy limits. The deploy
-		// connects as the role the application migrates as.
+	case code == pgerr.InsufficientPrivilege:
+		// The plan's role, which may not be the deploy's: one without the
+		// grants, or one a row-level security policy limits. Nothing tells
+		// plan whether it is, and as the deploy's role the deploy fails the
+		// same way: the audit table it may not create, say.
+		return "inconclusive", privilegeNote
+	case code == pgerr.ReadOnlyTransaction:
 		return "inconclusive", "the role plan connects as cannot write here; plan as the role the deploy uses"
 	case code == pgerr.UnsafeNewEnumValue:
 		return "inconclusive", "it uses an enum value a migration before it in this plan added, and " +
@@ -358,6 +361,23 @@ func inconclusive(err error) bool {
 		return true
 	}
 	return false
+}
+
+// privilegeNote is judge's note on a privilege the role plan connects as
+// lacks.
+const privilegeNote = "the role plan connects as lacks a privilege here, or a row-level security policy limits " +
+	"it. If it is the role the deploy migrates as, the deploy fails here the same way; if not, plan as that role"
+
+// unfinished is why a plan or a dry run that could not finish at m gives no
+// verdict on it.
+func unfinished(m plannedMigration) string {
+	for _, n := range m.Notes {
+		if n == privilegeNote {
+			return "as the role it connects as, which lacks a privilege the migration needs; if the deploy " +
+				"migrates as that role, it fails the same way"
+		}
+	}
+	return "which says nothing about the migration"
 }
 
 // fileList is a flag that can be given more than once.
@@ -505,8 +525,7 @@ func plan(o streams, args []string) error {
 	skipped := 0
 	for _, m := range report.Migrations {
 		if m.Result == "inconclusive" {
-			return exitError{1, "the plan could not finish at " + m.ID + ", which says nothing about the " +
-				"migration: " + m.Error}
+			return exitError{1, "the plan could not finish at " + m.ID + ", " + unfinished(m) + ": " + m.Error}
 		}
 		if m.Result == "fails" {
 			failures = append(failures, m.ID+" would fail, and so would the deploy")

@@ -263,10 +263,12 @@ declares.
 do, which the note under it names. Nothing is known about the migration. Try again, or raise
 `-lock-timeout`.
 
-**`the role plan connects as cannot write here; plan as the role the deploy uses`.** A change failed
-with `permission denied` or in a read-only transaction: the role plan connects as lacks a grant the
-deploy's role has, or a row-level security policy limits it. That says nothing about the deploy, so
-the plan is inconclusive (exit 1). Plan as the role the deploy migrates as.
+**`the role plan connects as lacks a privilege here, or a row-level security policy limits it`.** A
+change, or the record of the run in the audit table, failed with `permission denied`. plan cannot
+tell whether it connects as the role the deploy migrates as, so the plan is inconclusive (exit 1).
+If it is that role, the deploy fails here the same way: grant what the error names, such as `CREATE`
+on the schema of an audit table that does not exist yet. If not, plan as that role. **`the role plan
+connects as cannot write here`** is a read-only transaction: plan as the role the deploy uses.
 
 **`pending before it and not simulated: ...`.** Migrations the tool did not write, such as schema
 changes, run before this one in the deploy but not in the plan. If they change the tables the

@@ -298,7 +298,7 @@ func applyDryRun(o streams, db *bun.DB, target planTarget, lockTimeout time.Dura
 	for _, m := range report.Migrations {
 		switch m.Result {
 		case "inconclusive":
-			return exitError{1, "the dry run could not finish, which says nothing about the migration: " + m.Error}
+			return exitError{1, "the dry run could not finish, " + unfinished(m) + ": " + m.Error}
 		case "fails":
 			return exitError{3, m.ID + " would fail; nothing was changed"}
 		}

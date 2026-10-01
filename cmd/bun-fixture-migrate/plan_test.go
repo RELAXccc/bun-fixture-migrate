@@ -211,7 +211,7 @@ func TestJudge(t *testing.T) {
 		{sqlState("08006"), "inconclusive", ""},
 		{context.Canceled, "inconclusive", ""},
 		// The plan's role, not the deploy's.
-		{fmt.Errorf("x: %w", sqlState("42501")), "inconclusive", "plan as the role the deploy uses"},
+		{fmt.Errorf("x: %w", sqlState("42501")), "inconclusive", "the deploy fails here the same way; if not, plan as that role"},
 		{sqlState("25006"), "inconclusive", "cannot write here"},
 	} {
 		result, note := judge(tc.err)

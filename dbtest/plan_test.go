@@ -9,6 +9,7 @@ package dbtest_test
 import (
 	"context"
 	"encoding/json"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -377,6 +378,47 @@ func TestPlanFailsOnAProblemInTheMigrationsDirectory(t *testing.T) {
 	_, stdout, _ := c.run("plan", "-json")
 	if !strings.Contains(stdout, `"problems": [`) || !strings.Contains(stdout, "share the name") {
 		t.Fatalf("plan -json:\n%s", stdout)
+	}
+}
+
+// plan as a role without CREATE on the schema of an audit table that does not
+// exist yet: every change goes through, and the record of the run cannot be
+// written. That is the role plan connects as, which may not be the deploy's,
+// so plan cannot tell whether the deploy fails, and says so; but it said "plan
+// as the role the deploy uses" to whoever did, where the deploy fails the same
+// way.
+func TestPlanAsARoleThatMayNotCreateTheAuditTable(t *testing.T) {
+	db := deferredDB(t)
+	run(t, db, "DROP TABLE IF EXISTS bfm_plan_audit",
+		`DO $$BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'bfm_planner') THEN `+
+			`CREATE ROLE bfm_planner LOGIN; END IF; END$$`,
+		"REVOKE CREATE ON SCHEMA public FROM bfm_planner", "GRANT USAGE ON SCHEMA public TO bfm_planner",
+		"GRANT SELECT, INSERT, UPDATE, DELETE ON d_items, d_regions TO bfm_planner")
+	t.Cleanup(func() { run(t, db, "DROP TABLE IF EXISTS bfm_plan_audit") })
+	if scan[bool](t, db, "SELECT has_schema_privilege('bfm_planner', 'public', 'CREATE')") {
+		t.Skip("PUBLIC may create in schema public here")
+	}
+	c := buildCLI(t)
+	c.write("fixture-migrate.yml", deferredConfig+"audit_table: bfm_plan_audit\n")
+	c.write("fixtures/fixture.yml", deferredFixture)
+	c.must(0, "baseline")
+	c.write("fixtures/fixture.yml", deferredFixture+"    - {id: 2, name: hammer, region_id: 1}\n")
+	c.must(0, "generate", "-name", "hammer")
+	u, err := url.Parse(os.Getenv("BUN_FIXTURE_MIGRATE_POSTGRES"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.User = url.User("bfm_planner")
+	out := c.must(1, "plan", "-dsn", u.String())
+	for _, want := range []string{
+		"_fixture_hammer: could not be planned",
+		"the audit table bfm_plan_audit does not exist, and the role running the migration may not create it",
+		"If it is the role the deploy migrates as, the deploy fails here the same way",
+		"if the deploy migrates as that role, it fails the same way",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("plan is missing %q:\n%s", want, out)
+		}
 	}
 }
 
