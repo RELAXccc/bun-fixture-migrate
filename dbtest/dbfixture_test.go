@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
+	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
 
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dbfixture"
@@ -257,4 +258,43 @@ func TestANullIntoANotNullColumnIsAnInvalidValue(t *testing.T) {
 	if strings.Join(cols, ",") != "count,label" {
 		t.Fatalf("expected both nulls to be reported, got %+v", snap.Findings)
 	}
+}
+
+// '{{ "Hello {{ name }}" }}' is how a file has dbfixture store a value that
+// holds template delimiters: it evaluates to its text. The tool reads it as
+// that text, so the database seeded from the file agrees with it.
+func TestATemplateOfAStringConstantIsStoredAsItsText(t *testing.T) {
+	db := connect(t)
+	db.RegisterModel((*Plain)(nil))
+	run(t, db, "DROP TABLE IF EXISTS plains",
+		"CREATE TABLE plains (id bigint PRIMARY KEY, name text UNIQUE NOT NULL, label text NOT NULL, count bigint NOT NULL)")
+	text := "- model: Plain\n  rows:\n    - {id: 1, name: a, label: '{{ \"Hello {{ name }}\" }}!', count: '{{ \"017\" }}'}\n"
+	loadFixture(t, db, text)
+	if got := scan[string](t, db, "SELECT label||'|'||count FROM plains"); got != "Hello {{ name }}!|17" {
+		t.Fatalf("this documents what dbfixture stores; if it changed, so did the premise: %s", got)
+	}
+	cfg := &fixturemigrate.Config{Schema: "public",
+		Models: map[string]*fixturemigrate.Model{"Plain": {Table: "plains", Key: []string{"name"}}}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	head := fixtureSnapshot(t, cfg, text, "fixture.yml")
+	readOnlyDo(t, db, func(tx bun.Tx, tables map[string]*dbschema.Table) {
+		ctx := context.Background()
+		if err := fixturemigrate.Canonicalize(ctx, tx, cfg, head, tables); err != nil {
+			t.Fatal(err)
+		}
+		database, err := fixturemigrate.DatabaseSnapshot(ctx, tx, cfg, tables,
+			fixturemigrate.SnapshotOptions{Columns: head.Columns, Order: head.Order})
+		if err != nil {
+			t.Fatal(err)
+		}
+		check, err := fixturemigrate.Check(cfg, database, head)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if check.Drifted() {
+			t.Fatalf("the database seeded from the file disagrees with it:\n%s", strings.Join(check.Lines(), "\n"))
+		}
+	})
 }

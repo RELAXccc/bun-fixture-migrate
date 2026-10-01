@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"text/template/parse"
 
 	"gopkg.in/yaml.v3"
 )
@@ -202,6 +203,37 @@ var looseTemplate = regexp.MustCompile(`^\{\{ \s*\$\.([A-Za-z_][A-Za-z0-9_]*)\.(
 // (tplRE). A value it matches never reaches the database as written: dbfixture
 // replaces it with whatever the template produces.
 var anyTemplate = regexp.MustCompile(`\{\{ .+ \}\}`)
+
+// literalTemplate is what a template made of nothing but text and string
+// constants evaluates to, '{{ "Hello {{ name }}" }}' among them: that text,
+// whatever dbfixture's data and functions. It is how a file has dbfixture
+// store a value holding "{{ " and " }}". ok is false for any other template,
+// whose value depends on what dbfixture evaluates it against.
+func literalTemplate(text string) (string, bool) {
+	trees, err := parse.Parse("", text, "{{", "}}")
+	if err != nil || len(trees) != 1 || trees[""] == nil {
+		return "", false
+	}
+	var b strings.Builder
+	for _, n := range trees[""].Root.Nodes {
+		switch n := n.(type) {
+		case *parse.TextNode:
+			b.Write(n.Text)
+		case *parse.ActionNode:
+			if len(n.Pipe.Decl) > 0 || len(n.Pipe.Cmds) != 1 || len(n.Pipe.Cmds[0].Args) != 1 {
+				return "", false
+			}
+			s, ok := n.Pipe.Cmds[0].Args[0].(*parse.StringNode)
+			if !ok {
+				return "", false
+			}
+			b.WriteString(s.Text)
+		default:
+			return "", false
+		}
+	}
+	return b.String(), true
+}
 
 // underscore is bun's default column name for a Go field name, so a template
 // that names a field ("ID", "GroupName") can be matched against a column.

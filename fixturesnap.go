@@ -181,10 +181,17 @@ func (ix *index) value(model, col string, row Row) (reading, bool, error) {
 	// Any other template is evaluated by dbfixture at load time, so the
 	// database never holds this text. Comparing it, or writing it into a
 	// migration, would be comparing and writing something that is not there.
+	// A template of text and string constants is the exception, because it
+	// evaluates to the same text anywhere: '{{ "Hello {{ name }}" }}' is how a
+	// file has dbfixture store a value holding "{{ " and " }}".
 	if anyTemplate.MatchString(text) {
-		return reading{}, false, fmt.Errorf(
-			"%s.%s is %s, a template dbfixture evaluates when it loads the file and this tool cannot; "+
-				"the database does not hold this text, so put %s in ignore", model, col, text, col)
+		lit, ok := literalTemplate(cell.Text)
+		if !ok {
+			return reading{}, false, fmt.Errorf(
+				"%s.%s is %s, a template dbfixture evaluates when it loads the file and this tool cannot; "+
+					"the database does not hold this text, so put %s in ignore", model, col, text, col)
+		}
+		cell = Cell{Text: lit, Tag: "!!str"}
 	}
 	// The value itself, exactly: a string as written, a number as YAML
 	// resolves it.
@@ -237,9 +244,13 @@ func (ix *index) resolveTemplate(model, col, text string, match []string, target
 		return reading{Value: fixturechange.Null()}, nil
 	}
 	if !tcell.Structured && anyTemplate.MatchString(tcell.Text) {
-		return reading{}, fmt.Errorf(
-			"%s.%s: %s copies %s, which is itself a template in that row; dbfixture copies what that template "+
-				"made of it, which this tool does not follow: write the value here", model, col, text, column)
+		lit, ok := literalTemplate(tcell.Text)
+		if !ok {
+			return reading{}, fmt.Errorf(
+				"%s.%s: %s copies %s, which is itself a template in that row; dbfixture copies what that "+
+					"template made of it, which this tool does not follow: write the value here", model, col, text, column)
+		}
+		tcell = Cell{Text: lit, Tag: "!!str"}
 	}
 	return reading{Value: fixturechange.Lit(scalarText(tcell)), written: tcell.StringText,
 		from: &source{tmodel, column}}, nil

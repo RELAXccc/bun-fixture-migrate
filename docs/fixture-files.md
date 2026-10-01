@@ -24,7 +24,9 @@ it means to `dbfixture` and PostgreSQL. Each rule below is checked against the r
 - Several files loaded with one `fixture.Load` share one scope of anchors, in load order.
 - Any other template, `{{ now }}` or a function call, is evaluated by `dbfixture` when it loads the
   file, so the database never holds its text. It is refused rather than compared or written into a
-  migration; `ignore` the column.
+  migration; `ignore` the column. A template of text and string constants is the exception: it
+  evaluates to the same text anywhere, and `'{{ "Hello {{ name }}" }}'` is how a file stores a value
+  holding the delimiters. It reads as `Hello {{ name }}`.
 - A reference column (`references:`) holding a plain id resolves through the row of the file that
   declares that id. `~` is NULL. `0` or `""` point at nothing and stay literals, unless a row has
   that id: a zero is "no id" only in a `serial` model, where bun leaves it to the sequence.

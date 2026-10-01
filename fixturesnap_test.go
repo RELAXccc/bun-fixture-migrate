@@ -278,3 +278,22 @@ func TestAnAliasOfATemplateIsRefused(t *testing.T) {
 		t.Fatalf("expected the alias to be refused, got %v", err)
 	}
 }
+
+// A template of text and string constants evaluates to that text whatever
+// dbfixture evaluates it against: it is how a file stores a value holding
+// "{{ " and " }}", and it reads as that value.
+func TestATemplateOfStringConstantsIsItsText(t *testing.T) {
+	text := replace(t, base, "      seats: 1\n", "      seats: 1\n      note: '{{ \"Hello {{ name }}\" }}, and {{ `{{ more }}` }}'\n")
+	s := snap(t, testConfig(t), replace(t, text, "      seats: 10\n", "      seats: 10\n      greeting: '{{ $.Plan.free.Note }}'\n"),
+		"fixture.yml")
+	free, team := s.Entries["Plan"][0], s.Entries["Plan"][1]
+	if got := free.Cells["note"].Lit; got != "Hello {{ name }}, and {{ more }}" {
+		t.Fatalf("got %q", got)
+	}
+	if got := team.Cells["greeting"].Lit; got != "Hello {{ name }}, and {{ more }}" {
+		t.Fatalf("a copy of it is the same text, got %q", got)
+	}
+	if _, ok := literalTemplate(`{{ "a" | printf "%s" }}`); ok {
+		t.Fatal("a pipeline is not a constant")
+	}
+}
