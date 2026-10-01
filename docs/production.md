@@ -347,8 +347,8 @@ it; either way nothing was changed.
 1. `bun-fixture-migrate scaffold -o fixture-migrate.yml` against a database that holds the master
    data, then read every guess it marks `# GUESS:`. Above all, delete the model of every table the
    application writes, users, orders, sessions: scaffold proposes every table but bun's own and the
-   audit table, and a
-   table left in is exported into the fixture file and is drift after every deploy.
+   audit table, and a table left in is exported into the fixture file and is drift after every
+   deploy.
 2. Set `seed_guard_table` to a table the fixture file fills and the application never empties.
    scaffold guesses one; without one, `generate` warns, and a new environment fails its first
    deploy (see [below](#a-new-environment)).

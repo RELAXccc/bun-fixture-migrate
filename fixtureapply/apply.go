@@ -318,8 +318,8 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 // session's is often 0, and a lock on the audit table -- an ALTER TABLE, a
 // VACUUM FULL -- would hold the migration, and the rows it has locked, for as
 // long as it lasts.
-func finish(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, check, restore func(context.Context) error,
-	outcomes []Outcome) error {
+func finish(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool,
+	check, restore func(context.Context) error, outcomes []Outcome) error {
 
 	if err := check(ctx); err != nil {
 		return err
@@ -565,7 +565,8 @@ func privilege(err error) error {
 // check also covers whatever the caller had left deferred, and afterwards
 // every constraint is back in the mode it is declared with; see
 // deferredByDefault.
-func withDeferredConstraints(ctx context.Context, tx bun.IDB, set fixturechange.Set) (func(context.Context) error, error) {
+func withDeferredConstraints(ctx context.Context, tx bun.IDB,
+	set fixturechange.Set) (func(context.Context) error, error) {
 
 	if _, err := tx.ExecContext(ctx, "SET CONSTRAINTS ALL DEFERRED"); err != nil {
 		return nil, fmt.Errorf("defer the constraints to the end of the change set: %w", err)

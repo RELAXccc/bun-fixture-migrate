@@ -129,7 +129,6 @@ func applyCmd(o streams, args []string) error {
 	case *record && !*yes && !*revert:
 		notes = append(notes, fmt.Sprintf("with -yes, migration %s is recorded in %s as bun's migrator records it, in "+
 			"the transaction of its changes", name, s.cfg.MigrationsTable))
-
 	case *record && !*yes:
 		notes = append(notes, fmt.Sprintf("with -yes, the record of migration %s is deleted from %s, in the "+
 			"transaction of its changes", name, s.cfg.MigrationsTable))
