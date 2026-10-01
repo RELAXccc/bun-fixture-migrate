@@ -42,7 +42,6 @@ expect:
         - "Translation key=nav.billing,locale=en update: the row already holds these values, nothing to do"
 known:
   - "F3: no safe id for a new master row in a table the application inserts into too; worked around with a SQL migration that moves the sequence to 10000 and master ids below it"
-  - "F4: a reference to a model with a where clause resolves against every row of the table, tenant rows included"
 probes:
   - name: a master role with the next free id
     from: start
@@ -56,7 +55,7 @@ probes:
         env: prod
         exit: 3
         output:
-          - "failed Role code=billing_admin insert [id drift]: roles id = 5 is already held by the row id = 5 (code custom-"
+          - "failed Role code=billing_admin insert [id drift]: roles id = 5 is already held by the row id = 5 (code=custom-"
   - name: a master role without an id
     from: start
     when: before-deploy
@@ -73,26 +72,31 @@ probes:
   - name: a master role whose code a tenant's custom role has
     from: start
     when: before-deploy
-    known: "F4"
     clone: prod
     steps:
       - overlay: probe-role-code
       - generate: {name: auditor role, at: "20260504100000"}
         env: prod
         output: ["Role: 1 insert", "RolePermission: 2 inserts"]
+      # The model's where keeps the tenant's role out of every lookup: the
+      # master role is inserted next to it, and the grants go to the master
+      # role.
       - app: [migrate]
         env: clone
         output:
-          - "Role code=auditor insert: SKIPPED"
+          - "Role code=auditor insert: applied (1 row)"
           - "RolePermission permission_id=Permission(billing.read),role_id=Role(auditor) insert: applied (1 row)"
-      # The tenant's custom role now grants billing.read and billing.manage.
       - sql: >-
           SELECT string_agg(p.code, ',' ORDER BY p.code) FROM role_permissions rp
           JOIN roles r ON r.id = rp.role_id JOIN permissions p ON p.id = rp.permission_id
           WHERE r.code = 'auditor' AND r.tenant_id IS NOT NULL
         env: clone
-        want: "billing.manage,billing.read,projects.read"
+        want: "projects.read"
+      - sql: >-
+          SELECT string_agg(p.code, ',' ORDER BY p.code) FROM role_permissions rp
+          JOIN roles r ON r.id = rp.role_id JOIN permissions p ON p.id = rp.permission_id
+          WHERE r.code = 'auditor' AND r.tenant_id IS NULL
+        env: clone
+        want: "billing.manage,billing.read"
       - cli: [check]
         env: clone
-        exit: 3
-        output: ["In the fixture file, not in the database:", "Role code=auditor"]
