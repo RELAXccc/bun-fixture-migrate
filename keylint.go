@@ -204,6 +204,9 @@ type lintKey struct {
 	label string
 	// ref is the ref column of a referenced model, tested as a key.
 	ref bool
+	// anyOf are the key_any_of columns of the model: those in cols hold a
+	// value in every row the key names, and the others are no part of it.
+	anyOf map[string]bool
 }
 
 // newLintKey is a key over cols, nullable where the table's column is. The
@@ -256,7 +259,9 @@ func effectiveKeys(m *Model, t *dbschema.Table) []lintKey {
 			continue
 		}
 		seen[id] = true
-		out = append(out, newLintKey(t, cols, chosen, "key ["+strings.Join(cols, ", ")+"]"))
+		k := newLintKey(t, cols, chosen, "key ["+strings.Join(cols, ", ")+"]")
+		k.anyOf = chosen
+		out = append(out, k)
 	}
 	return out
 }
@@ -368,7 +373,7 @@ func judgeKey(t *dbschema.Table, key lintKey, filter string, version int, p keyP
 		best = candidate{index: *invalid, reason: reasonInvalid}
 	}
 	for _, c := range cands {
-		if c.reason < best.reason || c.reason == best.reason && narrower(c.index, best.index) {
+		if c.reason < best.reason || c.reason == best.reason && nearer(c.index, best.index, inKey) {
 			best = c
 		}
 	}
@@ -378,11 +383,26 @@ func judgeKey(t *dbschema.Table, key lintKey, filter string, version int, p keyP
 	return v, nil
 }
 
-// narrower reports whether a's predicate says less than b's: of two partial
-// indexes neither of which backs a key, the one whose predicate is nearer
-// to the model's rows is the one to name.
-func narrower(a, b dbschema.KeyIndex) bool {
+// nearer reports whether of two indexes that fail a key for the same reason
+// a is the one to name: over more of the key's columns, or else with a
+// predicate that says less.
+func nearer(a, b dbschema.KeyIndex, inKey map[string]bool) bool {
+	na, nb := keyColumnsOf(a, inKey), keyColumnsOf(b, inKey)
+	if na != nb {
+		return na > nb
+	}
 	return len(conjuncts(a.Predicate)) < len(conjuncts(b.Predicate))
+}
+
+// keyColumnsOf counts the plain columns of an index that are in the key.
+func keyColumnsOf(index dbschema.KeyIndex, inKey map[string]bool) int {
+	n := 0
+	for _, c := range index.Columns {
+		if c.Column != "" && inKey[c.Column] {
+			n++
+		}
+	}
+	return n
 }
 
 // overlaps reports whether an index has a column of the key, plain or read
@@ -745,10 +765,15 @@ func keyDetail(t *dbschema.Table, key lintKey, filter string, version int, c can
 			partialRemedy(t, key, filter, version, c.index))
 	case reasonSuperset:
 		if c.index.Plain() {
-			wider := append([]string{}, key.cols...)
-			wider = append(wider, c.outside...)
-			return fmt.Sprintf("%s is over more columns than %s, so two rows may share %s: key on [%s], or %s",
-				def, key.label, same, strings.Join(wider, ", "), createIndex(t, key, filter, version))
+			// Keyed on a key_any_of group's other column, it would be
+			// another key; the index is no help to this one.
+			rekey := ""
+			if !key.ref && !anyIn(c.outside, key.anyOf) {
+				rekey = "key on [" + strings.Join(append(append([]string{}, key.cols...), c.outside...), ", ") +
+					"], or "
+			}
+			return fmt.Sprintf("%s is over more columns than %s, so two rows may share %s: %s%s", def, key.label,
+				same, rekey, createIndex(t, key, filter, version))
 		}
 		return fmt.Sprintf("%s reads columns outside %s, so two rows may share %s: %s", def, key.label, same,
 			createIndex(t, key, filter, version))
@@ -865,10 +890,30 @@ func createIndex(t *dbschema.Table, key lintKey, filter string, version int) str
 	if nullable && version >= 150000 {
 		out += " NULLS NOT DISTINCT"
 	}
+	// The rows a key_any_of key names hold a value in its group's column.
+	var where []string
+	for _, col := range key.cols {
+		if key.anyOf[col] {
+			where = append(where, sqlName(col)+" IS NOT NULL")
+		}
+	}
 	if filter != "" {
-		out += " WHERE " + showFilter(filter)
+		where = append(where, showFilter(filter))
+	}
+	if len(where) > 0 {
+		out += " WHERE " + strings.Join(where, " AND ")
 	}
 	return out
+}
+
+// anyIn reports whether any of cols is in set.
+func anyIn(cols []string, set map[string]bool) bool {
+	for _, col := range cols {
+		if set[col] {
+			return true
+		}
+	}
+	return false
 }
 
 // showFilter is a row filter as a message shows it.
@@ -1351,12 +1396,17 @@ func indexAdvice(t *dbschema.Table, cols []string, fallback string) string {
 	return fallback
 }
 
-// keyAdvice is indexAdvice for the diff's refusal of a key two rows hold,
-// from whichever snapshot read the table.
+// keyAdvice ends the diff's refusal of a key two rows hold: ", and give the
+// table a unique index", or what is wrong with the index it has, from
+// whichever snapshot read the table.
 func keyAdvice(old, next *Snapshot, model string, e *Entry) string {
 	t := old.tables[model]
 	if t == nil {
 		t = next.tables[model]
 	}
-	return indexAdvice(t, sortedColumns(e.Key), "give the table a unique index")
+	const fallback = "give the table a unique index"
+	if advice := indexAdvice(t, sortedColumns(e.Key), fallback); advice != fallback {
+		return "; " + advice
+	}
+	return ", and " + fallback
 }
