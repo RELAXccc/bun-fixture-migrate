@@ -1007,7 +1007,11 @@ func TestTheSequenceMovesBeforeAnExplicitIDIsWritten(t *testing.T) {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- fixtureapply.Apply(ctx, db, set, quiet()) }()
+	var outcomes []fixtureapply.Outcome
+	go func() {
+		done <- fixtureapply.Apply(ctx, db, set, quiet(),
+			fixtureapply.WithReport(func(o fixtureapply.Outcome) { outcomes = append(outcomes, o) }))
+	}()
 	for i := 0; scan[int64](t, db, "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' "+
 		"AND datname = current_database()") == 0; i++ {
 		if i == 100 {
@@ -1024,6 +1028,10 @@ func TestTheSequenceMovesBeforeAnExplicitIDIsWritten(t *testing.T) {
 	}
 	if got <= 3 {
 		t.Fatalf("the application drew id %d while the migration was writing id 3", got)
+	}
+	// The move is reported as it was when it came after the set.
+	if last := outcomes[len(outcomes)-1]; last.Status != fixtureapply.StatusSequence || last.Model != "Plan" {
+		t.Fatalf("the sequence move has to be reported: %+v", outcomes)
 	}
 }
 

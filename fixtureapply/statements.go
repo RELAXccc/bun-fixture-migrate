@@ -83,8 +83,12 @@ func (r *runner) insert(ctx context.Context, c fixturechange.Change, t fixturech
 	// on the primary key, or make this insert fail. setval is not undone by a
 	// rollback; a sequence left ahead only leaves a gap.
 	if id, ok := c.New[t.ID]; ok && t.Serial && id.Ref == nil && !id.IsNull && !r.dryRun {
-		if err := advanceSequence(ctx, r.tx, table, t.ID, id.Lit); err != nil {
+		moved, err := advanceSequence(ctx, r.tx, table, t.ID, id.Lit)
+		if err != nil {
 			return outcome{}, err
+		}
+		if moved {
+			r.advanced[c.Model] = true
 		}
 	}
 

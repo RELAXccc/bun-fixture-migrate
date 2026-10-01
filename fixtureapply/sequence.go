@@ -114,7 +114,7 @@ func (r *runner) syncSequences(ctx context.Context, o options) error {
 		if err != nil {
 			return err
 		}
-		if moved {
+		if moved || r.advanced[m] {
 			msg := fmt.Sprintf("moved the sequence of %s past the explicit ids written", t.Name)
 			o.logf("%s: %s", r.set.Name, msg)
 			o.report(Outcome{Set: r.set.Name, Index: -1, Model: m, Status: StatusSequence, Message: msg})
@@ -124,15 +124,16 @@ func (r *runner) syncSequences(ctx context.Context, o options) error {
 }
 
 // advanceSequence moves the sequence of table.col to id when it is behind it,
-// before a row with that id is written. table is quoted already; col is a
-// plain identifier.
-func advanceSequence(ctx context.Context, db bun.IDB, table, col, id string) error {
-	_, err := db.ExecContext(ctx, `SELECT setval(s.seq, ?::bigint) FROM (`+
+// before a row with that id is written, and reports whether it did. table is
+// quoted already; col is a plain identifier.
+func advanceSequence(ctx context.Context, db bun.IDB, table, col, id string) (bool, error) {
+	res, err := db.ExecContext(ctx, `SELECT setval(s.seq, ?::bigint) FROM (`+
 		`SELECT pg_get_serial_sequence(?, ?)::regclass AS seq) s WHERE s.seq IS NOT NULL AND ?::bigint > `+
 		`COALESCE(pg_sequence_last_value(s.seq), (SELECT seqstart - 1 FROM pg_sequence WHERE seqrelid = s.seq))`,
 		id, table, col, id)
 	if err != nil {
-		return fmt.Errorf("move the sequence of %s past the id %s before writing it: %w", table, id, err)
+		return false, fmt.Errorf("move the sequence of %s past the id %s before writing it: %w", table, id, err)
 	}
-	return nil
+	n, err := res.RowsAffected()
+	return n > 0, err
 }

@@ -140,8 +140,8 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 		}
 	}
 
-	r := &runner{tx: tx, set: set, revert: revert, dryRun: o.dryRun, refs: map[string]string{}, resync: map[string]bool{},
-		types: map[string]map[string]colType{}}
+	r := &runner{tx: tx, set: set, revert: revert, dryRun: o.dryRun, refs: map[string]string{},
+		resync: map[string]bool{}, advanced: map[string]bool{}, types: map[string]map[string]colType{}}
 	order := make([]int, len(set.Changes))
 	for i := range order {
 		order[i] = i
@@ -386,6 +386,9 @@ type runner struct {
 	// resync collects the models that got an explicit id written into a
 	// sequence-backed table.
 	resync map[string]bool
+	// advanced holds the models whose sequence moved before an explicit id
+	// was written, which syncSequences reports with its own moves.
+	advanced map[string]bool
 	// types holds, per model, the types of its table's columns, read once.
 	types map[string]map[string]colType
 }
