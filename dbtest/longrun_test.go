@@ -1,22 +1,26 @@
 package dbtest_test
 
-// A long-running project: examples/saas, a SaaS application whose master data
-// evolves over a dozen releases, replayed from its history and deployed, release
-// by release, to several long-lived databases kept in different states.
+// Long-running projects: examples/saas and examples/commerce, two applications
+// whose master data evolves over a dozen releases each, replayed from their
+// history and deployed, release by release, to several long-lived databases
+// kept in different states. This file is the replay; each example's
+// longrun_<name>_test.go says what its application does to the databases
+// between releases.
 //
-// examples/saas/timeline holds the releases as a developer makes them: the
+// examples/<name>/timeline holds the releases as a developer makes them: the
 // fixture files, models and SQL migrations each release changes, and a
 // release.yml that says what the developer runs (generate with a fixed -at,
 // baseline, a merge of two branches), what admins and the application do to
 // the databases between releases, and what each step is expected to say. The
 // generated files are not in the timeline: this test produces them by running
 // the real command, in a copy of the project, and at the end compares what it
-// produced with the committed examples/saas, byte for byte. So the committed
+// produced with the committed example, byte for byte. So the committed
 // example is the real output of the tool over a real history.
 //
 // BFM_LONGRUN_UPDATE=1 rewrites the committed example instead of comparing.
-// BFM_LONGRUN_WORK=<dir> keeps the work directory (project, binaries, logs).
-// BFM_LONGRUN_KEEP=1 keeps the databases (bfm_saas_*).
+// BFM_LONGRUN_WORK=<dir> keeps the work directory (project, binaries, logs),
+// in <dir>/<name>.
+// BFM_LONGRUN_KEEP=1 keeps the databases (bfm_<name>_*).
 // BFM_LONGRUN_UNTIL=r05 stops after that release, without the comparison.
 //
 // The environments, each a database of its own:
@@ -25,8 +29,8 @@ package dbtest_test
 //	             traffic between releases and admin edits
 //	staging      created at r02, deployed every other release, so it catches
 //	             up two releases at once
-//	onprem       created at r01, deployed only at r06 and r12, so it catches
-//	             up many releases in one migrate
+//	onprem       (saas) created at r01, deployed only at r06 and r12, so it
+//	outlet       (commerce) catches up many releases in one migrate
 //	dev          created fresh at every release: migrate, seed, sequences
 //	workstation  the developer's database, migrated before every generate so
 //	             generate lints against the release's schema
@@ -61,6 +65,36 @@ import (
 
 	"github.com/uptrace/bun"
 )
+
+// lrExample is a long-running example project: its directory under
+// examples/, which also names its databases, and what its application does to
+// them. Each example's longrun_<name>_test.go declares one.
+type lrExample struct {
+	name string
+	// minVersion is the oldest PostgreSQL server_version_num the example's
+	// schema runs on, and why.
+	minVersion int
+	minReason  string
+	// appData are queries, each returning one text, of the application's own
+	// rows as the master rows they point at, by natural key: what a deploy
+	// must never change.
+	appData []string
+	// appInserts insert into the master tables the way the application or an
+	// admin UI would, without an id; each is rolled back.
+	appInserts []lrInsert
+	// traffic is the application at work in an environment between releases.
+	traffic func(lr *longrun, env *lrEnv)
+}
+
+type lrInsert struct {
+	sql string
+	// notWithTraffic leaves the insert out where the application works, whose
+	// own rows, kept rather than rolled back, are this insert already.
+	notWithTraffic bool
+	// table, when set, leaves the insert out while the database has no such
+	// table: before the release that creates it, after the one that drops it.
+	table string
+}
 
 // lrManifest is a release's release.yml.
 type lrManifest struct {
@@ -200,10 +234,11 @@ type lrEnv struct {
 type longrun struct {
 	t        *testing.T
 	ctx      context.Context
+	ex       lrExample
 	admin    *bun.DB
 	base     *url.URL
 	repo     string // the bun-fixture-migrate module
-	example  string // examples/saas
+	example  string // examples/<name>
 	work     string
 	project  string
 	tool     string
@@ -215,11 +250,13 @@ type longrun struct {
 	traffics int
 }
 
-func TestLongRunningSaaSProject(t *testing.T) {
+// replayExample replays an example's timeline release by release, then
+// compares what it produced with the committed example.
+func replayExample(t *testing.T, ex lrExample) {
 	if testing.Short() {
 		t.Skip("replays a dozen releases against several databases; skipped with -short")
 	}
-	lr := newLongrun(t)
+	lr := newLongrun(t, ex)
 	started := time.Now()
 	entries, err := os.ReadDir(filepath.Join(lr.example, "timeline"))
 	if err != nil {
@@ -249,15 +286,15 @@ func TestLongRunningSaaSProject(t *testing.T) {
 	t.Log("timings:\n  " + strings.Join(lr.timings, "\n  "))
 }
 
-func newLongrun(t *testing.T) *longrun {
+func newLongrun(t *testing.T, ex lrExample) *longrun {
 	t.Helper()
 	admin := connect(t)
 	var version int
 	if err := admin.QueryRowContext(context.Background(), "SHOW server_version_num").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version < 130000 {
-		t.Skip("the example's plans have gen_random_uuid() keys, which PostgreSQL has built in from 13 on")
+	if version < ex.minVersion {
+		t.Skip(ex.minReason)
 	}
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("no Go toolchain to build with")
@@ -278,13 +315,14 @@ func newLongrun(t *testing.T) *longrun {
 	if work == "" {
 		work = t.TempDir()
 	} else {
+		work = filepath.Join(work, ex.name)
 		os.RemoveAll(work)
 		if err := os.MkdirAll(work, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	lr := &longrun{t: t, ctx: context.Background(), admin: admin, base: base, repo: repo,
-		example: filepath.Join(repo, "examples", "saas"), work: work,
+	lr := &longrun{t: t, ctx: context.Background(), ex: ex, admin: admin, base: base, repo: repo,
+		example: filepath.Join(repo, "examples", ex.name), work: work,
 		project: filepath.Join(work, "project"), tool: filepath.Join(work, "bin", "bun-fixture-migrate"),
 		envs: map[string]*lrEnv{}, logs: filepath.Join(work, "logs")}
 	for _, dir := range []string{lr.project, filepath.Join(work, "bin"), lr.logs} {
@@ -644,7 +682,7 @@ func (lr *longrun) checkOutcome(label string, want lrOutcome, out string) {
 
 // replicas deploys prod from several processes at once. bun's lock does not
 // wait; the application retries it, so every replica succeeds and exactly one
-// of them migrates. (known: F7 -- the retry is the example's main.go, not
+// of them migrates. (known: saas F7 -- the retry is the example's main.go, not
 // bun's or the tool's; the docs say bun's lock serialises replicas.)
 func (lr *longrun) replicas(env *lrEnv, app string, n int) string {
 	t := lr.t
@@ -719,21 +757,7 @@ func (lr *longrun) afterDeploy(env *lrEnv, before string, check lrOutcome) {
 // by natural key: what a deploy must never change.
 func (lr *longrun) appData(env *lrEnv) string {
 	parts := []string{"app data"}
-	for _, q := range []string{
-		`SELECT coalesce(string_agg(format('%s:%s:%s', s.id, p.code, c.code), ' ' ORDER BY s.id), '')
-		 FROM subscriptions s JOIN plans p ON p.id = s.plan_id JOIN currencies c ON c.id = s.currency_id`,
-		`SELECT coalesce(string_agg(format('%s:%s/%s/%s/%s=%s', i.id, p.code, c.code, pp.valid_from, pp.amount, i.amount), ' ' ORDER BY i.id), '')
-		 FROM invoices i JOIN plan_prices pp ON pp.id = i.plan_price_id JOIN plans p ON p.id = pp.plan_id
-		 JOIN currencies c ON c.id = pp.currency_id`,
-		`SELECT coalesce(string_agg(format('%s:%s:%s', u.id, r.code, coalesce(r.tenant_id::text, 'master')), ' ' ORDER BY u.id), '')
-		 FROM users u JOIN roles r ON r.id = u.role_id`,
-		// A tenant's custom roles and what they grant. A master migration
-		// must never touch them.
-		`SELECT coalesce(string_agg(format('%s:%s:%s', r.tenant_id, r.code, rp.permission_id), ' ' ORDER BY r.id, rp.permission_id), '')
-		 FROM roles r LEFT JOIN role_permissions rp ON rp.role_id = r.id WHERE r.tenant_id IS NOT NULL`,
-		`SELECT coalesce(string_agg(format('%s:%s', t.name, c.code), ' ' ORDER BY t.id), '')
-		 FROM tenants t JOIN countries c ON c.id = t.country_id`,
-	} {
+	for _, q := range lr.ex.appData {
 		var s string
 		if err := env.conn.QueryRowContext(lr.ctx, q).Scan(&s); err != nil {
 			if strings.Contains(err.Error(), "does not exist") {
@@ -750,74 +774,36 @@ func (lr *longrun) appData(env *lrEnv) string {
 // application or an admin UI would, without an id, and rolls back: an id the
 // sequence hands out that a row already holds fails here.
 func (lr *longrun) appInserts(env *lrEnv) {
-	for _, stmt := range []string{
-		`INSERT INTO currencies (code, name, symbol, minor_units) VALUES ('ZZZ', 'probe', 'z', 2)`,
-		`INSERT INTO countries (code, name, currency_id, tax_rate) VALUES ('ZZ', 'probe', (SELECT min(id) FROM currencies), 0)`,
-		`INSERT INTO features (code, name) VALUES ('probe', 'probe')`,
-		`INSERT INTO permissions (code, description) VALUES ('probe', 'probe')`,
-		`INSERT INTO categories (slug, name, position) VALUES ('probe', 'probe', 99)`,
-		`INSERT INTO translations (locale, key, value) VALUES ('xx', 'probe', 'probe')`,
-		`INSERT INTO plan_prices (plan_id, currency_id, valid_from, amount)
-		 VALUES ((SELECT min(id::text)::uuid FROM plans), (SELECT min(id) FROM currencies), '2099-12-31', 1)`,
-		`INSERT INTO roles (code, name) VALUES ('probe', 'probe')`,
-	} {
-		if env.traffic && strings.HasPrefix(stmt, "INSERT INTO roles") {
-			// Where the application works, its tenants' custom roles
-			// are this insert, kept rather than rolled back.
+	for _, ins := range lr.ex.appInserts {
+		if env.traffic && ins.notWithTraffic {
 			continue
+		}
+		if ins.table != "" {
+			var exists bool
+			if err := env.conn.QueryRowContext(lr.ctx, "SELECT to_regclass(?) IS NOT NULL", ins.table).Scan(&exists); err != nil {
+				lr.t.Fatal(err)
+			}
+			if !exists {
+				continue
+			}
 		}
 		tx, err := env.conn.BeginTx(lr.ctx, nil)
 		if err != nil {
 			lr.t.Fatal(err)
 		}
-		_, err = tx.ExecContext(lr.ctx, stmt)
+		_, err = tx.ExecContext(lr.ctx, ins.sql)
 		tx.Rollback()
 		if err != nil {
 			lr.t.Fatalf("%s %s: the application's insert fails, the sequence is behind: %s: %v",
-				lr.release, env.name, stmt, err)
+				lr.release, env.name, ins.sql, err)
 		}
 	}
 }
 
-// traffic is the application at work between releases: a tenant signs up,
-// creates a custom role (its id comes from the sequence the master roles'
-// ids share), invites users, subscribes to a plan and is invoiced at the
-// plan's current price.
+// traffic is the application at work in an environment between releases.
 func (lr *longrun) traffic(env *lrEnv) {
 	lr.traffics++
-	n := lr.traffics
-	tenant := fmt.Sprintf("tenant-%s-%s", lr.release, env.name)
-	var plans []string
-	if err := env.conn.NewRaw(`SELECT p.code FROM plans p WHERE p.active
-		AND EXISTS (SELECT 1 FROM plan_prices pp JOIN currencies c ON c.id = pp.currency_id
-		            WHERE pp.plan_id = p.id AND c.code = 'EUR')
-		ORDER BY p.code`).Scan(lr.ctx, &plans); err != nil {
-		lr.t.Fatal(err)
-	}
-	plan := plans[n%len(plans)]
-	stmts := []string{
-		fmt.Sprintf(`INSERT INTO tenants (name, country_id) VALUES ('%s', (SELECT id FROM countries WHERE code = 'DE'))`, tenant),
-		fmt.Sprintf(`INSERT INTO roles (tenant_id, code, name)
-			VALUES ((SELECT id FROM tenants WHERE name = '%s'), 'custom-%d', 'Custom role %d')`, tenant, n, n),
-		fmt.Sprintf(`INSERT INTO role_permissions (role_id, permission_id)
-			SELECT r.id, p.id FROM roles r, permissions p
-			WHERE r.tenant_id = (SELECT id FROM tenants WHERE name = '%s') AND p.code IN ('projects.read', 'reports.export')`, tenant),
-		fmt.Sprintf(`INSERT INTO users (tenant_id, email, role_id) VALUES
-			((SELECT id FROM tenants WHERE name = '%[1]s'), 'owner@%[1]s.example', (SELECT id FROM roles WHERE code = 'owner' AND tenant_id IS NULL)),
-			((SELECT id FROM tenants WHERE name = '%[1]s'), 'staff@%[1]s.example', (SELECT id FROM roles WHERE tenant_id = (SELECT id FROM tenants WHERE name = '%[1]s')))`, tenant),
-		fmt.Sprintf(`INSERT INTO subscriptions (tenant_id, plan_id, currency_id, seats)
-			SELECT t.id, p.id, c.id, %d FROM tenants t, plans p, currencies c
-			WHERE t.name = '%s' AND p.code = '%s' AND c.code = 'EUR'`, 3+n, tenant, plan),
-		fmt.Sprintf(`INSERT INTO invoices (subscription_id, plan_price_id, amount)
-			SELECT s.id, pp.id, pp.amount * s.seats FROM subscriptions s
-			JOIN tenants t ON t.id = s.tenant_id
-			JOIN LATERAL (SELECT * FROM plan_prices pp WHERE pp.plan_id = s.plan_id AND pp.currency_id = s.currency_id
-			              ORDER BY pp.valid_from DESC LIMIT 1) pp ON true
-			WHERE t.name = '%s'`, tenant),
-	}
-	for _, stmt := range stmts {
-		run(lr.t, env.conn, stmt)
-	}
+	lr.ex.traffic(lr, env)
 }
 
 // master is a database's master data as export writes it, made comparable
@@ -826,7 +812,7 @@ func (lr *longrun) traffic(env *lrEnv) {
 // check compares the ids that the files name), rows in a fixed order.
 func (lr *longrun) master(env *lrEnv) string {
 	t := lr.t
-	// known: F2 -- export -stdout is not comparable between two databases
+	// known: saas F2 -- export -stdout is not comparable between two databases
 	// holding the same master data: it carries the time of the export, the
 	// database's own ids (a gen_random_uuid() key included), and rows in id
 	// order. Normalised here.
@@ -903,7 +889,7 @@ func (lr *longrun) probe(relDir, start string, p lrProbe) {
 	}
 	clones := map[string]string{}
 	for name, from := range map[string]string{"clone": p.Clone, "clone2": p.Clone2} {
-		db := "bfm_saas_probe_" + name
+		db := "bfm_" + lr.ex.name + "_probe_" + name
 		switch from {
 		case "":
 			continue
@@ -1008,7 +994,7 @@ func (lr *longrun) createEnv(name string) *lrEnv {
 	if old, ok := lr.envs[name]; ok && old.conn != nil {
 		old.conn.Close()
 	}
-	db := "bfm_saas_" + name
+	db := "bfm_" + lr.ex.name + "_" + name
 	lr.dropDB(db)
 	run(lr.t, lr.admin, "CREATE DATABASE "+db)
 	env := &lrEnv{name: name, db: db, dsn: lr.dsnOf(db)}
@@ -1074,10 +1060,10 @@ func (lr *longrun) finish() {
 	switch {
 	case len(problems) == 0:
 	case update:
-		t.Logf("rewrote examples/saas:\n%s", strings.Join(problems, "\n"))
+		t.Logf("rewrote examples/%s:\n%s", lr.ex.name, strings.Join(problems, "\n"))
 	default:
-		t.Fatalf("examples/saas is not what its history produces (BFM_LONGRUN_UPDATE=1 rewrites it):\n%s",
-			strings.Join(problems, "\n"))
+		t.Fatalf("examples/%s is not what its history produces (BFM_LONGRUN_UPDATE=1 rewrites it):\n%s",
+			lr.ex.name, strings.Join(problems, "\n"))
 	}
 }
 
