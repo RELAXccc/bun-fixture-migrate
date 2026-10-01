@@ -354,9 +354,10 @@ func TestABadFlagIsOneError(t *testing.T) {
 		!strings.Contains(stderr, "-with-sql") {
 		t.Fatalf("exit %d\n%s", code, stderr)
 	}
-	// baseline never connects, so it has no -dsn to ignore.
-	if code, _, stderr := call(t, "baseline", "-config", cfg, "-dsn", "postgres://x/y"); code != 1 ||
-		!strings.Contains(stderr, "not defined: -dsn") {
+	// baseline connects to ask whether a difference is only spelling, so it
+	// takes -dsn like every command that connects.
+	code, _, stderr = call(t, "baseline", "-h")
+	if code != 0 || !strings.Contains(stderr, "-dsn") {
 		t.Fatalf("exit %d\n%s", code, stderr)
 	}
 }
