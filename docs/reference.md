@@ -196,7 +196,8 @@ INITIALLY IMMEDIATE`, which a migration checks at its end, and generate again; o
 rows to a value no row holds in a migration of its own first, and the others in the next. A
 `DEFERRABLE` constraint orders nothing, and any trade gets through it. Where the files do not write
 every column of the index, or without the database, where the index is a guess, such a circle is a
-warning instead. A row whose ref value changes, a country renamed from Germany to
+warning instead, and so is one the waits for an index's values close with the waits for the rows
+the changes point at: an item giving its position up to a new item it then points at. A row whose ref value changes, a country renamed from Germany to
 Deutschland, is no change to the rows pointing at it: they point at its id. Models follow their
 references, in file order otherwise, whether or not the new file still mentions them.
 

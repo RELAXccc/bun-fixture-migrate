@@ -1586,9 +1586,11 @@ func orderChanges(cfg *Config, uq uniques, renames, deletes, updates, inserts []
 			continue
 		}
 		var cut []int
+		noted := false
 		for _, c := range circles(uniqueEdges, more) {
 			model := changes[c.changes[0]].Model
 			if c.partial {
+				noted = true
 				notes = append(notes, Refusal{Model: model, Reason: fmt.Sprintf(
 					"%s trade values of the unique index on %s among themselves in a circle, as far as the "+
 						"fixture files say: they do not write every column of it, so the rows may not share "+
@@ -1645,12 +1647,30 @@ func orderChanges(cfg *Config, uq uniques, renames, deletes, updates, inserts []
 			}
 			more = kept
 		}
-		if len(more) > 0 && !closes(edges, more) {
+		if len(more) == 0 {
+			continue
+		}
+		if !closes(edges, more) {
 			edges = join(edges, more)
 			uniqueEdges = join(uniqueEdges, more)
 			for range more {
 				uniqueOf = append(uniqueOf, k)
 			}
+			continue
+		}
+		// The values wait in a circle with the rows the changes point at:
+		// the index orders nothing, and says so, unless the circle of its
+		// own values has been.
+		if noted {
+			continue
+		}
+		for _, c := range circles(edges, more) {
+			notes = append(notes, Refusal{Model: changes[c.changes[0]].Model, Reason: fmt.Sprintf(
+				"the changes of %s wait for each other in a circle, through the values of the unique index on "+
+					"%s and the rows they point at, so the index orders none of its changes. Unless a "+
+					"constraint in the circle is DEFERRABLE, the migration fails on one of them: plan says "+
+					"which, and splitting the change into two migrations breaks the circle",
+				labels(c.changes), columns(ix.cols))})
 		}
 	}
 	// A guess that closes a circle on its own, or with what is known, gives

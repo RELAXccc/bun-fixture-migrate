@@ -150,3 +150,25 @@ func TestARotationWithoutTheCatalogIsAWarning(t *testing.T) {
 		t.Fatalf("got %s", w)
 	}
 }
+
+// An item that gives its position up to a new item and points at it waits
+// for the insert, which waits for the position: the index cannot order
+// them, and the result says so instead of writing a migration that fails on
+// it without a word.
+func TestACircleThroughTheRowsChangesPointAtIsAWarning(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{"Item": {Table: "items", Key: []string{"name"},
+		References: map[string]string{"parent_id": "Item"}}}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	table := &dbschema.Table{Uniques: [][]string{{"id"}, {"name"}, {"position"}}}
+	res := computeUnder(t, cfg, table,
+		"- model: Item\n  rows:\n    - {_id: a, id: 1, name: a, position: 1, parent_id: ~}\n",
+		"- model: Item\n  rows:\n    - {_id: b, id: 2, name: b, position: 1, parent_id: ~}\n"+
+			"    - {_id: a, id: 1, name: a, position: 2, parent_id: '{{ $.Item.b.ID }}'}\n")
+	if len(res.Refusals) != 0 || len(res.Changes) != 2 || len(res.Warnings) != 1 ||
+		!strings.Contains(res.Warnings[0].Reason, "the changes of Item/name=b and Item/name=a wait for each other in "+
+			"a circle, through the values of the unique index on position and the rows they point at") {
+		t.Fatalf("got %s / %+v / %+v", kindsOf(res), res.Refusals, res.Warnings)
+	}
+}
