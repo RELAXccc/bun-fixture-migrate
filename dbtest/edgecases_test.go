@@ -80,6 +80,55 @@ func TestAFreshSequenceStartingHighIsLeftAlone(t *testing.T) {
 	}
 }
 
+// Ids below 1000 are kept for master data: a schema migration restarted the
+// sequence at 1000, and the application has not inserted a row yet. A
+// sequence not called since has no last value to pg_sequence_last_value, and
+// its start value is not where RESTART left it: an explicit id 3 moved the
+// sequence back to 3, and SyncSequences to the highest id, into the ids kept
+// for master data.
+func TestARestartedSequenceIsNotMovedBack(t *testing.T) {
+	db := connect(t)
+	ctx := context.Background()
+	reset := func(restart string) {
+		run(t, db, "DROP TABLE IF EXISTS seq_plans",
+			"CREATE TABLE seq_plans (id bigserial PRIMARY KEY, name text UNIQUE NOT NULL)",
+			"ALTER SEQUENCE seq_plans_id_seq RESTART WITH "+restart,
+			"INSERT INTO seq_plans (id, name) VALUES (1, 'free'), (2, 'team')")
+	}
+	next := func() int64 { return scan[int64](t, db, "SELECT nextval('seq_plans_id_seq')") }
+
+	reset("1000")
+	if err := fixtureapply.Apply(ctx, db, insertPlan("seq_plans", "pro", "3"), quiet()); err != nil {
+		t.Fatal(err)
+	}
+	if got := next(); got != 1000 {
+		t.Fatalf("after an explicit id 3 the next id is %d, not 1000", got)
+	}
+	reset("1000")
+	if moved, err := fixtureapply.SyncSequences(ctx, db, "seq_plans"); err != nil || len(moved) != 0 {
+		t.Fatalf("SyncSequences moved %v: %v", moved, err)
+	}
+	if got := next(); got != 1000 {
+		t.Fatalf("after SyncSequences the next id is %d, not 1000", got)
+	}
+
+	// The id the sequence hands out next is taken: it moves past it.
+	reset("1000")
+	if err := fixtureapply.Apply(ctx, db, insertPlan("seq_plans", "pro", "1000"), quiet()); err != nil {
+		t.Fatal(err)
+	}
+	if got := next(); got != 1001 {
+		t.Fatalf("after an explicit id 1000 the next id is %d, not 1001", got)
+	}
+	reset("2")
+	if moved, err := fixtureapply.SyncSequences(ctx, db, "seq_plans"); err != nil || len(moved) != 1 {
+		t.Fatalf("the sequence would hand out 2 again: moved %v, %v", moved, err)
+	}
+	if got := next(); got != 3 {
+		t.Fatalf("after SyncSequences the next id is %d, not 3", got)
+	}
+}
+
 // A mixed-case table: pg_get_serial_sequence parses its argument as SQL, and
 // unquoted it folded the name and found no sequence at all.
 func TestTheSequenceOfAMixedCaseTableIsFound(t *testing.T) {

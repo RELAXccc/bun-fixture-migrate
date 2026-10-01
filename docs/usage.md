@@ -107,7 +107,10 @@ Four details matter:
 - **Sequences.** A fixture file names its ids, and `dbfixture` writes them explicitly; a sequence
   does not see an explicit id go by, so the application's first insert collides with id 1.
   `fixtureapply.SyncSequences` moves each serial and identity column's sequence past the largest
-  value, and never backwards. Generated migrations do the same for every explicit id they write.
+  value, and never backwards: a sequence restarted at 1000 and not called since stays at 1000 when
+  the ids are below it. Generated migrations do the same for every explicit id they write. Both read
+  the sequence itself, which takes `SELECT` on it besides the `UPDATE` that `setval` takes; the
+  tables' owner has both.
 
 ## Which migrator settings
 
