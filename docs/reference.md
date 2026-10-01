@@ -45,9 +45,11 @@ a natural key guessed from the narrowest unique index besides the primary key. E
 
 ### export
 
-Writes the fixture files from the database: models in dependency order, references as templates
-naming the target row, anchors from the natural key, values in the notation that loads back as the
-same value. With several fixture files, each model goes back into the file that holds it and a new
+Writes the fixture files from the database: models in dependency order, rows in id order except
+that a row pointing at a row of its own model comes after it (a tree's parents before their
+children), references as templates naming the target row, anchors from the natural key, values in
+the notation that loads back as the same value. Rows pointing at each other in a circle are refused:
+`dbfixture` cannot load them in any order. With several fixture files, each model goes back into the file that holds it and a new
 one into the last. Refuses (exit 2) to write a file `dbfixture` would not load back as the database,
 such as a zero bun would replace with a column default.
 
@@ -83,6 +85,16 @@ state file on. The base is the state file; while there is none, git's `HEAD`.
 
 The migration is named one second after the newest migration in the directory, never earlier than
 now and never the name of another one. A migration whose name sorts after it is warned about.
+
+The changes run in this order: renames, deletes, updates, inserts, and last the updates that point
+at a row inserted in the same migration. A delete or an update can free what an insert takes: a
+value of a unique column, or the open end of a price that a partial unique index or an exclusion
+constraint allows once. On top of that order every change waits for the ones it depends on: a row
+pointing at a new row waits for its insert, parents before children in one table too; a row is
+deleted once nothing in the migration still names it, children before parents; and a row taking a
+value another row of the table gives up waits for it, unless two rows trade values, which no unique
+column allows anyway. Models follow their references, in file order otherwise, whether or not the
+new file still mentions them.
 
 ### baseline
 

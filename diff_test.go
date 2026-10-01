@@ -400,7 +400,9 @@ func TestDuplicateKeyThatChangesIsRefused(t *testing.T) {
 	}
 }
 
-func TestInsertsComeBeforeDeletesAndFollowTheFileOrder(t *testing.T) {
+// A delete can free what an insert takes, so deletes go first, children
+// before parents; inserts follow the file's order, parents before children.
+func TestDeletesComeFirstAndInsertsFollowTheFileOrder(t *testing.T) {
 	old := base + `    - plan_id: '{{ $.Plan.team.ID }}'
       code: sso
       quota: 1
@@ -421,7 +423,7 @@ func TestInsertsComeBeforeDeletesAndFollowTheFileOrder(t *testing.T) {
 	for _, c := range res.Changes {
 		order = append(order, string(c.Kind)+" "+c.Model)
 	}
-	want := []string{"insert Plan", "insert Feature", "delete Feature"}
+	want := []string{"delete Feature", "insert Plan", "insert Feature"}
 	if len(order) != len(want) {
 		t.Fatalf("expected %v, got %v", want, order)
 	}
@@ -790,5 +792,163 @@ func TestSameRowSetTellsANullFromItsSpelling(t *testing.T) {
 	b := []*Entry{{Cells: fixturechange.Values{"note": fixturechange.Lit("NULL")}}}
 	if sameRowSet(a, b) {
 		t.Fatal("NULL and the text NULL are the same row")
+	}
+}
+
+// kindsOf is the changes of a result as "kind Model key", in order.
+func kindsOf(res *Result) string {
+	var out []string
+	for _, c := range res.Changes {
+		out = append(out, string(c.Kind)+" "+keyLabel(c.Model, c.Key))
+	}
+	return strings.Join(out, "; ")
+}
+
+// Closing a price and opening the next one in one release: an exclusion
+// constraint, or a partial unique index on the open price, accepts the new
+// open row only once the old one is closed. Updates come before inserts.
+func TestAnUpdateThatFreesAValueComesBeforeTheInsertTakingIt(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{
+		"Plan":  {Table: "plans", Ref: "code", Key: []string{"code"}},
+		"Price": {Table: "prices", Serial: true, Key: []string{"plan_id", "valid_from"}, References: map[string]string{"plan_id": "Plan"}},
+	}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	head := "- model: Plan\n  rows:\n    - {_id: basic, id: 1, code: basic}\n- model: Price\n  rows:\n"
+	old := head + "    - {id: 1, plan_id: '{{ $.Plan.basic.ID }}', valid_from: '2026-01-01', valid_to: ~, cents: 900}\n"
+	next := head + "    - {id: 1, plan_id: '{{ $.Plan.basic.ID }}', valid_from: '2026-01-01', valid_to: '2026-11-01', cents: 900}\n" +
+		"    - {id: 2, plan_id: '{{ $.Plan.basic.ID }}', valid_from: '2026-11-01', valid_to: ~, cents: 1200}\n"
+	got := kindsOf(computeWith(t, cfg, old, next))
+	if got != "update Price/plan_id=Plan(basic)/valid_from=2026-01-01; insert Price/plan_id=Plan(basic)/valid_from=2026-11-01" {
+		t.Fatalf("the old price has to be closed before the new one opens: %s", got)
+	}
+}
+
+// A row moved under a parent inserted in the same set waits for the insert;
+// the parent it leaves is deleted once nothing points at it any more.
+func TestAMoveToANewParentComesBetweenItsInsertAndTheOldParentsDelete(t *testing.T) {
+	old := replace(t, base, "- model: Feature\n", `    - _id: old
+      id: 3
+      name: old
+      currency_id: '{{ $.Currency.eur.ID }}'
+      price_cents: 1
+      seats: 1
+- model: Feature
+`) + "    - plan_id: '{{ $.Plan.old.ID }}'\n      code: sso\n      quota: 1\n"
+	next := replace(t, base, "- model: Feature\n", `    - _id: pro
+      id: 4
+      name: pro
+      currency_id: '{{ $.Currency.eur.ID }}'
+      price_cents: 1
+      seats: 1
+- model: Feature
+`) + "    - plan_id: '{{ $.Plan.pro.ID }}'\n      code: sso\n      quota: 1\n"
+	cfg := testConfig(t)
+	cfg.Models["Plan"].Deletes = DeleteAllow
+	cfg.Models["Feature"].Key = []string{"code", "quota"}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	got := kindsOf(computeWith(t, cfg, old, next))
+	want := "insert Plan/name=pro; update Feature/code=sso/quota=1; delete Plan/name=old"
+	if got != want {
+		t.Fatalf("expected\n%s\ngot\n%s", want, got)
+	}
+}
+
+// A model that leaves the file entirely still comes before the models
+// pointing at it, so its rows are deleted after theirs.
+func TestAModelThatLeftTheFileIsDeletedAfterTheRowsPointingAtIt(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{
+		"Cur":  {Table: "curs", Ref: "code", Key: []string{"code"}},
+		"Plan": {Table: "plans", References: map[string]string{"cur_id": "Cur"}},
+	}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	res := computeWith(t, cfg, `- model: Cur
+  rows:
+    - {_id: usd, id: 1, code: USD}
+- model: Plan
+  rows:
+    - {id: 1, name: a, cur_id: '{{ $.Cur.usd.ID }}'}
+    - {id: 2, name: keep, cur_id: ~}
+`, `- model: Plan
+  rows:
+    - {id: 2, name: keep, cur_id: ~}
+`)
+	if got := kindsOf(res); got != "delete Plan/name=a; delete Cur/code=USD" {
+		t.Fatalf("the plan pointing at the currency has to go first: %s", got)
+	}
+	if strings.Join(res.Order, ",") != "Cur,Plan" {
+		t.Fatalf("model order %v", res.Order)
+	}
+}
+
+// A model split over several blocks keeps its rows in file order, after the
+// models it points at, wherever their blocks are.
+func TestAModelSplitOverBlocksKeepsItsRowOrder(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{
+		"Cur":  {Table: "curs", Ref: "code", Key: []string{"code"}},
+		"Plan": {Table: "plans", References: map[string]string{"cur_id": "Cur"}},
+	}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	res := computeWith(t, cfg, "[]\n", `- model: Plan
+  rows:
+    - {id: 1, name: b, cur_id: ~}
+- model: Cur
+  rows:
+    - {_id: usd, id: 1, code: USD}
+- model: Plan
+  rows:
+    - {id: 2, name: a, cur_id: '{{ $.Cur.usd.ID }}'}
+    - {id: 3, name: c, cur_id: ~}
+`)
+	if got := kindsOf(res); got != "insert Cur/code=USD; insert Plan/name=b; insert Plan/name=a; insert Plan/name=c" {
+		t.Fatalf("got %s", got)
+	}
+}
+
+// Rows of a tree as a database returns them, in id order, where a parent can
+// come after its child: inserts still go parents first, deletes children first.
+func TestATreeIsInsertedParentsFirstAndDeletedChildrenFirst(t *testing.T) {
+	cfg := treeConfig(t)
+	tree := treeState([3]string{"1", "leaf", "root"}, [3]string{"2", "root", ""}, [3]string{"3", "other", ""})
+	empty := &Snapshot{Source: "empty", Order: []string{"Node"}, Entries: map[string][]*Entry{}}
+	res, err := Compute(cfg, empty, tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := kindsOf(res); got != "insert Node/name=root; insert Node/name=leaf; insert Node/name=other" {
+		t.Fatalf("inserts: %s", got)
+	}
+	reversed := treeState([3]string{"1", "root", ""}, [3]string{"2", "leaf", "root"})
+	if res, err = Compute(cfg, reversed, empty); err != nil {
+		t.Fatal(err)
+	}
+	if got := kindsOf(res); got != "delete Node/name=leaf; delete Node/name=root" {
+		t.Fatalf("deletes: %s", got)
+	}
+}
+
+// A unique value can move from one row to another in one set: the row giving
+// it up goes first. Two rows trading values cannot both go first, which means
+// the column is not unique, and they keep their order.
+func TestARowTakingAValueAnotherGivesUpWaitsForIt(t *testing.T) {
+	cfg := &Config{Models: map[string]*Model{"Seat": {Table: "seats", Ref: "code", Key: []string{"code"}}}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	old := "- model: Seat\n  rows:\n    - {id: 1, code: b, slot: 3}\n    - {id: 2, code: a, slot: 1}\n"
+	next := "- model: Seat\n  rows:\n    - {id: 1, code: b, slot: 1}\n    - {id: 2, code: a, slot: 2}\n"
+	if got := kindsOf(computeWith(t, cfg, old, next)); got != "update Seat/code=a; update Seat/code=b" {
+		t.Fatalf("a gives slot 1 up, so it goes first: %s", got)
+	}
+	swap := "- model: Seat\n  rows:\n    - {id: 1, code: b, slot: 1}\n    - {id: 2, code: a, slot: 3}\n"
+	if got := kindsOf(computeWith(t, cfg, old, swap)); got != "update Seat/code=b; update Seat/code=a" {
+		t.Fatalf("a trade keeps the file's order: %s", got)
 	}
 }

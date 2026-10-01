@@ -1,6 +1,7 @@
 package fixturemigrate
 
 import (
+	"container/heap"
 	"fmt"
 	"sort"
 	"strconv"
@@ -20,16 +21,19 @@ func (r Refusal) String() string { return r.Model + " " + r.Key + ": " + r.Reaso
 
 // Result is what Compute found.
 type Result struct {
-	// Changes are in apply order: renames first, then inserts in model order,
-	// then updates, then deletes in reverse model order, so no row is written
-	// before the row it points at and none is removed before the rows that
-	// point at it.
+	// Changes are in apply order: renames first, then deletes, then updates,
+	// then inserts, then the updates that point at a row inserted here, with
+	// every change after the ones it depends on, so no row is written before
+	// the row it points at, none is removed while a row still points at it,
+	// and a value one row gives up is free before another takes it. See
+	// orderChanges.
 	Changes []fixturechange.Change
 	// Refusals are the differences that need a hand-written migration.
 	Refusals []Refusal
 	// Tables covers every model a change touches or points at.
 	Tables fixturechange.Tables
-	// Order is the model order that was used.
+	// Order is the model order that was used: every model after the models
+	// it points at, and otherwise in the order of the files.
 	Order []string
 	// Base and Head name the two snapshots, for the generated file's comment.
 	Base, Head string
@@ -351,10 +355,7 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 	for i, j := 0, len(deletes)-1; i < j; i, j = i+1, j-1 {
 		deletes[i], deletes[j] = deletes[j], deletes[i]
 	}
-	res.Changes = nil
-	for _, part := range [][]fixturechange.Change{renames, inserts, updates, deletes} {
-		res.Changes = append(res.Changes, part...)
-	}
+	res.Changes = orderChanges(cfg, renames, deletes, updates, inserts)
 	res.Tables = tablesFor(cfg, res.Changes)
 	sort.SliceStable(res.Refusals, func(i, j int) bool {
 		if res.Refusals[i].Model != res.Refusals[j].Model {
@@ -576,24 +577,351 @@ func renameChange(m *Model, model string, prev, cur *Entry) (fixturechange.Chang
 		Old: oldVals, New: newVals}, nil
 }
 
-// modelOrder is the order the models appear in the new snapshot, with models
-// only the old one had appended.
+// modelOrder is the order changes are made in, model by model: every model
+// after the models it points at, so an insert finds the row it names, and in
+// reverse for deletes, so a row goes before the row it points at. Of the
+// models free to go next, the one that comes first in the new snapshot, then
+// in the old one, does: the file's own order wherever that order works. A
+// model only the old snapshot has -- every row of it deleted -- still goes
+// before the models pointing at it, and so its deletes after theirs.
+//
+// Models pointing at each other in a circle cannot be put in such an order;
+// the one first in the files goes first, and orderChanges sorts out the rows.
 func modelOrder(cfg *Config, old, next *Snapshot) ([]string, error) {
-	var order []string
-	seen := map[string]bool{}
+	var files []string
+	position := map[string]int{}
 	for _, snap := range []*Snapshot{next, old} {
 		for _, model := range snap.Order {
 			if _, err := cfg.model(model); err != nil {
 				return nil, err
 			}
-			if seen[model] {
+			if _, seen := position[model]; seen {
 				continue
 			}
-			seen[model] = true
-			order = append(order, model)
+			position[model] = len(files)
+			files = append(files, model)
 		}
 	}
+	waiting := make([]int, len(files))
+	pointedAt := make([][]int, len(files))
+	for i, model := range files {
+		m := cfg.Models[model]
+		targets := map[int]bool{}
+		for col, target := range m.References {
+			if j, ok := position[target]; ok && target != model && !m.skip(col) {
+				targets[j] = true
+			}
+		}
+		for j := range targets {
+			waiting[i]++
+			pointedAt[j] = append(pointedAt[j], i)
+		}
+	}
+	var order []string
+	for _, i := range topological(waiting, pointedAt, func(i int) int { return i }) {
+		order = append(order, files[i])
+	}
 	return order, nil
+}
+
+// topological sorts the nodes 0..n-1 of a graph so every node comes after the
+// nodes it waits for: waiting[i] is how many it waits for, next[i] the nodes
+// waiting for i. Of the nodes whose wait is over, the one of lowest rank goes
+// next. In a circle nothing's wait is ever over, and then the lowest-ranked
+// node left goes anyway, so the result is always every node once.
+func topological(waiting []int, next [][]int, rank func(int) int) []int {
+	waiting = append([]int(nil), waiting...)
+	ready := &rankedHeap{rank: rank}
+	for i, w := range waiting {
+		if w == 0 {
+			heap.Push(ready, i)
+		}
+	}
+	done := make([]bool, len(waiting))
+	out := make([]int, 0, len(waiting))
+	for len(out) < len(waiting) {
+		if ready.Len() == 0 {
+			stuck := -1
+			for i := range waiting {
+				if !done[i] && (stuck < 0 || rank(i) < rank(stuck)) {
+					stuck = i
+				}
+			}
+			waiting[stuck] = 0
+			heap.Push(ready, stuck)
+		}
+		i := heap.Pop(ready).(int)
+		if done[i] {
+			continue
+		}
+		done[i] = true
+		out = append(out, i)
+		for _, j := range next[i] {
+			if waiting[j]--; waiting[j] == 0 && !done[j] {
+				heap.Push(ready, j)
+			}
+		}
+	}
+	return out
+}
+
+// rankedHeap is a min-heap of nodes by rank, and by number between equal ranks.
+type rankedHeap struct {
+	nodes []int
+	rank  func(int) int
+}
+
+func (h *rankedHeap) Len() int { return len(h.nodes) }
+func (h *rankedHeap) Less(i, j int) bool {
+	a, b := h.nodes[i], h.nodes[j]
+	if ra, rb := h.rank(a), h.rank(b); ra != rb {
+		return ra < rb
+	}
+	return a < b
+}
+func (h *rankedHeap) Swap(i, j int) { h.nodes[i], h.nodes[j] = h.nodes[j], h.nodes[i] }
+func (h *rankedHeap) Push(x any)    { h.nodes = append(h.nodes, x.(int)) }
+func (h *rankedHeap) Pop() any {
+	x := h.nodes[len(h.nodes)-1]
+	h.nodes = h.nodes[:len(h.nodes)-1]
+	return x
+}
+
+// orderChanges puts a change set in an order the database accepts.
+//
+// The base order is renames, then deletes, then updates, then inserts, and
+// last the updates that point at a row inserted in the same set. A delete or
+// an update can free what an insert takes: a value of a unique column, or the
+// open end of a price that an exclusion constraint or a partial unique index
+// allows only once, so the old price has to be closed before the new one is
+// opened. Inserts follow the model order and the file's row order, deletes the
+// reverse of both.
+//
+// On top of that, a change waits for every change it depends on:
+//
+//   - a change naming a row that another change inserts, or renames into
+//     that name, waits for it: parents before children, in one model too;
+//   - a change removing a row, or the name a row is found by, waits for
+//     every change that still names it in its key or its old values: the
+//     child deleted or moved elsewhere goes first;
+//   - a change taking a value of a column that another change of the same
+//     model gives up waits for it, so a unique value can move from one row to
+//     another in one set. Nothing here knows which columns are unique; a
+//     column whose values would have to wait for each other in a circle, two
+//     rows trading values, cannot be one, and waits for nothing.
+//
+// Of the changes whose wait is over, the one first in the base order goes
+// next, so the base order stands wherever nothing forces another.
+func orderChanges(cfg *Config, renames, deletes, updates, inserts []fixturechange.Change) []fixturechange.Change {
+	refOf := func(model string, values fixturechange.Values) (string, bool) {
+		v, ok := values[cfg.Models[model].Ref]
+		if !ok || v.Ref != nil || v.IsNull {
+			return "", false
+		}
+		return model + "\x00" + v.Lit, true
+	}
+	refsIn := func(sets ...fixturechange.Values) []string {
+		var out []string
+		for _, values := range sets {
+			for _, col := range sortedColumns(values) {
+				if ref := values[col].Ref; ref != nil {
+					out = append(out, ref.Model+"\x00"+ref.Key)
+				}
+			}
+		}
+		return out
+	}
+
+	inserted := map[string]bool{}
+	for _, c := range inserts {
+		if ref, ok := refOf(c.Model, c.New); ok {
+			inserted[ref] = true
+		}
+	}
+	var early, late []fixturechange.Change
+	for _, c := range updates {
+		later := false
+		for _, ref := range refsIn(c.New) {
+			later = later || inserted[ref]
+		}
+		if later {
+			late = append(late, c)
+		} else {
+			early = append(early, c)
+		}
+	}
+	var changes []fixturechange.Change
+	for _, part := range [][]fixturechange.Change{renames, deletes, early, inserts, late} {
+		changes = append(changes, part...)
+	}
+	n := len(changes)
+
+	// What each change gives a name to, and takes one away from.
+	created, removed := map[string][]int{}, map[string][]int{}
+	for i, c := range changes {
+		switch c.Kind {
+		case fixturechange.Insert:
+			if ref, ok := refOf(c.Model, c.New); ok {
+				created[ref] = append(created[ref], i)
+			}
+		case fixturechange.Update:
+			if ref, ok := refOf(c.Model, c.New); ok {
+				created[ref] = append(created[ref], i)
+				if ref, ok := refOf(c.Model, c.Old); ok {
+					removed[ref] = append(removed[ref], i)
+				}
+			}
+		case fixturechange.Delete:
+			if ref, ok := refOf(c.Model, c.Old); ok {
+				removed[ref] = append(removed[ref], i)
+			}
+		}
+	}
+	type edge struct{ from, to int }
+	var edges []edge
+	for j, c := range changes {
+		for _, ref := range refsIn(c.Key, c.Old, c.New) {
+			for _, i := range created[ref] {
+				if i != j {
+					edges = append(edges, edge{i, j})
+				}
+			}
+		}
+		for _, ref := range refsIn(c.Key, c.Old) {
+			for _, i := range removed[ref] {
+				if i != j {
+					edges = append(edges, edge{j, i})
+				}
+			}
+		}
+	}
+
+	// The values each change gives up and takes, per model and column. A
+	// value is a node of its own between the changes freeing and taking it,
+	// which keeps the edges to one per change and value.
+	type column struct{ model, col string }
+	type moves struct{ freed, taken map[string][]int }
+	byColumn := map[column]*moves{}
+	note := func(c fixturechange.Change, col string, v fixturechange.Value, i int, free bool) {
+		if v.IsNull {
+			return
+		}
+		k := column{c.Model, col}
+		if byColumn[k] == nil {
+			byColumn[k] = &moves{freed: map[string][]int{}, taken: map[string][]int{}}
+		}
+		if free {
+			byColumn[k].freed[valueKey(v)] = append(byColumn[k].freed[valueKey(v)], i)
+		} else {
+			byColumn[k].taken[valueKey(v)] = append(byColumn[k].taken[valueKey(v)], i)
+		}
+	}
+	for i, c := range changes {
+		switch c.Kind {
+		case fixturechange.Insert:
+			for col, v := range c.New {
+				note(c, col, v, i, false)
+			}
+		case fixturechange.Update:
+			for col, v := range c.New {
+				note(c, col, c.Old[col], i, true)
+				note(c, col, v, i, false)
+			}
+		case fixturechange.Delete:
+			for col, v := range c.Old {
+				note(c, col, v, i, true)
+			}
+		}
+	}
+	columns := make([]column, 0, len(byColumn))
+	for k := range byColumn {
+		columns = append(columns, k)
+	}
+	sort.Slice(columns, func(i, j int) bool {
+		if columns[i].model != columns[j].model {
+			return columns[i].model < columns[j].model
+		}
+		return columns[i].col < columns[j].col
+	})
+	nodes := n
+	graph := func(edges []edge) ([]int, [][]int) {
+		waiting, next := make([]int, nodes), make([][]int, nodes)
+		for _, e := range edges {
+			waiting[e.to]++
+			next[e.from] = append(next[e.from], e.to)
+		}
+		return waiting, next
+	}
+	circular := func(edges []edge) bool {
+		waiting, next := graph(edges)
+		var ready []int
+		for i, w := range waiting {
+			if w == 0 {
+				ready = append(ready, i)
+			}
+		}
+		seen := 0
+		for len(ready) > 0 {
+			i := ready[len(ready)-1]
+			ready = ready[:len(ready)-1]
+			seen++
+			for _, j := range next[i] {
+				if waiting[j]--; waiting[j] == 0 {
+					ready = append(ready, j)
+				}
+			}
+		}
+		return seen < nodes
+	}
+	for _, k := range columns {
+		mv := byColumn[k]
+		var more []edge
+		for _, value := range sortedKeysOfInts(mv.freed) {
+			taken := mv.taken[value]
+			if len(taken) == 0 {
+				continue
+			}
+			via := nodes
+			nodes++
+			for _, i := range mv.freed[value] {
+				more = append(more, edge{i, via})
+			}
+			for _, j := range taken {
+				more = append(more, edge{via, j})
+			}
+		}
+		if len(more) == 0 {
+			continue
+		}
+		if candidate := append(append([]edge(nil), edges...), more...); !circular(candidate) {
+			edges = candidate
+		}
+	}
+
+	waiting, next := graph(edges)
+	rank := func(i int) int {
+		if i >= n {
+			// A value between two changes: on its way as soon as it is free.
+			return -1
+		}
+		return i
+	}
+	out := make([]fixturechange.Change, 0, n)
+	for _, i := range topological(waiting, next, rank) {
+		if i < n {
+			out = append(out, changes[i])
+		}
+	}
+	return out
+}
+
+func sortedKeysOfInts(m map[string][]int) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // refusedByRename reports a change that points at a row whose rename was

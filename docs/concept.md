@@ -72,7 +72,7 @@ These decide every trade-off further down.
 | uuid primary key, `gen_random_uuid()` | no sequence, ids differ everywhere | natural keys; zero uuid known | done |
 | `GENERATED ALWAYS AS IDENTITY` | an explicit id cannot be inserted, by anyone | export leaves the id out; lint | done |
 | composite primary key, m2m join table | no single id | keyed on the natural key only | done |
-| self-referencing model (`parent_id`) | order inside one model | file order, reverse for deletes | done |
+| self-referencing model (`parent_id`) | order inside one model | parents inserted first, children deleted first, exported parents first; read whatever the id order | done |
 | enum types, domains, `citext` | text in, typed out | PostgreSQL compares | enum done; domains and `citext` follow their base type, untested |
 | `soft_delete` | a delete is an UPDATE of `deleted_at` | soft-delete aware snapshot and delete | later |
 | schema-qualified table, mixed-case or reserved-word names | quoting | quoted everywhere | done |
@@ -110,6 +110,9 @@ Each was reproduced before it went into this table.
 | `plan` against a hot standby | "would FAIL" for the wrong reason | misleading | detect `pg_is_in_recovery()` | done |
 | `1.10`, `01234`, `True` unquoted in a text column | dbfixture stores the text as written; the tool resolved it to 1.1, 668, true and saw drift, and a migration would have written those | **silent corruption** | keep both readings, let the column's type decide, refuse without one | done |
 | a reference to a row whose ref value is written `0012` in a `bigint` column | the reference carried `0012` and the row held 10; `sync` on a freshly seeded database repointed the reference at the row whose code is 12 | **silent corruption** | the ref column's type decides what a reference carries; refused without one | done |
+| a tree whose root has a higher id than its leaves | `check`, `export`, `sync` and `generate -from-db` failed with a dangling reference; an export in id order did not load | failed command, broken export | read every row's name before resolving any; export parents first | done |
+| a parent model that leaves the file entirely | its rows were deleted before the rows pointing at them | failed deploy | models ordered by their references across both states | done |
+| closing an effective-dated price and opening the next in one release | the insert ran before the update and hit the one-open-price index | failed deploy | deletes and updates before inserts, each change after what it depends on | done |
 | explicit ids from a dbfixture seed | the sequence stays behind; the application's first insert fails | failed insert | `fixtureapply.SyncSequences` after the seed | done |
 
 ## 4. Features
