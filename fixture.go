@@ -112,7 +112,9 @@ func cellOf(node yaml.Node) (Cell, error) {
 		return Cell{IsNull: true}, nil
 	case node.Kind == yaml.ScalarNode:
 		c := Cell{Text: node.Value, Tag: node.ShortTag()}
-		if scalarText(c) != c.Text {
+		// A !!binary value is the bytes it decodes to, in a string field as
+		// in any other: it reads one way only.
+		if c.Tag != "!!binary" && scalarText(c) != c.Text {
 			c.StringText = c.Text
 		}
 		return c, nil
@@ -164,10 +166,13 @@ func sequenceAsWritten(n *yaml.Node) string {
 		if e = resolveAlias(e); e == nil || e.Kind != yaml.ScalarNode || e.ShortTag() == "!!null" {
 			return ""
 		}
-		if scalarText(Cell{Text: e.Value, Tag: e.ShortTag()}) != e.Value {
+		text := e.Value
+		if e.ShortTag() == "!!binary" {
+			text = scalarText(Cell{Text: e.Value, Tag: "!!binary"})
+		} else if scalarText(Cell{Text: e.Value, Tag: e.ShortTag()}) != e.Value {
 			differs = true
 		}
-		texts = append(texts, e.Value)
+		texts = append(texts, text)
 	}
 	if !differs {
 		return ""
