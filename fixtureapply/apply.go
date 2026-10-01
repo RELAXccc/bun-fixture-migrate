@@ -128,6 +128,9 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 			return err
 		}
 	}
+	if restore, err = withDeferredConstraints(ctx, tx, set, restore); err != nil {
+		return err
+	}
 	if set.SeedGuardTable != "" {
 		seeded, err := tableHasRows(ctx, tx, set.SeedGuardTable)
 		if err != nil {
@@ -272,6 +275,33 @@ func withLockTimeout(ctx context.Context, tx bun.IDB, timeout string,
 			return fmt.Errorf("restore the session's lock_timeout: %w", err)
 		}
 		return nil
+	}, nil
+}
+
+// withDeferredConstraints makes every DEFERRABLE constraint wait for the end of
+// the change set, and returns a restore that checks them all there.
+//
+// A change set holds as a whole, not after each statement: the rename of a
+// currency code that a DEFERRABLE foreign key points at is followed, in the
+// same set, by the update of the prices pointing at it, and checked statement
+// by statement the rename fails. Checked when the set is done, a constraint
+// that does not hold fails the set like any other change, inside its
+// transaction, so bun's record is taken back as usual. A constraint that is
+// not DEFERRABLE is checked as it always is. Inside a caller's transaction the
+// constraints are immediate afterwards, which also checks whatever the caller
+// had left deferred.
+func withDeferredConstraints(ctx context.Context, tx bun.IDB, set fixturechange.Set,
+	restore func(context.Context) error) (func(context.Context) error, error) {
+
+	if _, err := tx.ExecContext(ctx, "SET CONSTRAINTS ALL DEFERRED"); err != nil {
+		return nil, fmt.Errorf("defer the constraints to the end of the change set: %w", err)
+	}
+	return func(ctx context.Context) error {
+		if _, err := tx.ExecContext(ctx, "SET CONSTRAINTS ALL IMMEDIATE"); err != nil {
+			return fmt.Errorf("%s: once every change was made, a constraint did not hold, so nothing was "+
+				"changed: %w", set.Name, privilege(err))
+		}
+		return restore(ctx)
 	}, nil
 }
 

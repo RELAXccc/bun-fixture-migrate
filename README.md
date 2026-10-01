@@ -133,7 +133,8 @@ configuration later does not change what an old migration does. At run time `fix
 - does nothing while `seed_guard_table` is empty: that database has not been seeded, and
   `dbfixture` will load the new state by itself;
 - runs the whole set in one transaction, under an advisory lock, so two replicas applying it at once
-  cannot both insert a row;
+  cannot both insert a row, and checks `DEFERRABLE` constraints once the whole set is done, so a
+  rename of a code a foreign key points at can be followed by the rows pointing at it;
 - resolves every reference to a real id first. One it writes fails the migration if it matches no
   row or more than one; one a guard compares with, whose row was renamed or removed here, matches
   nothing, which is a missing or changed row under the policy like any other;

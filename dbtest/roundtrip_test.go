@@ -1240,3 +1240,56 @@ func TestACascadingDeleteSaysWhatItReached(t *testing.T) {
 		t.Fatalf("%d subscriptions", got)
 	}
 }
+
+// A rename of a code that a DEFERRABLE foreign key points at, followed in the
+// same set by the update of the rows pointing at it, holds once the set is
+// done and failed statement by statement. A set that leaves the key broken
+// fails at its end, inside its transaction, and bun's record is taken back.
+func TestDeferrableConstraintsAreCheckedWhenTheSetIsDone(t *testing.T) {
+	db := connect(t)
+	ctx := context.Background()
+	run(t, db, "DROP TABLE IF EXISTS deferred_prices, deferred_currencies",
+		"CREATE TABLE deferred_currencies (id bigserial PRIMARY KEY, code text NOT NULL UNIQUE)",
+		`CREATE TABLE deferred_prices (id bigserial PRIMARY KEY, sku text NOT NULL UNIQUE,
+			currency_code text NOT NULL REFERENCES deferred_currencies (code) DEFERRABLE INITIALLY IMMEDIATE)`,
+		"INSERT INTO deferred_currencies (id, code) VALUES (1, 'EUR')",
+		"INSERT INTO deferred_prices (sku, currency_code) VALUES ('a', 'EUR')")
+	rename := fixturechange.Change{Model: "Currency", Kind: fixturechange.Update, ID: "1",
+		Key: fixturechange.Values{"code": fixturechange.Lit("EUR")},
+		Old: fixturechange.Values{"code": fixturechange.Lit("EUR")},
+		New: fixturechange.Values{"code": fixturechange.Lit("EURO")}}
+	repoint := fixturechange.Change{Model: "Price", Kind: fixturechange.Update,
+		Key: fixturechange.Values{"sku": fixturechange.Lit("a")},
+		Old: fixturechange.Values{"currency_code": fixturechange.Lit("EUR")},
+		New: fixturechange.Values{"currency_code": fixturechange.Lit("EURO")}}
+	set := fixturechange.Set{
+		Name: "20260921120000_fixture_euro",
+		Tables: fixturechange.Tables{
+			"Currency": {Name: "deferred_currencies", ID: "id", Key: "code"},
+			"Price":    {Name: "deferred_prices", ID: "id", Key: "sku"},
+		},
+	}
+
+	// Alone, the rename leaves the price pointing at nothing.
+	run(t, db, "DROP TABLE IF EXISTS bun_migrations",
+		"CREATE TABLE bun_migrations (id bigserial PRIMARY KEY, name varchar, group_id bigint, "+
+			"migrated_at timestamptz NOT NULL DEFAULT current_timestamp)",
+		"INSERT INTO bun_migrations (name, group_id) VALUES ('20260921120000', 1)")
+	set.Changes = []fixturechange.Change{rename}
+	err := fixtureapply.Apply(ctx, db, set, quiet(), fixtureapply.WithMigrationName("20260921120000"))
+	if err == nil || !strings.Contains(err.Error(), "a constraint did not hold") ||
+		!errors.Is(err, fixtureapply.ErrRecordRemoved) {
+		t.Fatalf("want the broken key to fail the set and the record taken back, got %v", err)
+	}
+	if got := scan[string](t, db, "SELECT code FROM deferred_currencies"); got != "EUR" {
+		t.Fatalf("nothing may change, code %s", got)
+	}
+
+	set.Changes = []fixturechange.Change{rename, repoint}
+	if _, err := applyReporting(t, db, set); err != nil {
+		t.Fatalf("the set holds once it is done: %v", err)
+	}
+	if got := scan[string](t, db, "SELECT c.code FROM deferred_prices p JOIN deferred_currencies c ON c.code = p.currency_code"); got != "EURO" {
+		t.Fatalf("code %s", got)
+	}
+}
