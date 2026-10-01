@@ -202,9 +202,11 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 			return fmt.Errorf("set lock_timeout to %s: %w", lockTimeout, err)
 		}
 	}
-	if restore, err = withDeferredConstraints(ctx, tx, set, restore); err != nil {
+	check, err := withDeferredConstraints(ctx, tx, set)
+	if err != nil {
 		return err
 	}
+	end := func() error { return finish(ctx, tx, set, revert, check, restore, outcomes) }
 	if set.SeedGuardTable != "" {
 		seeded, err := tableHasRows(ctx, tx, set.SeedGuardTable)
 		if err != nil {
@@ -216,7 +218,7 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 			o.log(ctx, slog.LevelInfo, "fixture change set not run, the database is not seeded", out,
 				set.Name+": "+msg)
 			o.report(out)
-			return finish(ctx, tx, set, revert, restore, outcomes)
+			return end()
 		}
 	}
 	// Revert undoes what the last Apply here did, which the audit table
@@ -304,23 +306,30 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 	if err := r.syncSequences(ctx, o); err != nil {
 		return err
 	}
-	return finish(ctx, tx, set, revert, restore, outcomes)
+	return end()
 }
 
-// finish ends a run that succeeded: it checks the deferred constraints and
-// puts back the session's settings, and then, last of all in the transaction,
-// writes the run's row into the set's audit table, if it has one. A run that
-// fails before this point writes no row; one that fails here rolls back.
-func finish(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, restore func(context.Context) error,
+// finish ends a run that succeeded: it checks the deferred constraints, writes
+// the run's row into the set's audit table, if it has one, and puts back the
+// session's settings. A run that fails before this point writes no row; one
+// that fails here rolls back.
+//
+// The row is written while the set's lock_timeout is in force: put back, the
+// session's is often 0, and a lock on the audit table -- an ALTER TABLE, a
+// VACUUM FULL -- would hold the migration, and the rows it has locked, for as
+// long as it lasts.
+func finish(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, check, restore func(context.Context) error,
 	outcomes []Outcome) error {
 
-	if err := restore(ctx); err != nil {
+	if err := check(ctx); err != nil {
 		return err
 	}
-	if set.AuditTable == "" {
-		return nil
+	if set.AuditTable != "" {
+		if err := writeAudit(ctx, tx, set, revert, outcomes); err != nil {
+			return err
+		}
 	}
-	return writeAudit(ctx, tx, set, revert, outcomes)
+	return restore(ctx)
 }
 
 // revertBase is the audit rows of the runs of Apply a Revert undoes, or the
@@ -328,6 +337,9 @@ func finish(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool,
 // does with them, or without them.
 func revertBase(ctx context.Context, tx bun.IDB, set fixturechange.Set, o options) (Applies, *AuditRecord, error) {
 	base, reverted, err := ApplyRecords(ctx, tx, set)
+	if pgerr.State(err) == pgerr.LockNotAvailable {
+		return nil, nil, auditLocked(set, "reading what to revert from", err)
+	}
 	if pgerr.State(err) == pgerr.InsufficientPrivilege {
 		return nil, nil, fmt.Errorf("%s: the role running the migration may not read the audit table %s, which says "+
 			"what to revert, so nothing was changed: grant it SELECT and INSERT on the table: %w", set.Name,
@@ -541,7 +553,7 @@ func privilege(err error) error {
 }
 
 // withDeferredConstraints makes every DEFERRABLE constraint wait for the end of
-// the change set, and returns a restore that checks them all there.
+// the change set, and returns a check that checks them all there.
 //
 // A change set holds as a whole, not after each statement: the rename of a
 // currency code that a DEFERRABLE foreign key points at is followed, in the
@@ -553,8 +565,7 @@ func privilege(err error) error {
 // check also covers whatever the caller had left deferred, and afterwards
 // every constraint is back in the mode it is declared with; see
 // deferredByDefault.
-func withDeferredConstraints(ctx context.Context, tx bun.IDB, set fixturechange.Set,
-	restore func(context.Context) error) (func(context.Context) error, error) {
+func withDeferredConstraints(ctx context.Context, tx bun.IDB, set fixturechange.Set) (func(context.Context) error, error) {
 
 	if _, err := tx.ExecContext(ctx, "SET CONSTRAINTS ALL DEFERRED"); err != nil {
 		return nil, fmt.Errorf("defer the constraints to the end of the change set: %w", err)
@@ -577,10 +588,7 @@ func withDeferredConstraints(ctx context.Context, tx bun.IDB, set fixturechange.
 			return fmt.Errorf("%s: once every change was made, a constraint did not hold, so nothing was "+
 				"changed: %w", set.Name, privilege(err))
 		}
-		if err := deferredByDefault(ctx, tx); err != nil {
-			return err
-		}
-		return restore(ctx)
+		return deferredByDefault(ctx, tx)
 	}, nil
 }
 

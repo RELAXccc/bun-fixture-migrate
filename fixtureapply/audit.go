@@ -357,6 +357,9 @@ func writeAudit(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert b
 	if _, err := tx.ExecContext(ctx, "INSERT INTO "+table+" (set_name, direction, set_sha256, applied_at, applied_by, "+
 		"outcomes) VALUES (?, ?, ?, clock_timestamp(), current_user, ?::jsonb)",
 		set.Name, string(direction), SetSHA256(set), string(data)); err != nil {
+		if pgerr.State(err) == pgerr.LockNotAvailable {
+			return auditLocked(set, "once every change was made, recording the run in", err)
+		}
 		if pgerr.State(err) == pgerr.InsufficientPrivilege {
 			return fmt.Errorf("%s: the role running the migration may not write into the audit table %s, so nothing "+
 				"was changed: grant it SELECT and INSERT on the table, or take AuditTable out of the migration to "+
@@ -365,6 +368,20 @@ func writeAudit(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert b
 		return fmt.Errorf("%s: record the run in the audit table %s: %w", set.Name, set.AuditTable, err)
 	}
 	return nil
+}
+
+// auditLocked is the error of a run that waited for a lock another session
+// held on the audit table for longer than the lock timeout.
+func auditLocked(set fixturechange.Set, what string, err error) error {
+	limit := "the session's lock_timeout"
+	if set.LockTimeout != "" {
+		limit = "the lock timeout of " + set.LockTimeout
+	}
+	out := Outcome{Set: set.Name, Index: -1, Status: StatusFailed, Problem: ProblemLockTimeout,
+		Message: fmt.Sprintf("%s the audit table %s waited for a lock another session held on it, such as an "+
+			"ALTER TABLE or a VACUUM FULL, for longer than %s, so nothing was changed; the change set runs again "+
+			"on the next deploy", what, set.AuditTable, limit)}
+	return &ChangeError{Outcome: out, err: fmt.Errorf("%s: %w", out.Message, err)}
 }
 
 // ensureAuditTable creates the audit table, with its comments, when it is not

@@ -743,7 +743,9 @@ files the program read, returning a `*SyncResult` with the diff, the findings an
 
 With `audit_table` set, a generated migration carries it as `fixturechange.Set.AuditTable`, and every
 `Apply` and `Revert` of the set that succeeds writes one row into it, last in the transaction that
-made its changes and under the advisory lock the set holds. A run that fails rolls back and writes
+made its changes and under the advisory lock the set holds, and under its `lock_timeout`: a lock
+another session holds on the table, an `ALTER TABLE` or a `VACUUM FULL`, fails the run as a lock on
+a row does, rather than holding the migration and the rows it changed for as long as it lasts. A run that fails rolls back and writes
 nothing. The table is created the first time, with comments saying what it is; that takes `CREATE`
 on its schema, and a role without it gets a sentence saying so, and nothing is changed. A table
 created by another role needs `SELECT` and `INSERT` granted to the role that migrates. A row-level
