@@ -251,18 +251,26 @@ func (r *runner) idTakenByAnotherRow(ctx context.Context, c fixturechange.Change
 		}
 		return "", fmt.Errorf("look for the row holding %s = %s: %w", t.ID, id, err)
 	}
-	if t.Key != "" {
-		keyCol, err := quoteIdent(t.Key)
+	// The row is named by the model's key column, or, for a model nobody
+	// points at, by the columns of the change's natural key.
+	cols := []string{t.Key}
+	if t.Key == "" {
+		cols = sortedColumns(c.Key)
+	}
+	var parts []string
+	for _, col := range cols {
+		q, err := quoteIdent(col)
 		if err != nil {
 			return "", err
 		}
-		var label string
-		q := fmt.Sprintf("SELECT %s::text FROM %s WHERE %s = ? LIMIT 1", keyCol, table, idCol)
-		if err := r.tx.QueryRowContext(ctx, q, found).Scan(&label); err != nil && !isNoRows(err) {
-			return "", err
-		} else if err == nil {
-			return fmt.Sprintf("%s = %s (%s %s)", t.ID, found, t.Key, label), nil
-		}
+		parts = append(parts, fmt.Sprintf("'%s=' || coalesce(%s::text, 'NULL')", col, q))
+	}
+	var label string
+	q := fmt.Sprintf("SELECT concat_ws(',', %s) FROM %s WHERE %s = ? LIMIT 1", strings.Join(parts, ", "), table, idCol)
+	if err := r.tx.QueryRowContext(ctx, q, found).Scan(&label); err != nil && !isNoRows(err) {
+		return "", err
+	} else if err == nil && label != "" {
+		return fmt.Sprintf("%s = %s (%s)", t.ID, found, label), nil
 	}
 	return t.ID + " = " + found, nil
 }

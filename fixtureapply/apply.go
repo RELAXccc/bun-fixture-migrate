@@ -140,7 +140,7 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 		}
 	}
 
-	r := &runner{tx: tx, set: set, revert: revert, refs: map[string]string{}, resync: map[string]bool{},
+	r := &runner{tx: tx, set: set, revert: revert, dryRun: o.dryRun, refs: map[string]string{}, resync: map[string]bool{},
 		types: map[string]map[string]colType{}}
 	order := make([]int, len(set.Changes))
 	for i := range order {
@@ -377,6 +377,8 @@ type runner struct {
 	// compared with what the migration wrote rather than with what it was
 	// generated against.
 	revert bool
+	// dryRun is WithDryRun: no sequence is moved.
+	dryRun bool
 	refs   map[string]string // model\x00key -> resolved id
 	// resync collects the models that got an explicit id written into a
 	// sequence-backed table.

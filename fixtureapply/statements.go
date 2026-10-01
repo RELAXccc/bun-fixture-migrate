@@ -44,6 +44,17 @@ func (r *runner) insert(ctx context.Context, c fixturechange.Change, t fixturech
 		}
 	}
 
+	// The sequence moves past an explicit id before the row is written, not
+	// only once the set is done. The application inserting into the same
+	// table meanwhile would otherwise draw that id from the sequence and fail
+	// on the primary key, or make this insert fail. setval is not undone by a
+	// rollback; a sequence left ahead only leaves a gap.
+	if id, ok := c.New[t.ID]; ok && t.Serial && id.Ref == nil && !id.IsNull && !r.dryRun {
+		if err := advanceSequence(ctx, r.tx, table, t.ID, id.Lit); err != nil {
+			return outcome{}, err
+		}
+	}
+
 	var cols, exprs []string
 	var args []any
 	explicitID := false

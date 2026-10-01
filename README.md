@@ -137,7 +137,8 @@ configuration later does not change what an old migration does. At run time `fix
   reach them, unless the model says `deletes: cascade`;
 - diagnoses every row count of zero, as below, and takes back bun's record of a migration that
   failed;
-- moves the sequence past any explicit id it wrote;
+- moves the sequence past an explicit id before it writes it, so an insert by the application
+  meanwhile cannot draw that id;
 - logs one line per row, or hands every row's outcome to `fixtureapply.WithReport`.
 
 `Revert` is the same set backwards, every change inverted and guarded the same way. A rename finds

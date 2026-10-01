@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
 	"github.com/RELAXccc/bun-fixture-migrate/fixtureapply"
@@ -960,5 +961,63 @@ func TestARevertSaysWhatItLeftAlone(t *testing.T) {
 	}
 	if got := scan[int64](t, db, "SELECT price_cents FROM plans WHERE name = 'team'"); got != 3333 {
 		t.Fatalf("price_cents = %d", got)
+	}
+}
+
+// The application inserts into a table the migration writes explicit ids into,
+// while the migration runs. The sequence was moved past those ids only once
+// the whole set was done, so the application drew one of them meanwhile, and
+// one of the two inserts failed on the primary key.
+func TestTheSequenceMovesBeforeAnExplicitIDIsWritten(t *testing.T) {
+	db := testDB(t)
+	seed(t, db)
+	ctx := context.Background()
+	set := changeSet()
+	// pro, with id 3 while the sequence stands at 2, then team's update,
+	// which waits for a lock while the application inserts.
+	set.Changes = set.Changes[:3]
+	admin, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Rollback()
+	if _, err := admin.ExecContext(ctx, "SELECT 1 FROM plans WHERE name = 'team' FOR UPDATE"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- fixtureapply.Apply(ctx, db, set, quiet()) }()
+	for i := 0; scan[int64](t, db, "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' "+
+		"AND datname = current_database()") == 0; i++ {
+		if i == 100 {
+			t.Fatal("the change set never waited for the row")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	got := scan[int64](t, db, "SELECT nextval(pg_get_serial_sequence('plans', 'id'))")
+	if err := admin.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got <= 3 {
+		t.Fatalf("the application drew id %d while the migration was writing id 3", got)
+	}
+}
+
+// An id held by a row of a model nobody points at, which has no key column to
+// name it by, is named by the change's natural key.
+func TestAnIDHeldByAnotherRowIsNamedByItsKey(t *testing.T) {
+	db := testDB(t)
+	seed(t, db)
+	set := changeSet()
+	set.Tables["Feature"] = fixturechange.Table{Name: "features", ID: "id", Serial: true}
+	set.Changes = []fixturechange.Change{{Model: "Feature", Kind: fixturechange.Insert,
+		Key: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "team"), "code": fixturechange.Lit("sso")},
+		New: fixturechange.Values{"id": fixturechange.Lit("1"), "plan_id": fixturechange.RefTo("Plan", "team"),
+			"code": fixturechange.Lit("sso")}}}
+	_, err := applyReporting(t, db, set)
+	if err == nil || !strings.Contains(err.Error(), "already held by the row id = 1 (code=api,plan_id=1)") {
+		t.Fatalf("the row holding the id has to be named, got %v", err)
 	}
 }
