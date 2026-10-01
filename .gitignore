@@ -1,3 +1,4 @@
 # Written and removed again by the compile and migrator checks in dbtest.
 /dbtest/buildcheck/
 /dbtest/migratorcheck/
+/dbtest/projectmigratorcheck/

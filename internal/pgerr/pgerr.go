@@ -38,7 +38,21 @@ const (
 	QueryCanceled = "57014"
 	// ReadOnlyTransaction is a write inside a READ ONLY transaction.
 	ReadOnlyTransaction = "25006"
+	// InsufficientPrivilege is a privilege the role lacks, and also a query
+	// a row-level security policy would filter while row_security is off.
+	InsufficientPrivilege = "42501"
 	// UnsafeNewEnumValue is a value added to an enum used inside the
 	// transaction that added it.
 	UnsafeNewEnumValue = "55P04"
+	// ActiveSQLTransaction is a statement that cannot run inside a
+	// transaction block, such as CREATE INDEX CONCURRENTLY.
+	ActiveSQLTransaction = "25001"
+	// SerializationFailure is a transaction PostgreSQL cannot serialise.
+	SerializationFailure = "40001"
+	// DeadlockDetected is a transaction chosen to break a deadlock.
+	DeadlockDetected = "40P01"
+	// UndefinedTable is a table, view or sequence that does not exist.
+	UndefinedTable = "42P01"
+	// UndefinedColumn is a column that does not exist.
+	UndefinedColumn = "42703"
 )

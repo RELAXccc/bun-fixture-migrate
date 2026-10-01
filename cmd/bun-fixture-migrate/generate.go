@@ -75,7 +75,7 @@ func generate(o streams, args []string) error {
 		}
 		defer db.Close()
 		err = readOnly(o.ctx, db, func(tx bun.Tx) error {
-			tables, err := dbschema.Load(o.ctx, tx, s.cfg.Schema)
+			tables, err := dbschema.Load(o.ctx, tx, s.cfg.Schemas()...)
 			if err != nil {
 				return err
 			}
@@ -112,7 +112,7 @@ func generate(o streams, args []string) error {
 			// Both sides are respelled by the database, so a value written two
 			// ways in two revisions of the file is not a change.
 			err = readOnly(o.ctx, db, func(tx bun.Tx) error {
-				tables, err := dbschema.Load(o.ctx, tx, s.cfg.Schema)
+				tables, err := dbschema.Load(o.ctx, tx, s.cfg.Schemas()...)
 				if err != nil {
 					return err
 				}
@@ -229,8 +229,7 @@ func generate(o streams, args []string) error {
 		return err
 	}
 	if *dryRun {
-		o.stdout.Write(src)
-		return nil
+		return writeOut(o.stdout, src)
 	}
 	if dir == "" {
 		return fmt.Errorf("no out directory in the configuration and no -out")

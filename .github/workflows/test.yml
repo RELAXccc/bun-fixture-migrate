@@ -104,14 +104,18 @@ jobs:
       - name: fuzz
         if: matrix.go == 'stable'
         run: |
-          for target in $(go test -list '^Fuzz' . | grep '^Fuzz'); do
-            go test -run '^$' -fuzz "^${target}\$" -fuzztime 20s .
+          for pkg in . ./cmd/bun-fixture-migrate; do
+            for target in $(go test -list '^Fuzz' "$pkg" | grep '^Fuzz'); do
+              go test -run '^$' -fuzz "^${target}\$" -fuzztime 20s "$pkg"
+            done
           done
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: fuzz-${{ matrix.go }}
-          path: testdata/fuzz
+          path: |
+            testdata/fuzz
+            cmd/bun-fixture-migrate/testdata/fuzz
           if-no-files-found: ignore
 
   # The database suite against every PostgreSQL version still in use, under

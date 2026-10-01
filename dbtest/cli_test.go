@@ -342,8 +342,8 @@ func readFileT(t *testing.T, path string) string {
 }
 
 // A pending schema migration adds a column a pending fixture migration
-// writes. Without -with-sql the plan says the fixture migration fails, which
-// it would, alone; with it, both run in bun's order and succeed, and the
+// writes. Without -with-sql the plan cannot tell whether the fixture migration
+// fails, and says so; with it, both run in bun's order and succeed, and the
 // schema is left as it was.
 func TestPlanRunsPendingSQLMigrations(t *testing.T) {
 	db := itemDB(t)
@@ -358,7 +358,8 @@ func TestPlanRunsPendingSQLMigrations(t *testing.T) {
 	c.write("fixtures/fixture.yml", replaceOnce(t, itemFixture, "      cost: 120\n", "      cost: 120\n      color: red\n"))
 	c.must(0, "generate", "-name", "color", "-no-lint")
 
-	if out := c.must(3, "plan"); !strings.Contains(out, `column "color" does not exist`) ||
+	if out := c.must(1, "plan"); !strings.Contains(out, `column "color" does not exist`) ||
+		!strings.Contains(out, "_fixture_color: could not be planned") ||
 		!strings.Contains(out, "pending before it and not simulated: 20000101000000_add_color") {
 		t.Fatalf("plan without -with-sql:\n%s", out)
 	}

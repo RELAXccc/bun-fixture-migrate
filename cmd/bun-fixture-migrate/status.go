@@ -194,7 +194,8 @@ func status(o streams, args []string) error {
 	_, findings := s.cfg.Worst(head.Findings)
 	errorFindings := 0
 	for _, f := range findings {
-		r.Findings = append(r.Findings, checkFinding{string(f.Kind), f.Model, f.Row, f.Detail})
+		r.Findings = append(r.Findings, checkFinding{Kind: string(f.Kind), Level: string(s.cfg.FindingMode(f.Kind)),
+			Model: f.Model, Row: f.Row, Detail: f.Detail})
 		if s.cfg.FindingMode(f.Kind) == fixturemigrate.ModeError {
 			errorFindings++
 		}
@@ -319,7 +320,7 @@ func (s *setup) uncoveredInDB(o streams, tx bun.Tx, r *statusReport, old, head *
 	if err != nil {
 		return nil, err
 	}
-	tables, err := dbschema.Load(o.ctx, tx, s.cfg.Schema)
+	tables, err := dbschema.Load(o.ctx, tx, s.cfg.Schemas()...)
 	if err != nil {
 		return nil, err
 	}

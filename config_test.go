@@ -190,3 +190,18 @@ func TestTheLocksTable(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+// The catalog is read from every schema a model's table is in, the default
+// one first and each other once.
+func TestSchemasAreEverySchemaATableIsIn(t *testing.T) {
+	cfg := &Config{Fixture: "f.yml", Schema: "app", Models: map[string]*Model{
+		"A": {Table: "plans"}, "B": {Table: "billing.prices"}, "C": {Table: "billing.taxes"},
+		"D": {Table: "app.features"}, "E": {Table: "audit.events"},
+	}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(cfg.Schemas(), ","); got != "app,billing,audit" {
+		t.Fatal(got)
+	}
+}

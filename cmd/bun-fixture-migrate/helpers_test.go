@@ -28,7 +28,7 @@ func TestCheckJSONTellsValuesApart(t *testing.T) {
 		New: fixturechange.Values{"note": fixturechange.Null(), "currency_id": fixturechange.RefTo("Currency", "USD")},
 	}}}}
 	var buf bytes.Buffer
-	if err := writeJSON(&buf, checkJSON(res)); err != nil {
+	if err := writeJSON(&buf, checkJSON(policyConfig(t, ""), res)); err != nil {
 		t.Fatal(err)
 	}
 	var back struct {
@@ -51,6 +51,37 @@ func TestCheckJSONTellsValuesApart(t *testing.T) {
 	}
 	if jsonValues(nil) != nil {
 		t.Fatal("no values is no object")
+	}
+}
+
+// policyConfig is a prepared configuration with one policy line.
+func policyConfig(t *testing.T, policy string) *fixturemigrate.Config {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "c.yml")
+	if err := os.WriteFile(path, []byte("fixture: f.yml\n"+policy+"models:\n  Plan: {table: plans}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := fixturemigrate.LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+// A finding the policy makes a warning is reported and is not disagreement,
+// in the JSON as in the exit code; one it makes an error is.
+func TestCheckJSONAgreesDespiteAWarning(t *testing.T) {
+	res := &fixturemigrate.CheckResult{Result: &fixturemigrate.Result{}, Findings: []fixturemigrate.Finding{
+		{Kind: fixturemigrate.FindingZeroDefault, Model: "Plan", Row: "name=x", Detail: "a zero"}}}
+	for policy, want := range map[string]checkFinding{
+		"policy: {zero_default: warn}\n":  {Kind: "zero against a default", Level: "warn"},
+		"policy: {zero_default: error}\n": {Kind: "zero against a default", Level: "error"},
+	} {
+		report := checkJSON(policyConfig(t, policy), res)
+		if len(report.Findings) != 1 || report.Findings[0].Level != want.Level ||
+			report.Agree != (want.Level == "warn") {
+			t.Errorf("%s: %+v", policy, report)
+		}
 	}
 }
 
@@ -113,9 +144,12 @@ func TestPrintPlanSaysWhatHappened(t *testing.T) {
 	var out bytes.Buffer
 	o := streams{ctx: context.Background(), stdout: &out, stderr: &out}
 	printPlan(o, &planReport{
+		RowsLocked: 1, LockedSeconds: 7.25,
 		NotSimulated: []string{"20260101000000_backfill"},
+		Notes:        []string{"20260101000000_backfill.up.sql holds a template"},
+		Problems:     []string{"a.go and b.sql share the name 1"},
 		Migrations: []plannedMigration{
-			{ID: "1_schema", Kind: "sql", Result: "succeeds"},
+			{ID: "1_schema", Kind: "sql", Result: "succeeds", Notes: []string{"a blank line"}},
 			{ID: "2_fixture_a", Kind: "fixture", Result: "fails", Error: "boom", After: []string{"20260101000000_backfill"},
 				Changes: []fixtureapply.Outcome{
 					{Index: 0, Model: "Plan", Key: "name=pro", Kind: fixturechange.Insert, Status: fixtureapply.StatusApplied, Rows: 1},
@@ -134,7 +168,10 @@ func TestPrintPlanSaysWhatHappened(t *testing.T) {
 		"failed Plan name=team update [missing row]: gone", "sequence moved", "boom",
 		"pending before it and not simulated: 20260101000000_backfill", "3_fixture_b: not reached",
 		"4_fixture_c: could not be planned", "5_fixture_d: would do nothing", "not simulated, not fixture migrations",
-		"rolled back: nothing was changed, except that an id an insert drew",
+		"note: a blank line", "note: 20260101000000_backfill.up.sql holds a template",
+		"problems a.go and b.sql share the name 1",
+		"except sequences, which no rollback undoes",
+		"for 7.25s it held locked the 1 row it wrote and what the SQL migrations locked",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q in:\n%s", want, out.String())
@@ -151,8 +188,21 @@ func TestPrintPlanSaysWhatHappened(t *testing.T) {
 	if n := strings.Count(out.String(), "no row of plans"); n != 1 {
 		t.Errorf("the failure is printed %d times:\n%s", n, out.String())
 	}
-	if strings.Contains(out.String(), "an id an insert drew") {
+	if strings.Contains(out.String(), "an id an insert drew") || strings.Contains(out.String(), "held locked") {
 		t.Errorf("nothing was inserted:\n%s", out.String())
+	}
+
+	// Fixture migrations alone: an insert's id, and the rows it held.
+	out.Reset()
+	printPlan(o, &planReport{RowsLocked: 2, LockedSeconds: 0.042, Migrations: []plannedMigration{{ID: "2_fixture_a",
+		Kind: "fixture", Result: "succeeds", Changes: []fixtureapply.Outcome{{Index: 0, Model: "Plan", Key: "name=pro",
+			Kind: fixturechange.Insert, Status: fixtureapply.StatusApplied, Rows: 2}}}}})
+	text = strings.Join(strings.Fields(out.String()), " ")
+	for _, want := range []string{"rolled back: nothing was changed, except that an id an insert drew",
+		"for 42ms it held locked the 2 rows it wrote; other sessions writing them waited"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in:\n%s", want, out.String())
+		}
 	}
 }
 
@@ -171,7 +221,7 @@ func TestPrintSync(t *testing.T) {
 	}
 	out.Reset()
 	printSync(o, syncReport{Applied: true, Refusals: []checkRefusal{{"Plan", "x", "renamed"}},
-		Findings: []checkFinding{{"invalid value", "Plan", "x", "bad"}},
+		Findings: []checkFinding{{Kind: "invalid value", Model: "Plan", Row: "x", Detail: "bad"}},
 		Changes:  []fixtureapply.Outcome{{Index: 0, Status: fixtureapply.StatusApplied}}})
 	for _, want := range []string{"refused: Plan x: renamed", "invalid value: Plan x: bad", "applied 1 change"} {
 		if !strings.Contains(out.String(), want) {

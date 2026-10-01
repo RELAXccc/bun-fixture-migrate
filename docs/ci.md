@@ -6,18 +6,20 @@ The checks worth running, and ready-made jobs for GitHub Actions and GitLab CI. 
 | Job | Needs a database | Fails when |
 | --- | --- | --- |
 | `status -offline` | no | a fixture edit came without its migration; a change `generate -allow-partial` left out is not migrated; a fixture migration from another branch is not in the state file; two migrations share a name |
-| `plan -strict` | a copy of production, or production | a pending fixture migration would fail or skip a change |
+| `plan -strict` | a copy of production, or production off-peak | a pending fixture migration would fail or skip a change |
 | `status -require-applied` | the deployed database | a migration in the directory is not applied; a deploy that died left bun's lock behind. Add `-strict-order` to fail on a pending migration named before one already applied |
 | `check` | the deployed database | the database and the fixture file disagree (exit 3) |
 
 Exit code 3 always means "found something" and 1 "could not run", so a job can treat drift as a
-warning and a broken connection as a failure.
+warning and a broken connection as a failure. A finding the configuration's policy makes a warning is
+reported and does not fail a job. `check`, `status`, `plan` and `sync` take `-json` for a report to
+archive or alert on; see the [reference](reference.md#json-output). `export -stdout` writes the same
+bytes for the same database, so a job can diff it against the committed fixture file.
 
 `status -offline` compares the fixture files with the state file. Until a project has one, it
 compares them with their last commit, which needs git in the job's image and a checkout; with
 neither it exits 1 rather than pass a change it cannot see. Run `baseline` once and commit the
-state file to make the job need nothing but the checkout. Every command takes `-json` for a report to archive
-or alert on; see the [reference](reference.md#json-output).
+state file to make the job need nothing but the checkout.
 
 Pin the tool to one version, the same as the `fixtureapply` your migrations import through
 `go.mod`. Build it with a supported Go release: the tool's own `go.mod` names the oldest Go it
@@ -57,8 +59,10 @@ jobs:
 The output `exit-code` is the command's exit code; the step fails unless it is 0. Inputs reach the
 command through environment variables, never by being pasted into a script.
 
-A database is whatever the configuration names, usually `database: env:DATABASE_URL`; give the step
-that variable from a secret:
+A database is whatever the configuration names, usually `database: env:DATABASE_URL`, or what
+`-dsn` names for one command, such as `-dsn env:PRODUCTION_READONLY_DSN`; give the step that variable
+from a secret. `$BUN_FIXTURE_MIGRATE_CONFIG` names the configuration for every command of a job that
+does not run where it is:
 
 ```yaml
   plan:
@@ -77,8 +81,11 @@ that variable from a secret:
           args: -strict
 ```
 
-`plan` writes and rolls back, so its database user needs the rights the migrations need. `check`
-and `status` only read, and are fine with a read-only user or a standby.
+`plan` writes and rolls back, so its database user needs the rights the migrations need. Until it
+rolls back it holds locked every row it wrote, and with `-with-sql` what the SQL migrations lock, so
+against production a large change set holds up the application's writes for as long as the plan
+runs; its report says how many rows and how long. Point it at a copy of production where you can.
+`check` and `status` only read, and are fine with a read-only user or a standby.
 
 To treat drift as a warning in a scheduled job, let the step fail softly and look at the code:
 

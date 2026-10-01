@@ -41,14 +41,14 @@ func syncCmd(o streams, args []string) error {
 	}
 	defer db.Close()
 	res, err := fixturemigrate.Sync(o.ctx, db, s.cfg, files, fixturemigrate.SyncOptions{DryRun: !*yes})
-	if res == nil {
+	// A sync that stopped before it changed anything has no report to give
+	// but its error: an empty one would say the database already holds the
+	// files. A refusal is reported, and so are the changes as far as they ran.
+	if res == nil || err != nil && !errors.Is(err, fixturemigrate.ErrSyncRefused) && !ranChanges(res) {
 		return err
 	}
-	report := syncReport{Applied: res.Applied, DryRun: !*yes, Findings: []checkFinding{},
+	report := syncReport{Applied: res.Applied, DryRun: !*yes, Findings: findingsJSON(s.cfg, res.Findings),
 		Refusals: []checkRefusal{}, Changes: []fixtureapply.Outcome{}}
-	for _, f := range res.Findings {
-		report.Findings = append(report.Findings, checkFinding{string(f.Kind), f.Model, f.Row, f.Detail})
-	}
 	if res.Diff != nil {
 		for _, r := range res.Diff.Refusals {
 			report.Refusals = append(report.Refusals, checkRefusal{r.Model, r.Key, r.Reason})
@@ -72,6 +72,16 @@ func syncCmd(o streams, args []string) error {
 		fmt.Fprintln(o.stderr, "nothing was changed; run it again with -yes to make these changes")
 	}
 	return nil
+}
+
+// ranChanges reports whether a sync got as far as running a change.
+func ranChanges(res *fixturemigrate.SyncResult) bool {
+	for _, c := range res.Outcomes {
+		if c.Index >= 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func printSync(o streams, r syncReport) {

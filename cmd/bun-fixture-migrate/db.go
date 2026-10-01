@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 
 	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
+	"github.com/RELAXccc/bun-fixture-migrate/internal/pgerr"
 
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
@@ -17,16 +19,16 @@ import (
 )
 
 // resolveDSN reads a DSN written as "env:NAME" from the environment, so the
-// password stays out of the repository.
+// password stays out of the repository and out of the command line.
 func resolveDSN(dsn string) (string, error) {
 	if name, ok := strings.CutPrefix(dsn, "env:"); ok {
 		dsn = os.Getenv(name)
 		if dsn == "" {
-			return "", fmt.Errorf("the configuration reads the database DSN from %s, which is not set", name)
+			return "", fmt.Errorf("the database DSN is to be read from the environment variable %s, which is not set", name)
 		}
 	}
 	if dsn == "" {
-		return "", fmt.Errorf("no database in the configuration file; this command needs one")
+		return "", fmt.Errorf("no database in the configuration file and no -dsn; this command needs one")
 	}
 	return dsn, nil
 }
@@ -131,6 +133,12 @@ func scrub(msg string, u *url.URL) string {
 // that would. REPEATABLE READ makes every query in fn see the same snapshot,
 // so a row inserted between reading two tables cannot turn up as a reference
 // to a row that is not there.
+//
+// row_security is off, so a role a row-level security policy limits gets an
+// error rather than the rows the policy lets through. Read through such a
+// policy, master data is missing rows nothing says are missing: an export
+// writes a file without them, and a migration generated from it deletes them
+// everywhere else.
 func readOnly(ctx context.Context, db *bun.DB, fn func(tx bun.Tx) error) error {
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
@@ -147,5 +155,27 @@ func readOnly(ctx context.Context, db *bun.DB, fn func(tx bun.Tx) error) error {
 	if err := fixturemigrate.PrepareSession(ctx, tx); err != nil {
 		return err
 	}
-	return fn(tx)
+	if _, err := tx.ExecContext(ctx, "SELECT set_config('row_security', 'off', true)"); err != nil {
+		return err
+	}
+	return rowSecurity(fn(tx))
+}
+
+// rlsTable is the table PostgreSQL names when row_security is off and a
+// policy would filter a query.
+var rlsTable = regexp.MustCompile(`row-level security policy for table "(.*)"`)
+
+// rowSecurity turns PostgreSQL's refusal to read past a row-level security
+// policy into what to do about it.
+func rowSecurity(err error) error {
+	if pgerr.State(err) != pgerr.InsufficientPrivilege {
+		return err
+	}
+	m := rlsTable.FindStringSubmatch(pgerr.Message(err))
+	if m == nil {
+		return err
+	}
+	return fmt.Errorf("row-level security hides rows of %s from this role, so what it reads is not all the "+
+		"master data; connect as a role that bypasses row-level security (BYPASSRLS) or owns the table "+
+		"without FORCE ROW LEVEL SECURITY", m[1])
 }

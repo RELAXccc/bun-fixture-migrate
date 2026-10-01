@@ -36,6 +36,8 @@ func jsonValues(v fixturechange.Values) map[string]any {
 }
 
 type checkReport struct {
+	// Agree is what check's exit code says: true for 0. A finding the
+	// policy makes a warning is listed and leaves it true.
 	Agree    bool           `json:"agree"`
 	Findings []checkFinding `json:"findings"`
 	Refusals []checkRefusal `json:"refusals"`
@@ -46,7 +48,9 @@ type checkReport struct {
 }
 
 type checkFinding struct {
-	Kind   string `json:"kind"`
+	Kind string `json:"kind"`
+	// Level is what the policy makes of the kind: "error" or "warn".
+	Level  string `json:"level"`
 	Model  string `json:"model"`
 	Row    string `json:"row,omitempty"`
 	Detail string `json:"detail"`
@@ -66,12 +70,20 @@ type checkChange struct {
 	New   map[string]any `json:"file,omitempty"`
 }
 
-func checkJSON(res *fixturemigrate.CheckResult) checkReport {
-	out := checkReport{Agree: !res.Drifted(),
-		Findings: []checkFinding{}, Refusals: []checkRefusal{}, Changes: []checkChange{}}
-	for _, f := range res.Findings {
-		out.Findings = append(out.Findings, checkFinding{string(f.Kind), f.Model, f.Row, f.Detail})
+// findingsJSON is findings as a program reads them, each with the level the
+// policy gives its kind.
+func findingsJSON(cfg *fixturemigrate.Config, findings []fixturemigrate.Finding) []checkFinding {
+	out := []checkFinding{}
+	for _, f := range findings {
+		out = append(out, checkFinding{Kind: string(f.Kind), Level: string(cfg.FindingMode(f.Kind)),
+			Model: f.Model, Row: f.Row, Detail: f.Detail})
 	}
+	return out
+}
+
+func checkJSON(cfg *fixturemigrate.Config, res *fixturemigrate.CheckResult) checkReport {
+	out := checkReport{Agree: res.Agree(cfg),
+		Findings: findingsJSON(cfg, res.Findings), Refusals: []checkRefusal{}, Changes: []checkChange{}}
 	for _, r := range res.Refusals {
 		out.Refusals = append(out.Refusals, checkRefusal{r.Model, r.Key, r.Reason})
 	}

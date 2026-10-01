@@ -171,7 +171,7 @@ func (s *setup) baselineDiff(o streams, before, next *fixturemigrate.Snapshot, o
 		}
 		defer db.Close()
 		err = readOnly(o.ctx, db, func(tx bun.Tx) error {
-			tables, err := dbschema.Load(o.ctx, tx, s.cfg.Schema)
+			tables, err := dbschema.Load(o.ctx, tx, s.cfg.Schemas()...)
 			if err != nil {
 				return err
 			}

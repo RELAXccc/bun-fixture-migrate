@@ -465,6 +465,22 @@ func (c *Config) QualifiedTable(m *Model) string {
 	return c.Schema + "." + m.Table
 }
 
+// Schemas is every schema a model's table is in: Schema, for the tables
+// named without one, and the schema of every table named with one. The
+// catalog has to be read from all of them; a model in a schema it was not
+// read from looks like a table that does not exist.
+func (c *Config) Schemas() []string {
+	out := []string{c.Schema}
+	seen := map[string]bool{c.Schema: true}
+	for _, name := range c.ModelNames() {
+		if schema, _, ok := strings.Cut(c.Models[name].Table, "."); ok && !seen[schema] {
+			seen[schema] = true
+			out = append(out, schema)
+		}
+	}
+	return out
+}
+
 // DependencyOrder sorts the models so a model comes after everything it points
 // at, which is the order a fixture file has to be written in for dbfixture to
 // resolve its references. A cycle is reported rather than broken: only you can

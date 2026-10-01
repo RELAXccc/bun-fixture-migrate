@@ -29,15 +29,17 @@ against production itself: it runs in a transaction PostgreSQL holds to `READ ON
 | after it, and on a schedule | `check` | drift between the database and the fixture file |
 
 [CI](ci.md) has ready-made jobs for all of them. `plan` against production itself is safe too:
-it rolls back, holds row locks only for the moment it runs, gives up on a lock after
-`-lock-timeout` (5s), and is refused against a standby.
+it rolls back, gives up on a lock after `-lock-timeout` (5s), and is refused against a standby. It
+does hold the rows its changes touch locked until it rolls back, and says how many and for how long;
+a change set of thousands of rows can hold application writes to those rows for seconds, so plan a
+large one against a copy, or off-peak.
 
 ## What touches production, and how
 
 | | |
 | --- | --- |
 | `export`, `check`, `status`, `scaffold`, `generate -from-db` | read, in one `REPEATABLE READ, READ ONLY` transaction |
-| `plan` | writes in one transaction and always rolls it back. A sequence an insert drew from stays advanced, which only leaves a gap in the ids; a sequence the migration would move is reported, not moved |
+| `plan` | writes in one transaction and always rolls it back. A sequence an insert drew from stays advanced, which only leaves a gap in the ids; a sequence the migration would move is reported, not moved. Under `-with-sql`, a SQL migration's own `setval` or `nextval` is not rolled back either, because PostgreSQL's sequences are not transactional; plan notes such a migration |
 | `sync` | writes, with `-yes`. Meant for databases that are not deployed to |
 | a fixture migration | writes, in one transaction, under a transaction-scoped advisory lock |
 

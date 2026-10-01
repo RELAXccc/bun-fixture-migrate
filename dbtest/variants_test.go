@@ -9,7 +9,9 @@ package dbtest_test
 // dbfixture; the change set goes through the generated Go file and is read
 // back from it, as status and plan read it; it is applied, applied again,
 // reverted, and every database state is compared with what dbfixture seeds;
-// and the new state is checked against its file, exported, and loaded back.
+// and the new state is checked against its file, by Sync as well, exported,
+// and loaded back. The catalog is read from the schemas the configuration
+// says, as the commands read it.
 
 import (
 	"context"
@@ -112,11 +114,15 @@ func (v variant) run(t *testing.T) {
 
 	v.reset(t, db)
 	loadFixture(t, db, v.next)
+	synced, err := fixturemigrate.Sync(ctx, db, cfg, []fixturemigrate.FixtureFile{{Path: "new", Data: []byte(v.next)}},
+		fixturemigrate.SyncOptions{DryRun: true})
+	if err != nil || len(synced.Outcomes) != 0 {
+		t.Fatalf("Sync of the database seeded from the file: %v %+v", err, synced)
+	}
 	head := fixtureSnapshot(t, cfg, v.next, "new")
 	var exported []byte
 	readOnlyDo(t, db, func(tx bun.Tx, _ map[string]*dbschema.Table) {
-		// Every schema the configuration names.
-		tables, err := dbschema.Load(ctx, tx, schemasOf(cfg)...)
+		tables, err := dbschema.Load(ctx, tx, cfg.Schemas()...)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -148,18 +154,6 @@ func (v variant) run(t *testing.T) {
 	if got := v.state(t, db); got != wantNext {
 		t.Fatalf("the export does not load back\n got %s\nwant %s\n%s", got, wantNext, exported)
 	}
-}
-
-func schemasOf(cfg *fixturemigrate.Config) []string {
-	seen := map[string]bool{cfg.Schema: true}
-	out := []string{cfg.Schema}
-	for _, m := range cfg.Models {
-		if i := strings.IndexByte(m.Table, '.'); i > 0 && !seen[m.Table[:i]] {
-			seen[m.Table[:i]] = true
-			out = append(out, m.Table[:i])
-		}
-	}
-	return out
 }
 
 // A join table: two references for a key, a composite primary key, no id.

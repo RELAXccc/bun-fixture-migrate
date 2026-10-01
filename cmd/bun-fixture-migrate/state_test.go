@@ -252,21 +252,6 @@ func TestABadDSNIsASentenceWithoutThePassword(t *testing.T) {
 	}
 }
 
-// bun's reading of a SQL migration: split at --bun:split, blank lines
-// dropped, any other directive refused.
-func TestSplitSQLReadsLikeBun(t *testing.T) {
-	queries, err := splitSQL([]byte("ALTER TABLE a ADD b int;\n\n--bun:split\r\nUPDATE a SET b = 1;\n  \n--bun:split\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(queries) != 2 || queries[0] != "ALTER TABLE a ADD b int;\n" || queries[1] != "UPDATE a SET b = 1;\n" {
-		t.Fatalf("%q", queries)
-	}
-	if _, err := splitSQL([]byte("--bun:nope\nSELECT 1")); err == nil || !strings.Contains(err.Error(), "unknown directive") {
-		t.Fatalf("expected the directive to be refused: %v", err)
-	}
-}
-
 // With no state file and no git to read the fixture file's last revision
 // from, nothing says what the fixture file changes. A gate that passed on that
 // would pass anything.

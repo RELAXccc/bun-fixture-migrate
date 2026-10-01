@@ -1,12 +1,70 @@
 package fixturemigrate
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
+
+	"github.com/uptrace/bun"
 )
+
+// ScaffoldOptions is what Scaffold knows of a database besides its tables;
+// LoadScaffoldOptions reads it from the catalog.
+type ScaffoldOptions struct {
+	// Partitions are the tables, as "schema.table", that are partitions of
+	// another. Their rows are the partitioned table's, which is the model.
+	Partitions map[string]bool
+	// Triggers are, per table, the BEFORE INSERT or UPDATE row triggers on
+	// it, which can write columns of a row as a migration writes it.
+	Triggers map[string][]string
+}
+
+// LoadScaffoldOptions reads the partitions and the row triggers of a schema.
+func LoadScaffoldOptions(ctx context.Context, db bun.IDB, schema string) (ScaffoldOptions, error) {
+	opts := ScaffoldOptions{Partitions: map[string]bool{}, Triggers: map[string][]string{}}
+	rows, err := db.QueryContext(ctx, `
+SELECT n.nspname || '.' || c.relname, '' FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = ? AND c.relispartition`, schema)
+	if err != nil {
+		return opts, fmt.Errorf("read the partitions of %s: %w", schema, err)
+	}
+	if err := scanPairs(rows, func(table, _ string) { opts.Partitions[table] = true }); err != nil {
+		return opts, fmt.Errorf("read the partitions of %s: %w", schema, err)
+	}
+	// tgtype is a bit set: 1 a row trigger, 2 BEFORE, 4 INSERT, 16 UPDATE.
+	rows, err = db.QueryContext(ctx, `
+SELECT n.nspname || '.' || c.relname, t.tgname FROM pg_trigger t
+JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = ? AND NOT t.tgisinternal AND t.tgtype::int & 3 = 3 AND t.tgtype::int & 20 <> 0
+ORDER BY 1, 2`, schema)
+	if err != nil {
+		return opts, fmt.Errorf("read the triggers of %s: %w", schema, err)
+	}
+	if err := scanPairs(rows, func(table, trigger string) {
+		opts.Triggers[table] = append(opts.Triggers[table], trigger)
+	}); err != nil {
+		return opts, fmt.Errorf("read the triggers of %s: %w", schema, err)
+	}
+	return opts, nil
+}
+
+// scanPairs hands every row of two text columns to fn. It reports the
+// iteration's error too: a connection lost halfway is not "no more rows".
+func scanPairs(rows *sql.Rows, fn func(a, b string)) error {
+	defer rows.Close()
+	for rows.Next() {
+		var a, b string
+		if err := rows.Scan(&a, &b); err != nil {
+			return err
+		}
+		fn(a, b)
+	}
+	return rows.Err()
+}
 
 // Scaffold writes a starter configuration from a database.
 //
@@ -21,8 +79,13 @@ import (
 // of your intentions: the natural key in particular is guessed from the
 // narrowest unique index, and a table with no unique index other than its
 // primary key gets one the tool cannot check.
-func Scaffold(tables map[string]*dbschema.Table, only []string, schema string) []byte {
-	names := dbschema.Names(tables)
+func Scaffold(tables map[string]*dbschema.Table, only []string, schema string, opts ScaffoldOptions) []byte {
+	var names []string
+	for _, n := range dbschema.Names(tables) {
+		if !opts.Partitions[n] {
+			names = append(names, n)
+		}
+	}
 	if len(only) > 0 {
 		wanted := map[string]bool{}
 		for _, t := range only {
@@ -114,6 +177,14 @@ func Scaffold(tables map[string]*dbschema.Table, only []string, schema string) [
 					c.Name, fk.RefSchema, fk.RefTable))
 				continue
 			}
+			// A reference holds the target's id. A column holding another
+			// of its columns, a code say, holds a value that is the same in
+			// every database, and is compared as it is.
+			if pk := tables[fk.RefSchema+"."+fk.RefTable].PrimaryKey; len(pk) != 1 || pk[0] != fk.RefColumns[0] {
+				refs = append(refs, fmt.Sprintf("      # %s points at %s.%s, which is not its id: an ordinary column",
+					c.Name, fk.RefTable, fk.RefColumns[0]))
+				continue
+			}
 			refs = append(refs, fmt.Sprintf("      %s: %s", c.Name, target))
 		}
 		if len(refs) > 0 {
@@ -147,6 +218,18 @@ func Scaffold(tables map[string]*dbschema.Table, only []string, schema string) [
 				b.WriteString(line + "\n")
 			}
 		}
+		if ignored := writtenByTheDatabase(t, opts.Triggers[name]); len(ignored) > 0 {
+			b.WriteString("    # GUESS: the database writes these when a row is written, from a default\n" +
+				"    # such as now() or from a trigger, so they are not master data: compared,\n" +
+				"    # a migrated row would be drift the moment it was written. Take a column\n" +
+				"    # out of the list if the fixture files are to set it.\n")
+			fmt.Fprintf(&b, "    ignore: [%s]\n", strings.Join(ignored, ", "))
+		}
+		if triggers := opts.Triggers[name]; len(triggers) > 0 {
+			b.WriteString("    # BEFORE row triggers (" + strings.Join(triggers, ", ") + ") can change a row\n" +
+				"    # as a migration writes it. Put every column they write in ignore, or check\n" +
+				"    # reports it as drift after each migration that touches the row.\n")
+		}
 		if hazards := hazardColumns(t); len(hazards) > 0 {
 			b.WriteString("    # These columns have a non-zero default. bun writes DEFAULT, not the\n" +
 				"    # value, for a zero in such a column, so a fixture row saying 0 here will\n" +
@@ -161,6 +244,30 @@ func Scaffold(tables map[string]*dbschema.Table, only []string, schema string) [
 		}
 	}
 	return []byte(b.String())
+}
+
+// writtenByTheDatabase are the columns of a table the database fills in when a
+// row is written: a timestamp defaulting to the time of the write, and, on a
+// table with a BEFORE row trigger, a timestamp named for an update, which is
+// what such a trigger most often keeps.
+func writtenByTheDatabase(t *dbschema.Table, triggers []string) []string {
+	var out []string
+	for _, c := range t.Columns {
+		if c.Type != "timestamptz" && c.Type != "timestamp" {
+			continue
+		}
+		def := strings.ToLower(c.Default)
+		now := strings.Contains(def, "now()") || strings.Contains(def, "current_timestamp") ||
+			strings.Contains(def, "clock_timestamp()") || strings.Contains(def, "statement_timestamp()") ||
+			strings.Contains(def, "transaction_timestamp()") || strings.Contains(def, "localtimestamp")
+		name := strings.ToLower(c.Name)
+		touched := len(triggers) > 0 && (strings.Contains(name, "updated") || strings.Contains(name, "modified") ||
+			strings.Contains(name, "changed"))
+		if now || touched {
+			out = append(out, c.Name)
+		}
+	}
+	return out
 }
 
 // guessKey is the narrowest unique index that is not the primary key and does
@@ -246,18 +353,38 @@ func modelName(table string) string {
 // singular is the small half of pluralisation: enough to guess a model name
 // from a table name, and wrong often enough that the comment above the output
 // tells you to read it. A real inflection library would be another dependency
-// for a guess you correct by hand anyway.
+// for a guess you correct by hand anyway. Only the last word of a snake_case
+// name is plural.
 func singular(s string) string {
+	if i := strings.LastIndexByte(s, '_'); i >= 0 {
+		return s[:i+1] + singular(s[i+1:])
+	}
+	if word, ok := irregular[s]; ok {
+		return word
+	}
 	switch {
 	case strings.HasSuffix(s, "ies") && len(s) > 3:
 		return s[:len(s)-3] + "y"
-	case strings.HasSuffix(s, "ses"), strings.HasSuffix(s, "xes"), strings.HasSuffix(s, "zes"),
+	case strings.HasSuffix(s, "sses"), strings.HasSuffix(s, "xes"), strings.HasSuffix(s, "zzes"),
 		strings.HasSuffix(s, "ches"), strings.HasSuffix(s, "shes"):
 		return s[:len(s)-2]
-	case strings.HasSuffix(s, "s") && !strings.HasSuffix(s, "ss"):
+	case strings.HasSuffix(s, "ouses"):
+		return s[:len(s)-1]
+	case strings.HasSuffix(s, "uses"):
+		return s[:len(s)-2]
+	case strings.HasSuffix(s, "ss"), strings.HasSuffix(s, "us"), strings.HasSuffix(s, "is"):
+		return s
+	case strings.HasSuffix(s, "s"):
 		return s[:len(s)-1]
 	}
 	return s
+}
+
+// irregular are the plurals the suffix rules get wrong that a table is often
+// named by.
+var irregular = map[string]string{
+	"people": "person", "children": "child", "men": "man", "women": "woman", "criteria": "criterion",
+	"indices": "index", "matrices": "matrix", "analyses": "analysis", "series": "series", "news": "news",
 }
 
 const configHeader = `# bun-fixture-migrate. Written by "bun-fixture-migrate scaffold" from a live
@@ -285,8 +412,9 @@ seed_guard_table: ""
 # long as that transaction stays open, and the application's own writes to
 # those rows queue up behind it.
 lock_timeout: 10s
-# Where export, check and scaffold connect. "env:NAME" reads the DSN from an
-# environment variable, which is how the password stays out of the repository.
+# Where the commands connect, unless -dsn names another database. "env:NAME"
+# reads the DSN from an environment variable, which is how the password stays
+# out of the repository.
 database: env:DATABASE_URL
 `
 

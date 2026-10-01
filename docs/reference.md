@@ -12,8 +12,14 @@ Everything the command and the library take and give back. For what to do with i
 ## Commands
 
 `bun-fixture-migrate <command> [flags]`. Every command but `scaffold` and `version` reads a
-configuration file, `fixture-migrate.yml` in the current directory unless `-config` names another;
-paths in it are relative to it. Every command takes `-h`.
+configuration file: the one `-config` names, else the one `$BUN_FIXTURE_MIGRATE_CONFIG` names, else
+`fixture-migrate.yml` in the current directory. Paths in it are relative to it. Every command takes
+`-h`.
+
+Every command that connects, `export`, `check`, `generate`, `status`, `plan` and `sync`, takes
+`-dsn`: the database to use instead of the configuration's `database`, as a URL or as `env:NAME` to
+read one from the environment, which keeps the password out of the process list. Neither the
+command nor its errors repeat a password.
 
 | Command | Database | Writes |
 | --- | --- | --- |
@@ -28,17 +34,23 @@ paths in it are relative to it. Every command takes `-h`.
 | `version` | none | nothing |
 
 "Reads" is a `REPEATABLE READ, READ ONLY` transaction: PostgreSQL refuses any write in it, and every
-table is read from one snapshot. Such a command works against a hot standby.
+table is read from one snapshot. Such a command works against a hot standby. It runs with
+`row_security` off, so a role that a row-level security policy limits gets an error instead of the
+rows the policy lets through.
 
 ### scaffold
 
 Writes a commented starting configuration from a database's catalog: a model per table, the primary
-key, whether it is serial, the foreign keys as `references`, the column defaults as `defaults`, and
-a natural key guessed from the narrowest unique index besides the primary key. Every guess is marked.
+key, whether it is serial, the foreign keys to a table's id as `references`, the column defaults as
+`defaults`, and a natural key guessed from the narrowest unique index besides the primary key. A
+partition is part of its partitioned table, not a model of its own; a foreign key to another column,
+a code say, is an ordinary column. Timestamps the database writes with a row, from a default such as
+`now()` or, on a table with a `BEFORE` row trigger, an `updated_at`, are proposed for `ignore`, and
+the triggers are named. Every guess is marked.
 
 | Flag | |
 | --- | --- |
-| `-dsn` | the database; default `$DATABASE_URL` |
+| `-dsn` | the database, as a URL or `env:NAME`; default `$DATABASE_URL` |
 | `-o` | write to this file, which must not exist; default standard output |
 | `-schema` | the schema to read, default `public` |
 | `-tables` | comma-separated tables; default all of them |
@@ -49,17 +61,28 @@ Writes the fixture files from the database: models in dependency order, referenc
 naming the target row, anchors from the natural key, values in the notation that loads back as the
 same value. With several fixture files, each model goes back into the file that holds it and a new
 one into the last. Refuses (exit 2) to write a file `dbfixture` would not load back as the database,
-such as a zero bun would replace with a column default.
+such as a zero bun would replace with a column default. Two exports of one database are the same
+bytes: the header holds no time. Output that cannot all be written, to a full disk or a closed pipe,
+is exit 1.
+
+For a model the fixture files hold, it writes what they hold: the columns their rows use, with the
+key and the `ref` column, and the ids only when the rows name them. A column the files never wrote
+is not master data, and the ids of the database exported from mean nothing in another one; written
+into the file, either would be a change of every row to `generate`. A model the files do not hold
+yet is written whole, ids included, unless a default other than a sequence makes its ids up, as
+`gen_random_uuid()` does. Fixture files that cannot be read are replaced whole, with a note.
 
 | Flag | |
 | --- | --- |
 | `-o` | write here instead, with one fixture file only |
 | `-stdout` | write to standard output |
+| `-all-columns` | write every column of every model, not only those the fixture files use |
 
 ### check
 
 Compares the database with the fixture files and reports every difference, every finding and every
-difference `generate` would refuse. Exit 3 when anything was found.
+difference `generate` would refuse. Exit 3 for a difference, a refusal or a finding the policy makes
+an error; a finding the policy makes a warning is reported and leaves the exit code 0.
 
 | Flag | |
 | --- | --- |
@@ -149,26 +172,40 @@ installed, or this is not a repository): nothing then says what the files change
 ### plan
 
 Runs the pending fixture migrations against the database, in bun's order, in one transaction that is
-always rolled back, and reports every change. Pending migrations it did not write are named, and so
-is where they would run. Refused against a standby.
+always rolled back, and reports every change. Constraints PostgreSQL defers to `COMMIT` are checked
+where the deploy commits: after each migration, and after each statement of a SQL migration bun runs
+without a transaction. Pending migrations it did not write are named, and so is where they would
+run. Refused against a standby.
 
 | Flag | |
 | --- | --- |
 | `-file <path>` | plan this migration file, applied or not; repeat for several |
-| `-with-sql` | also run the pending `.up.sql` migrations, split as bun splits them |
+| `-with-sql` | also run the pending `.up.sql` migrations, read as bun v1.2.18 reads them; one holding `{{` is not run, because bun renders it as a template under `WithTemplateData` |
 | `-strict` | fail when a change would be skipped, too |
 | `-lock-timeout <d>` | give up on a row lock after this long, default `5s` |
 | `-json` | the report as JSON, see [plan](#plan-output) |
 
+What plan writes it holds locked until it rolls back: every row a fixture migration writes, and
+whatever a SQL migration locks, which for most `ALTER TABLE` is the whole table, reads included.
+Against a live database, another session writing those rows waits for as long as the plan runs, and
+with a change set of thousands of rows that is seconds; the report says how many rows and how long.
+Plan against a copy of production, or off-peak. `-lock-timeout` limits how long plan waits for
+others' locks, not how long it holds its own. Sequences are outside every transaction: an id an
+insert draws stays drawn, and a sequence a SQL migration moves with `setval` or `nextval` stays
+moved, in the database plan ran against; plan notes such a migration.
+
 Exit 3 when a migration would fail, or with `-strict` be skipped; exit 1 when the plan could not
-finish (a lock waited for too long, a lost connection), which says nothing about the migration.
+finish (a lock waited for too long, a lost connection, a SQL migration that cannot run in a
+transaction, an enum value a migration in the same plan added, a table or column missing after a
+migration plan did not run), which says nothing about the migration.
 
 ### sync
 
 Brings the database to the fixture files directly, without a migration: a development database, a
 test's, a staging copy. It compares as `check` does and applies the difference with the guards and
 the policy of a generated migration, in one `REPEATABLE READ` transaction. Records nothing in the
-migrations table. Without `-yes` it rolls back and shows what it would change.
+migrations table. Without `-yes` it rolls back and shows what it would change, after checking the
+constraints PostgreSQL defers to `COMMIT`.
 
 | Flag | |
 | --- | --- |
@@ -181,12 +218,13 @@ Exit 2 when a finding the policy makes an error, or a difference `generate` woul
 
 | Code | Meaning |
 | --- | --- |
-| 0 | done; for `check`, `status` and `plan`: nothing found |
-| 1 | the command could not do its job: a bad flag, no connection, an unreadable file, a plan that could not finish, nothing for `status` to compare the fixture files with |
+| 0 | done; for `check`, `status` and `plan`: nothing found. A finding the policy makes a warning is reported and is not a failure |
+| 1 | the command could not do its job: a bad flag, no connection, an unreadable file, output that could not be written, a plan that could not finish, nothing for `status` to compare the fixture files with |
 | 2 | refused: a difference that needs a hand-written migration, a finding the policy makes an error, a state `baseline` will not replace, a fixture migration the state file does not include (`generate`, `baseline`), a file `export` will not write |
-| 3 | found something: drift (`check`), a change no migration makes, a change left out, a migration not applied or out of order, a leftover lock (`status`), a migration that would fail or skip (`plan`) |
+| 3 | found something: drift (`check`), a change no migration makes, a change left out, a migration not applied or out of order, a leftover lock (`status`), a migration that would fail or skip (`plan`), a problem in the migrations directory (`status`, `plan`) |
 
-A pipeline can tell "the database drifted" (3) from "the check could not run" (1).
+A pipeline can tell "the database drifted" (3) from "the check could not run" (1). Whatever the
+code, unless it is 0, the last line on standard error says why, starting with `bun-fixture-migrate:`.
 
 ## Configuration
 
@@ -259,7 +297,8 @@ meaning.
 ```json
 {
   "agree": false,
-  "findings": [{"kind": "zero against a default", "model": "Feature", "row": "code=api", "detail": "..."}],
+  "findings": [{"kind": "zero against a default", "level": "warn", "model": "Feature", "row": "code=api",
+                "detail": "..."}],
   "refusals": [{"model": "Plan", "key": "name=old", "reason": "..."}],
   "changes": [
     {"model": "Plan", "kind": "update", "key": {"name": "team"},
@@ -268,8 +307,10 @@ meaning.
 }
 ```
 
-A change is what a migration from the database to the file would do: an `insert` is a row only the
-file has, a `delete` one only the database has.
+`agree` is what the exit code says: `true` for 0. A finding's `level` is what the policy makes of its
+kind, `error` or `warn`; a `warn` finding is listed and leaves `agree` true. A change is what a
+migration from the database to the file would do: an `insert` is a row only the file has, a `delete`
+one only the database has.
 
 Finding kinds: `duplicate key`, `zero against a default`, `null against a default`,
 `invalid value` (a value the column's type cannot hold), `unknown column`.
@@ -320,19 +361,31 @@ Finding kinds: `duplicate key`, `zero against a default`, `null against a defaul
      "changes": [{"set": "20260930165255_fixture_plan_prices", "index": 0, "model": "Plan",
                   "kind": "insert", "key": "name=pro", "status": "applied", "rows": 1}]}
   ],
-  "not_simulated": ["20260930160000_schema"]
+  "not_simulated": ["20260930160000_schema"],
+  "notes": [],
+  "problems": [],
+  "rows_locked": 1,
+  "locked_seconds": 0.042
 }
 ```
 
 `result` is `succeeds`, `fails`, `unseeded`, `not reached` (after one that fails), or `inconclusive`
 when the plan itself could not finish. `kind` is `fixture`, or `sql` for a migration `-with-sql`
-ran. `after` names pending migrations that were not simulated and run before this one.
+ran. `after` names pending migrations that were not simulated and run before this one. A
+migration's `notes`, when there are any, say what its `result` and `error` do not: why the plan
+could not tell, or where the deploy can differ from the plan. The top-level `notes` say why a
+migration `-with-sql` would have run is in `not_simulated`. `problems` are those `status` reports in
+the migrations directory, each of which fails the plan. `rows_locked` is how many rows the fixture
+migrations wrote and held locked until the rollback, and `locked_seconds` how long the plan's
+transaction was open.
 
 ### sync output
 
 ```json
 {"applied": true, "dry_run": false, "findings": [], "refusals": [], "changes": [ ... ]}
 ```
+
+`findings` are as in [check](#check-output), with a `level` each.
 
 ### Outcomes
 

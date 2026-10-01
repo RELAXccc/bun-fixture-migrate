@@ -71,10 +71,10 @@ fuzz:
   stage: test
   image: golang:1
   script:
-    - for target in $(go test -list '^Fuzz' . | grep '^Fuzz'); do go test -run '^$' -fuzz "^${target}\$" -fuzztime 20s . || exit 1; done
+    - for pkg in . ./cmd/bun-fixture-migrate; do for target in $(go test -list '^Fuzz' "$pkg" | grep '^Fuzz'); do go test -run '^$' -fuzz "^${target}\$" -fuzztime 20s "$pkg" || exit 1; done; done
   artifacts:
     when: on_failure
-    paths: [testdata/fuzz/]
+    paths: [testdata/fuzz/, cmd/bun-fixture-migrate/testdata/fuzz/]
 
 postgres:
   stage: test
