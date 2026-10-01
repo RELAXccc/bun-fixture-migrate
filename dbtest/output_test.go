@@ -118,3 +118,19 @@ models:
 	}
 	c.must(0, "sync")
 }
+
+// A sync that fails before it changes anything says so and nothing else; a
+// report of no changes would read as "the database already holds the files".
+func TestASyncThatFailsSaysOnlyWhy(t *testing.T) {
+	db := itemDB(t)
+	loadFixture(t, db, itemFixture)
+	c := buildCLI(t)
+	c.write("fixture-migrate.yml", strings.Replace(cliConfig, "    key: [name]\n",
+		"    key: [name]\n    where: \"no_such_column = 1\"\n", 1))
+	for _, args := range [][]string{{"sync"}, {"sync", "-json"}} {
+		code, stdout, stderr := c.run(args...)
+		if code != 1 || stdout != "" || !strings.Contains(stderr, "no_such_column") {
+			t.Fatalf("%v: exit %d\n%s%s", args, code, stdout, stderr)
+		}
+	}
+}
