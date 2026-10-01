@@ -238,22 +238,48 @@ func TestAnEditedRowIsLeftAlone(t *testing.T) {
 	}
 }
 
-// A row that exists under another id is not inserted a second time.
-func TestAnInsertSkipsANameHeldUnderAnotherID(t *testing.T) {
+// A row that exists under another id is not inserted a second time, and is not
+// the row the fixture file describes either, even when every other value
+// agrees: it is id drift, under policy.id_drift. It used to be reported as a
+// row already there, nothing to do.
+func TestAnInsertOfANameHeldUnderAnotherIDIsIDDrift(t *testing.T) {
 	db := testDB(t)
 	seed(t, db)
 	ctx := context.Background()
-	if _, err := db.ExecContext(ctx, `INSERT INTO plans (id, name) VALUES (99, 'pro')`); err != nil {
+	// Every value the insert writes, under another id.
+	if _, err := db.ExecContext(ctx, `INSERT INTO plans (id, name, price_cents, rating, public, note)
+		VALUES (99, 'pro', 9000, 4.9, true, NULL)`); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixtureapply.Apply(ctx, db, changeSet(), quiet()); err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
-	if got := scan[int64](t, db, `SELECT count(*) FROM plans WHERE name = 'pro'`); got != 1 {
-		t.Fatalf("expected the row to be left alone, got %d rows named pro", got)
-	}
-	if got := scan[int64](t, db, `SELECT id FROM plans WHERE name = 'pro'`); got != 99 {
-		t.Fatalf("the existing row should keep its id, got %d", got)
+	set := changeSet()
+	set.Changes = set.Changes[:1]
+	for _, tc := range []struct {
+		policy fixturechange.Mode
+		fails  bool
+		status fixtureapply.Status
+	}{
+		{"", true, fixtureapply.StatusFailed},
+		{fixturechange.ModeWarn, false, fixtureapply.StatusSkipped},
+		{fixturechange.ModeIgnore, false, fixtureapply.StatusUnchanged},
+	} {
+		set.Policy.IDDrift = tc.policy
+		outcomes, err := applyReporting(t, db, set)
+		if (err != nil) != tc.fails {
+			t.Fatalf("id_drift %q: %v", tc.policy, err)
+		}
+		if len(outcomes) != 1 || outcomes[0].Status != tc.status {
+			t.Fatalf("id_drift %q: %+v", tc.policy, outcomes)
+		}
+		if tc.policy != fixturechange.ModeIgnore && (outcomes[0].Problem != fixtureapply.ProblemIDDrift ||
+			!strings.Contains(outcomes[0].Message, "exists, but under id 99 and not 3")) {
+			t.Fatalf("id_drift %q: %+v", tc.policy, outcomes)
+		}
+		if got := scan[int64](t, db, `SELECT count(*) FROM plans WHERE name = 'pro'`); got != 1 {
+			t.Fatalf("expected the row to be left alone, got %d rows named pro", got)
+		}
+		if got := scan[int64](t, db, `SELECT id FROM plans WHERE name = 'pro'`); got != 99 {
+			t.Fatalf("the existing row should keep its id, got %d", got)
+		}
 	}
 }
 

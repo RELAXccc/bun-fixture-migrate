@@ -173,6 +173,26 @@ func (r *runner) diagnoseInsert(ctx context.Context, c fixturechange.Change, t f
 			"that returned NULL, a rule, or a row-level security policy stopped it. Nothing was changed; the change "+
 			"set cannot be made until whatever stopped it lets it", t.Name, keyLabel(c.Key))
 	}
+	// The row is there; under the id the fixture file gives it, or not. A row
+	// under another id is not the row the file describes, even when every
+	// other value agrees: whatever knows the file's id -- a reference in
+	// another table, a URL, a client -- will not find it.
+	if id, ok := c.New[t.ID]; ok && id.Ref == nil && !id.IsNull && r.set.Policy.IDDrift != fixturechange.ModeIgnore {
+		withID, err := r.count(ctx, c.Model, table, c.Key, fixturechange.Values{t.ID: id})
+		if err != nil {
+			return outcome{}, err
+		}
+		if withID == 0 {
+			ids, err := r.idsFor(ctx, c.Model, table, t, c.Key)
+			if err != nil {
+				return outcome{}, err
+			}
+			return outcome{problem: problemIDDrift, message: fmt.Sprintf(
+				"%s %s exists, but under %s %s and not %s, so nothing was inserted. Whatever knows the fixture "+
+					"file's id will not find this row; decide which id it should have",
+				t.Name, keyLabel(c.Key), t.ID, strings.Join(ids, ", "), id.Lit)}, nil
+		}
+	}
 	same, err := r.count(ctx, c.Model, table, c.Key, withoutColumn(c.New, t.ID))
 	if err != nil {
 		return outcome{}, err
