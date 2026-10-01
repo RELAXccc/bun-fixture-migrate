@@ -212,9 +212,9 @@ func status(o streams, args []string) error {
 	_, findings := s.cfg.Worst(head.Findings)
 	errorFindings := 0
 	for _, f := range findings {
-		r.Findings = append(r.Findings, checkFinding{Kind: string(f.Kind), Level: string(s.cfg.FindingMode(f.Kind)),
+		r.Findings = append(r.Findings, checkFinding{Kind: string(f.Kind), Level: string(s.cfg.ModeOf(f)),
 			Model: f.Model, Row: f.Row, Detail: f.Detail})
-		if s.cfg.FindingMode(f.Kind) == fixturemigrate.ModeError {
+		if s.cfg.ModeOf(f) == fixturemigrate.ModeError {
 			errorFindings++
 		}
 	}

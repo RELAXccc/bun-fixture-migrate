@@ -524,7 +524,8 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 				"policy.renames to update and run this again", prev.label(model), cur.label(model))})
 	}
 
-	if cfg.Policy.IDDrift == ModeIgnore {
+	idDrift := cfg.ModelPolicy(model).IDDrift
+	if idDrift == ModeIgnore {
 		return nil
 	}
 	// A natural key two rows of either snapshot share says nothing about
@@ -550,7 +551,7 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 		if !ok || cur.ID == "" || cur.ID == prev.ID || sharedID[cur.ID] {
 			continue
 		}
-		if cfg.Policy.IDDrift == ModeWarn {
+		if idDrift == ModeWarn {
 			// The row still gets its value diff; only the id is left alone,
 			// which an update never writes anyway.
 			res.Warnings = append(res.Warnings, Refusal{model, prev.label(model), fmt.Sprintf(
@@ -1268,6 +1269,7 @@ func tablesFor(cfg *Config, changes []fixturechange.Change) fixturechange.Tables
 			Serial:  m.Serial,
 			Cascade: m.Deletes == DeleteCascade,
 			Where:   m.Where,
+			Policy:  cfg.TablePolicy(model),
 		}
 		if referenced {
 			t.Key = m.Ref

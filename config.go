@@ -80,6 +80,15 @@ type Config struct {
 	// migration. The failed migration runs again on the next deploy. Empty
 	// means no limit of the tool's own.
 	LockTimeout string `yaml:"lock_timeout"`
+	// AuditTable, when set, is the table every generated migration records
+	// each of its runs in, in the transaction that made its changes: which
+	// changes it applied, found made already or skipped, and why. fixtureapply
+	// creates it the first time, which takes CREATE on its schema. A Revert
+	// then undoes only the changes the migration made in that database, and
+	// status shows per database what a deploy skipped. Optionally
+	// schema-qualified; written without one, it is in Schema, as a model's
+	// table is. Empty records nothing.
+	AuditTable string `yaml:"audit_table"`
 	// Database is the PostgreSQL DSN the export, check and scaffold commands
 	// read. "env:NAME" reads it from an environment variable, which is how you
 	// keep a password out of the repository. The generate command needs it
@@ -247,6 +256,16 @@ type Model struct {
 	Deletes DeletePolicy `yaml:"deletes"`
 	// ArrayNulls overrides Policy.ArrayNulls for this model.
 	ArrayNulls ArrayNullsPolicy `yaml:"array_nulls"`
+	// IDDrift, MissingRow, ChangedRow and DuplicateKey override the policy
+	// block's for this model, when set: what generate, check and the
+	// generated migration do when one of this model's rows is not as
+	// expected. A model whose rows an admin UI edits can keep their edits
+	// under changed_row: warn while another fails on one under error. They
+	// are written into the generated migration, as the policy block is.
+	IDDrift      Mode `yaml:"id_drift"`
+	MissingRow   Mode `yaml:"missing_row"`
+	ChangedRow   Mode `yaml:"changed_row"`
+	DuplicateKey Mode `yaml:"duplicate_key"`
 	// Where is an SQL predicate that limits which rows of the table are master
 	// data, for a table that holds other rows too. It is written into every
 	// query the export and check commands run, and it is your text: keep it
@@ -353,6 +372,11 @@ func (c *Config) Prepare() error {
 	if _, err := quoteQualified(c.MigrationLocksTable); err != nil {
 		return fmt.Errorf("migration_locks_table: %w", err)
 	}
+	if c.AuditTable != "" {
+		if _, err := quoteQualified(c.AuditTable); err != nil {
+			return fmt.Errorf("audit_table: %w", err)
+		}
+	}
 	if c.State == "" && c.Out != "" {
 		c.State = filepath.Join(c.Out, "fixture_state.yml")
 	}
@@ -413,6 +437,12 @@ func (c *Config) Prepare() error {
 			return fmt.Errorf("model %q: array_nulls is %q, it has to be %q or %q", name, m.ArrayNulls,
 				ArrayNullsRefuse, ArrayNullsKeep)
 		}
+		for _, f := range m.runTimePolicy() {
+			if *f.value != "" && !f.value.valid(f.allowed...) {
+				return fmt.Errorf("model %q: %s is %q, it has to be one of %s, or left out for the policy block's",
+					name, f.name, *f.value, modeList(f.allowed))
+			}
+		}
 		m.derived = set(m.Derived)
 		m.ignored = set(m.Ignore)
 	}
@@ -465,6 +495,69 @@ func (p *Policy) prepare() error {
 }
 
 func (a ArrayNullsPolicy) valid() bool { return a == ArrayNullsRefuse || a == ArrayNullsKeep }
+
+// policyField is a policy a model can override: its key in the
+// configuration, the model's value and the values it may take.
+type policyField struct {
+	name    string
+	value   *Mode
+	allowed []Mode
+}
+
+// runTimePolicy is the model's overrides of the policies a generated
+// migration carries, in the order Policy declares them.
+func (m *Model) runTimePolicy() []policyField {
+	return []policyField{
+		{"id_drift", &m.IDDrift, []Mode{ModeError, ModeWarn, ModeIgnore}},
+		{"missing_row", &m.MissingRow, []Mode{ModeError, ModeWarn}},
+		{"changed_row", &m.ChangedRow, []Mode{ModeError, ModeWarn}},
+		{"duplicate_key", &m.DuplicateKey, []Mode{ModeError, ModeWarn}},
+	}
+}
+
+// ModelPolicy is the policy that governs a model: the policy block, with
+// every policy the model sets for itself in its place.
+func (c *Config) ModelPolicy(model string) Policy {
+	p := c.Policy
+	m := c.Models[model]
+	if m == nil {
+		return p
+	}
+	for _, o := range []struct{ to, from *Mode }{
+		{&p.IDDrift, &m.IDDrift}, {&p.MissingRow, &m.MissingRow},
+		{&p.ChangedRow, &m.ChangedRow}, {&p.DuplicateKey, &m.DuplicateKey},
+	} {
+		if *o.from != "" {
+			*o.to = *o.from
+		}
+	}
+	return p
+}
+
+// TablePolicy is what a change set carries for a model in its table: the
+// policies the model sets for itself, the rest left to the set's own, and nil
+// when it sets none.
+func (c *Config) TablePolicy(model string) *fixturechange.Policy {
+	m := c.Models[model]
+	if m == nil || m.IDDrift == "" && m.MissingRow == "" && m.ChangedRow == "" && m.DuplicateKey == "" {
+		return nil
+	}
+	return &fixturechange.Policy{
+		MissingRow:   fixturechange.Mode(m.MissingRow),
+		ChangedRow:   fixturechange.Mode(m.ChangedRow),
+		IDDrift:      fixturechange.Mode(m.IDDrift),
+		DuplicateKey: fixturechange.Mode(m.DuplicateKey),
+	}
+}
+
+// ModeOf is what the policy makes of a finding: FindingMode of its kind, and
+// for a duplicate key the model's own duplicate_key when it sets one.
+func (c *Config) ModeOf(f Finding) Mode {
+	if f.Kind == FindingDuplicateKey {
+		return c.ModelPolicy(f.Model).DuplicateKey
+	}
+	return c.FindingMode(f.Kind)
+}
 
 // arrayNulls is what a null inside a sequence means for a model.
 func (c *Config) arrayNulls(m *Model) ArrayNullsPolicy {

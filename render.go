@@ -90,6 +90,7 @@ func Render(cfg *Config, name, stamp string, res *Result) ([]byte, error) {
 		SeedGuardTable:  cfg.RunTimeTable(cfg.SeedGuardTable),
 		MigrationsTable: cfg.MigrationsTable,
 		LockTimeout:     cfg.LockTimeout,
+		AuditTable:      cfg.RunTimeTable(cfg.AuditTable),
 		Tables:          res.Tables,
 		Changes:         res.Changes,
 		Policy: fixturechange.Policy{
@@ -151,6 +152,9 @@ func Render(cfg *Config, name, stamp string, res *Result) ([]byte, error) {
 	if set.LockTimeout != "" {
 		fmt.Fprintf(&b, "\tLockTimeout: %q,\n", set.LockTimeout)
 	}
+	if set.AuditTable != "" {
+		fmt.Fprintf(&b, "\tAuditTable: %q,\n", set.AuditTable)
+	}
 	b.WriteString("\tTables: fixturechange.Tables{\n")
 	for _, model := range sortedKeys(res.Tables) {
 		t := res.Tables[model]
@@ -166,6 +170,9 @@ func Render(cfg *Config, name, stamp string, res *Result) ([]byte, error) {
 		}
 		if t.Where != "" {
 			fmt.Fprintf(&b, ", Where: %s", goString(t.Where))
+		}
+		if t.Policy != nil {
+			fmt.Fprintf(&b, ", Policy: &fixturechange.Policy{%s}", tablePolicy(*t.Policy))
 		}
 		b.WriteString("},\n")
 	}
@@ -211,6 +218,22 @@ func Render(cfg *Config, name, stamp string, res *Result) ([]byte, error) {
 		return nil, fmt.Errorf("the generated file does not parse, which is a bug in this tool: %w", err)
 	}
 	return src, nil
+}
+
+// tablePolicy is the fields a model's own policy sets, in the order the set's
+// Policy is written.
+func tablePolicy(p fixturechange.Policy) string {
+	var parts []string
+	for _, f := range []struct {
+		name string
+		mode fixturechange.Mode
+	}{{"MissingRow", p.MissingRow}, {"ChangedRow", p.ChangedRow}, {"IDDrift", p.IDDrift},
+		{"DuplicateKey", p.DuplicateKey}} {
+		if f.mode != "" {
+			parts = append(parts, fmt.Sprintf("%s: %q", f.name, f.mode))
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 // largeSet is the most changes Render writes as one literal, and partSize how
