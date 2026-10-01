@@ -42,11 +42,6 @@ var fixtureChanges20260727100000RetireScaleAndPrioritySupport = fixturechange.Se
 		MissingRow: "error", ChangedRow: "warn", IDDrift: "error", DuplicateKey: "error",
 	},
 	Changes: []fixturechange.Change{
-		{Model: "Plan", Kind: fixturechange.Update,
-			Key: fixturechange.Values{"code": fixturechange.Lit("scale")},
-			Old: fixturechange.Values{"active": fixturechange.Lit("true")},
-			New: fixturechange.Values{"active": fixturechange.Lit("false")},
-		},
 		{Model: "PlanFeature", Kind: fixturechange.Delete,
 			Key: fixturechange.Values{
 				"feature_id": fixturechange.RefTo("Feature", "priority_support"),
@@ -88,6 +83,11 @@ var fixtureChanges20260727100000RetireScaleAndPrioritySupport = fixturechange.Se
 				"name": fixturechange.Lit("Priority support"),
 				"unit": fixturechange.Null(),
 			},
+		},
+		{Model: "Plan", Kind: fixturechange.Update,
+			Key: fixturechange.Values{"code": fixturechange.Lit("scale")},
+			Old: fixturechange.Values{"active": fixturechange.Lit("true")},
+			New: fixturechange.Values{"active": fixturechange.Lit("false")},
 		},
 	},
 }

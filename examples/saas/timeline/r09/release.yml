@@ -42,13 +42,13 @@ expect:
     prod:
       exit: 3
       output: ["Category slug=dashboards", "name: database Dashboards & reports, file Dashboards"]
-known:
-  - "F8: the database snapshot reads rows in text order of the id (1, 10, 2, ...) and resolves a self-reference only to rows read before it, so a child read before its parent breaks check, export, sync and generate -from-db. The main line moves a subtree whose root sorts after its new parent, and numbers the new categories 10 and 11 rather than 9 and 10"
 probes:
+  # A subtree moved under a category numbered after it: the database snapshot
+  # reads the tree whatever the order of its ids, and export writes parents
+  # first, so dbfixture can load what it wrote.
   - name: the API subtree under a new category
     from: start
     when: before-deploy
-    known: "F8"
     clone: prod
     steps:
       - overlay: probe-api-subtree
@@ -58,11 +58,13 @@ probes:
       - app: [migrate]
         env: clone
         output: ["Category slug=api update: applied (1 row)"]
+      # Only the admin's rename of dashboards, which this release leaves to
+      # the next one.
       - cli: [check]
         env: clone
-        exit: 1
-        output: ["Category: parent_id = 9 points at a row of Category that this snapshot does not hold"]
+        exit: 3
+        output: ["Category slug=dashboards", "name: database Dashboards & reports, file Dashboards"]
+        absent: ["does not hold"]
       - cli: [export, -stdout]
         env: clone
-        exit: 1
-        output: ["points at a row of Category that this snapshot does not hold"]
+        absent: ["does not hold"]

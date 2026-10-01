@@ -16,7 +16,7 @@
 # migration: 20261116100000_fixture_help_centre
 # covers: 20261116100000_fixture_help_centre
 # base: 20261019100000_fixture_plan_order
-# sha256: 3f484a79e3987cddff5fb3d273e7488624f1b7c3207211a48355932406a95874
+# sha256: 28b9996d148b737cb16aa59a2c513cfa7e9df03708bdb53e5b19b6910a2344c1
 # ----- 61 lines of fixtures/reference.yml -----
 # Currencies and countries.
 
@@ -79,7 +79,7 @@
       name: Schweiz
       currency_id: '{{ $.Currency.chf.ID }}'
       tax_rate: 0.081
-# ----- 262 lines of fixtures/catalog.yml -----
+# ----- 260 lines of fixtures/catalog.yml -----
 # What is sold: plans, their prices and features, and the category tree.
 
 - model: Plan
@@ -317,8 +317,6 @@
       parent_id: '{{ $.Category.integrations.ID }}'
       name: Analytics
       position: 3
-    # Not 9: a tree whose parent is 9 and child 10 is read back in the order
-    # 1, 10, 2, ..., 9 and the child cannot be resolved (known: F8).
     - _id: developer_tools
       id: 10
       slug: developer-tools

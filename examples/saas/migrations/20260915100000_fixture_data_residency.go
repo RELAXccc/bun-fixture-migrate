@@ -43,6 +43,11 @@ var fixtureChanges20260915100000DataResidency = fixturechange.Set{
 		MissingRow: "error", ChangedRow: "warn", IDDrift: "error", DuplicateKey: "error",
 	},
 	Changes: []fixturechange.Change{
+		{Model: "Translation", Kind: fixturechange.Update,
+			Key: fixturechange.Values{"key": fixturechange.Lit("nav.settings"), "locale": fixturechange.Lit("en")},
+			Old: fixturechange.Values{"value": fixturechange.Lit("Settings")},
+			New: fixturechange.Values{"value": fixturechange.Lit("Settings & data residency")},
+		},
 		{Model: "Feature", Kind: fixturechange.Insert,
 			Key: fixturechange.Values{"code": fixturechange.Lit("data_residency")},
 			New: fixturechange.Values{
@@ -73,11 +78,6 @@ var fixtureChanges20260915100000DataResidency = fixturechange.Set{
 				"plan_id":    fixturechange.RefTo("Plan", "enterprise"),
 				"quota":      fixturechange.Lit("3"),
 			},
-		},
-		{Model: "Translation", Kind: fixturechange.Update,
-			Key: fixturechange.Values{"key": fixturechange.Lit("nav.settings"), "locale": fixturechange.Lit("en")},
-			Old: fixturechange.Values{"value": fixturechange.Lit("Settings")},
-			New: fixturechange.Values{"value": fixturechange.Lit("Settings & data residency")},
 		},
 	},
 }

@@ -229,8 +229,6 @@
       parent_id: '{{ $.Category.integrations.ID }}'
       name: Analytics
       position: 3
-    # Not 9: a tree whose parent is 9 and child 10 is read back in the order
-    # 1, 10, 2, ..., 9 and the child cannot be resolved (known: F8).
     - _id: developer_tools
       id: 10
       slug: developer-tools
