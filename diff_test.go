@@ -507,6 +507,37 @@ func TestKeyAnyOfPicksTheColumnThatIsSet(t *testing.T) {
 	}
 }
 
+// A key_any_of column a row leaves out, with no default, is NULL, as the
+// database holds it: a row setting none of the group is keyed by NULL, and
+// every row carries the group, so a column no row writes is still compared.
+func TestKeyAnyOfLeftOutIsNull(t *testing.T) {
+	cfg := &Config{
+		Models: map[string]*Model{
+			"User": {Table: "users"},
+			"Grant": {Table: "grants", Key: []string{"perm"}, KeyAnyOf: [][]string{{"user_id", "team_id"}},
+				References: map[string]string{"user_id": "User", "team_id": "User"}},
+		},
+	}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	s := snap(t, cfg, `- model: User
+  rows:
+    - {_id: u, id: 1, name: u}
+- model: Grant
+  rows:
+    - {id: 1, perm: admin}
+    - {id: 2, perm: read, user_id: '{{ $.User.u.ID }}'}
+`, "fixture.yml")
+	admin, read := s.Entries["Grant"][0], s.Entries["Grant"][1]
+	if v := admin.Key["user_id"]; !v.IsNull || !admin.Cells["team_id"].IsNull || !admin.Cells["user_id"].IsNull {
+		t.Fatalf("admin: key %+v cells %+v", admin.Key, admin.Cells)
+	}
+	if !read.Cells["team_id"].IsNull || strings.Join(s.Columns["Grant"], ",") != "perm,team_id,user_id" {
+		t.Fatalf("read: cells %+v, columns %v", read.Cells, s.Columns["Grant"])
+	}
+}
+
 func TestSummary(t *testing.T) {
 	res := compute(t, base, replace(t, base, "      price_cents: 2000\n", "      price_cents: 2500\n"))
 	got := strings.Join(res.Summary(), "; ")

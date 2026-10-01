@@ -614,6 +614,18 @@ func (m *Model) skip(col string) bool {
 	return col == anchorColumn || col == m.ID || m.ignored[col] || m.derived[col]
 }
 
+// inKeyAnyOf reports a column of a key_any_of group.
+func (m *Model) inKeyAnyOf(col string) bool {
+	for _, group := range m.KeyAnyOf {
+		for _, c := range group {
+			if c == col {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // keyColumns is every column that can end up in a natural key.
 func (m *Model) keyColumns() []string {
 	out := append([]string{}, m.Key...)

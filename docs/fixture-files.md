@@ -214,6 +214,10 @@ defaults:
   note: ~        # a row without note stands for NULL
 ```
 
+A column of a `key_any_of` group that a row leaves out is NULL unless `defaults` says otherwise: the
+group's columns are the references a row sets one of, and the database holds NULL in the others. So a
+row setting none of them is keyed by NULL, as the database reads it.
+
 `scaffold` fills `defaults` from the column defaults. `~` is right for a column added to a table
 later, which holds NULL in the rows written before it.
 

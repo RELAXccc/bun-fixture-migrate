@@ -115,6 +115,11 @@ func (ix *index) loaded(model string, m *Model, row Row) {
 // cell returns a column of a row, falling back to the configured default. The
 // second result is false when the column is neither in the row nor in the
 // defaults, which the caller has to handle rather than guess at.
+//
+// A key_any_of column the row leaves out, with no default, is NULL: the
+// columns of such a group are the references a row sets one of, and the
+// database holds NULL in the others, which every comparison and every key
+// has to read alike on both sides.
 func (ix *index) cell(m *Model, col string, row Row) (Cell, bool) {
 	if c, ok := row[col]; ok {
 		return c, true
@@ -124,6 +129,9 @@ func (ix *index) cell(m *Model, col string, row Row) (Cell, bool) {
 			return Cell{IsNull: true}, true
 		}
 		return Cell{Text: def}, true
+	}
+	if m.inKeyAnyOf(col) {
+		return Cell{IsNull: true}, true
 	}
 	return Cell{}, false
 }
@@ -319,7 +327,7 @@ func (ix *index) keyValues(model string, row Row) (fixturechange.Values, error) 
 		out[col] = r.Value
 	}
 	for _, group := range m.KeyAnyOf {
-		chosen, value := group[0], fixturechange.Lit("")
+		chosen, value := group[0], fixturechange.Null()
 		for _, col := range group {
 			r, present, err := ix.value(model, col, row)
 			if err != nil {
@@ -415,6 +423,11 @@ func (ix *index) entry(model string, m *Model, row Row) (*Entry, error) {
 	}
 	for col := range m.Defaults {
 		cols[col] = true
+	}
+	for _, group := range m.KeyAnyOf {
+		for _, col := range group {
+			cols[col] = true
+		}
 	}
 	// In name order, so a row with two faults is refused for the same one on
 	// every run.

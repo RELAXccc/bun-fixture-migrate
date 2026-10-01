@@ -229,3 +229,46 @@ func TestReviewAnExportOfAnArrayHoldingANull(t *testing.T) {
 	run(t, l.db, "UPDATE rv_arr SET nums = '{1,3}'")
 	l.roundTrip()
 }
+
+type RvGrant struct {
+	bun.BaseModel `bun:"table:rv_grants"`
+	ID            int64  `bun:"id,pk"`
+	Perm          string `bun:"perm,notnull"`
+	UserID        *int64 `bun:"user_id"`
+	TeamID        *int64 `bun:"team_id"`
+}
+
+type RvUser struct {
+	bun.BaseModel `bun:"table:rv_users"`
+	ID            int64  `bun:"id,pk"`
+	Name          string `bun:"name,notnull"`
+}
+
+// A key_any_of column a row leaves out is NULL, as the database holds it:
+// before, a row leaving out the whole group was keyed by "" and read as a
+// rename, and a group column no row writes made every row a difference.
+func TestReviewAKeyAnyOfColumnLeftOutIsNull(t *testing.T) {
+	l := newLab(t, map[string]*fixturemigrate.Model{
+		"RvUser": {Table: "rv_users"},
+		"RvGrant": {Table: "rv_grants", Key: []string{"perm"}, KeyAnyOf: [][]string{{"user_id", "team_id"}},
+			References: map[string]string{"user_id": "RvUser", "team_id": "RvUser"}},
+	}, "rv_users",
+		[]string{"DROP TABLE IF EXISTS rv_grants", "DROP TABLE IF EXISTS rv_users",
+			"CREATE TABLE rv_users (id bigint PRIMARY KEY, name text NOT NULL UNIQUE)",
+			"CREATE TABLE rv_grants (id bigint PRIMARY KEY, perm text NOT NULL, user_id bigint REFERENCES rv_users, team_id bigint REFERENCES rv_users)"},
+		`SELECT string_agg(concat_ws('|', perm, coalesce(user_id::text, '-'), coalesce(team_id::text, '-')), E'\n' ORDER BY id) FROM rv_grants`,
+		(*RvUser)(nil), (*RvGrant)(nil))
+	head := "- model: RvUser\n  rows:\n    - {_id: u, id: 1, name: u}\n    - {_id: v, id: 2, name: v}\n- model: RvGrant\n  rows:\n"
+	files := []string{
+		head + "    - {id: 1, perm: admin}\n",
+		head + "    - {id: 1, perm: admin, user_id: ~, team_id: ~}\n",
+		head + "    - {id: 1, perm: admin, user_id: '{{ $.RvUser.u.ID }}'}\n    - {id: 2, perm: admin}\n",
+		head + "    - {id: 1, perm: admin, user_id: '{{ $.RvUser.u.ID }}'}\n    - {id: 2, perm: read, user_id: '{{ $.RvUser.v.ID }}'}\n",
+		head + "    - {id: 1, perm: admin, user_id: '{{ $.RvUser.u.ID }}'}\n    - {id: 2, perm: read, user_id: '{{ $.RvUser.v.ID }}'}\n" +
+			"    - {id: 3, perm: read, team_id: '{{ $.RvUser.u.ID }}'}\n",
+	}
+	l.cfg.Policy.Renames = fixturemigrate.RenameUpdate
+	for i := 1; i < len(files); i++ {
+		l.fidelity(files[i-1], files[i])
+	}
+}

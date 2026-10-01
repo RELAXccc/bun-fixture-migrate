@@ -393,7 +393,9 @@ func keyOf(cfg *Config, m *Model, model string, values fixturechange.Values) (fi
 		out[col] = v
 	}
 	for _, group := range m.KeyAnyOf {
-		chosen, value := group[0], fixturechange.Lit("")
+		// A group none of whose columns is there is NULL, as a fixture row
+		// leaving them all out is.
+		chosen, value := group[0], fixturechange.Null()
 		if v, ok := values[group[0]]; ok {
 			value = v
 		}
