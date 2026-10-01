@@ -143,7 +143,8 @@ configuration later does not change what an old migration does. At run time `fix
 - compares through each column's type: `jsonb` as JSON, arrays as arrays, `numeric` as numbers,
   timestamps as instants whatever the session's time zone;
 - refuses a delete that other rows point at, rather than letting `ON DELETE CASCADE` or `SET NULL`
-  reach them, unless the model says `deletes: cascade`;
+  reach them, unless the model says `deletes: cascade`, and then says how many rows the delete reached;
+  a rollback does not bring those back;
 - diagnoses every row count of zero, as below, and takes back bun's record of a migration that
   failed;
 - moves the sequence past an explicit id before it writes it, so an insert by the application

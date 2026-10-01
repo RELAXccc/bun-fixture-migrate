@@ -185,6 +185,10 @@ the changes backwards, every one inverted and guarded like the original, so a ro
 row changed since the migration ran reports it rather than overwriting it. A rename is looked up
 under the name it gave the row, and named back.
 
+A rollback puts back the rows the migration deleted, and nothing a delete reached through a foreign
+key under `deletes: cascade`: the subscriptions that went with a plan stay gone, and the log of the
+rollback says so for every such row. The log of the migration said how many there were.
+
 A rollback assumes the migration made every one of its changes on this database: nothing records
 which ones it made. A change the migration found already made -- the row already held the new value
 through some other path, or was already there -- is rolled back all the same: the update writes the

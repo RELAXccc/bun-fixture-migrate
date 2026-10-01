@@ -19,7 +19,14 @@ func (r *runner) exec(ctx context.Context, c fixturechange.Change) (outcome, err
 	}
 	switch c.Kind {
 	case fixturechange.Insert:
-		return r.insert(ctx, c, t, table)
+		out, err := r.insert(ctx, c, t, table)
+		// The revert of a delete puts back the row the change set names, and
+		// nothing the delete reached through a foreign key.
+		if err == nil && r.revert && t.Cascade && out.problem == "" && out.rows > 0 {
+			out.message = "the rows that deleting it deleted or detached through a foreign key, if there were any, " +
+				"are not restored: a revert only puts back the rows the change set names"
+		}
+		return out, err
 	case fixturechange.Update:
 		// id_drift warn or ignore says the ids of this database are not the
 		// fixture file's. A rename guarded by the file's id would then match
@@ -175,8 +182,9 @@ func (r *runner) delete(ctx context.Context, c fixturechange.Change, t fixturech
 	if err != nil {
 		return outcome{}, err
 	}
-	if out, err := r.referenced(ctx, c, t, table, where, args); err != nil || out.problem != "" {
-		return out, err
+	reached, err := r.referenced(ctx, c, t, table, where, args)
+	if err != nil || reached.problem != "" {
+		return reached, err
 	}
 	where, args, err = r.onlyRow(ctx, c, table, where, args)
 	if err != nil {
@@ -187,7 +195,7 @@ func (r *runner) delete(ctx context.Context, c fixturechange.Change, t fixturech
 		return outcome{}, err
 	}
 	if n > 0 {
-		return outcome{rows: n}, nil
+		return outcome{rows: n, message: reached.message}, nil
 	}
 	return r.diagnose(ctx, c, t, table, nil)
 }

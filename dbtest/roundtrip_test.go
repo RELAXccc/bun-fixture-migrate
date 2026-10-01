@@ -1188,3 +1188,55 @@ func TestAnArrayOfTwoDimensionsIsWrittenAndCompared(t *testing.T) {
 		t.Fatalf("nothing may be written, %d rows have data", got)
 	}
 }
+
+// A delete a model's deletes: cascade allows says which rows it reached, and
+// its revert says it does not bring them back. The rows were counted in full
+// before, and a table named with a ? broke the count: bun read the ? as a
+// placeholder.
+func TestACascadingDeleteSaysWhatItReached(t *testing.T) {
+	db := connect(t)
+	ctx := context.Background()
+	run(t, db, `DROP TABLE IF EXISTS cascade_subs, "cascade_notes?", cascade_plans`,
+		"CREATE TABLE cascade_plans (id bigserial PRIMARY KEY, name text NOT NULL UNIQUE)",
+		"CREATE TABLE cascade_subs (id bigserial PRIMARY KEY, plan_id bigint REFERENCES cascade_plans ON DELETE CASCADE)",
+		`CREATE TABLE "cascade_notes?" (id bigserial PRIMARY KEY, plan_id bigint REFERENCES cascade_plans ON DELETE SET NULL)`,
+		"INSERT INTO cascade_plans (id, name) VALUES (1, 'old')",
+		"INSERT INTO cascade_subs (plan_id) VALUES (1), (1)",
+		`INSERT INTO "cascade_notes?" (plan_id) VALUES (1)`)
+	set := fixturechange.Set{
+		Name:   "20260921120000_fixture_cascade",
+		Tables: fixturechange.Tables{"Plan": {Name: "cascade_plans", ID: "id", Key: "name"}},
+		Changes: []fixturechange.Change{{Model: "Plan", Kind: fixturechange.Delete,
+			Key: fixturechange.Values{"name": fixturechange.Lit("old")},
+			Old: fixturechange.Values{"id": fixturechange.Lit("1"), "name": fixturechange.Lit("old")}}},
+	}
+	outcomes, err := applyReporting(t, db, set)
+	if err == nil || len(outcomes) != 1 || outcomes[0].Problem != fixtureapply.ProblemReferenced ||
+		!strings.Contains(outcomes[0].Message, `1 row of "cascade_notes?" point at`) {
+		t.Fatalf("without deletes: cascade the delete is refused, naming the rows: %v %+v", err, outcomes)
+	}
+
+	set.Tables["Plan"] = fixturechange.Table{Name: "cascade_plans", ID: "id", Key: "name", Cascade: true}
+	outcomes, err = applyReporting(t, db, set)
+	if err != nil || len(outcomes) != 1 || outcomes[0].Status != fixtureapply.StatusApplied {
+		t.Fatalf("%v %+v", err, outcomes)
+	}
+	for _, want := range []string{"deleted 2 rows of cascade_subs with it", `set the reference of 1 row of "cascade_notes?" to NULL`,
+		"brings none of them back"} {
+		if !strings.Contains(outcomes[0].Message, want) {
+			t.Fatalf("the outcome has to say %q: %s", want, outcomes[0].Message)
+		}
+	}
+	var reverted []fixtureapply.Outcome
+	if err := fixtureapply.Revert(ctx, db, set, quiet(),
+		fixtureapply.WithReport(func(o fixtureapply.Outcome) { reverted = append(reverted, o) })); err != nil {
+		t.Fatal(err)
+	}
+	if len(reverted) != 1 || reverted[0].Status != fixtureapply.StatusApplied ||
+		!strings.Contains(reverted[0].Message, "are not restored") {
+		t.Fatalf("the revert has to say what it does not restore: %+v", reverted)
+	}
+	if got := scan[int64](t, db, "SELECT count(*) FROM cascade_subs"); got != 0 {
+		t.Fatalf("%d subscriptions", got)
+	}
+}
