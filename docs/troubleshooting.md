@@ -295,6 +295,12 @@ round.
 **`bun_migrations does not exist, so there is nothing to record the migration in`** (`apply
 -record`, exit 1). The migrator's `Init` creates it; run it once, or leave out `-record`.
 
+**`bun_migration_locks holds the lock on bun_migrations, which bun's Lock took`** (`apply -record`,
+exit 2). A migrator that took bun's `Lock` is migrating now, and apply does not record a migration
+beside it, which could record it twice. Run apply once the migrator is done. A lock that stays, of a
+migrator that stopped without `Unlock`, is reported by `status` too; delete its row once no migrator
+runs.
+
 **`bufio.Scanner: token too long`.** A line of a SQL migration is longer than 64 KiB, and bun reads
 SQL migrations a line at a time. The deploy fails before running any of the file, and unless the
 migrator is built `WithMarkAppliedOnSuccess(true)` bun keeps it recorded as applied, so it never runs

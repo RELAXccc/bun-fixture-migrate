@@ -330,6 +330,9 @@ the record, and with an `audit_table` it does not revert the change set a second
 
 Run it as the role the deploy migrates as, and not while a deploy is migrating: the change set's
 advisory lock keeps two change sets apart, but not bun's migrator from recording the same migration.
+`-record` takes bun's own lock, the row `Migrator.Lock` writes into `migration_locks_table`, for its
+transaction: it refuses while a deploy holds it, and a deploy that calls `Lock` meanwhile waits and
+then finds the migration recorded. A migrator that does not call `Lock` is not kept out.
 `apply` exits 3 when the change set fails, as it would in the deploy, and 2 when the record refuses
 it; either way nothing was changed.
 

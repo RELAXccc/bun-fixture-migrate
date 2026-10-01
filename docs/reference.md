@@ -294,8 +294,13 @@ the changes and the record are committed together or not at all: the digits of t
 `-revert`, `-record` deletes the record instead, and the migrator runs the migration again on the
 next migrate; when the audit table says the change set is reverted here already, by an earlier
 `apply -revert -yes`, it deletes the record and does not run the revert again. Refused (exit 2), with nothing changed: `-record` of a migration recorded already, and
-`-revert -record` of one that is not; both are looked at again once the change set holds its lock.
-`-record` needs the migrations table, which the migrator's `Init` creates (exit 1 without it).
+`-revert -record` of one that is not; both are looked at again once the change set holds its lock;
+and `-record` while bun's lock is held.
+`-record` needs the migrations table, which the migrator's `Init` creates (exit 1 without it). It
+takes bun's lock as `Migrator.Lock` does, a row of `migration_locks_table` naming the migrations
+table, in the same transaction, and deletes it before committing: while a migrator holds that lock
+it refuses (exit 2), and a migrator calling `Lock` while apply runs waits for it and then finds the
+migration recorded.
 
 Without `-record`, the migrations table is left as it is, and apply says what that means: a
 migration it applied is still pending for the migrator, which runs it and finds every change made;
@@ -321,7 +326,7 @@ privilege the role lacks; 2 when the record refuses it. Whenever it is not 0, no
 | --- | --- |
 | 0 | done; for `check`, `status` and `plan`: nothing found. A finding the policy makes a warning is reported and is not a failure |
 | 1 | the command could not do its job: a bad flag, no connection, an unreadable file, output that could not be written, a plan that could not finish, nothing for `status` to compare the fixture files with |
-| 2 | refused: a difference that needs a hand-written migration, a finding the policy makes an error, a state `baseline` will not replace, a fixture migration the state file does not include (`generate`, `baseline`), a file `export` will not write, a migration `apply -record` finds recorded already, or not recorded for `-revert` |
+| 2 | refused: a difference that needs a hand-written migration, a finding the policy makes an error, a state `baseline` will not replace, a fixture migration the state file does not include (`generate`, `baseline`), a file `export` will not write, a migration `apply -record` finds recorded already, or not recorded for `-revert`, or bun's lock held |
 | 3 | found something: drift (`check`), a change no migration makes, a change left out, a state file that does not read, a migration not applied or out of order, a leftover lock (`status`), a migration that would fail or skip (`plan`), a problem in the migrations directory or the state file's history of it (`status`, `plan`), a migration that would fail or failed (`apply`) |
 
 A pipeline can tell "the database drifted" (3) from "the check could not run" (1). Whatever the

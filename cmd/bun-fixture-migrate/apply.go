@@ -129,6 +129,7 @@ func applyCmd(o streams, args []string) error {
 	case *record && !*yes && !*revert:
 		notes = append(notes, fmt.Sprintf("with -yes, migration %s is recorded in %s as bun's migrator records it, in "+
 			"the transaction of its changes", name, s.cfg.MigrationsTable))
+
 	case *record && !*yes:
 		notes = append(notes, fmt.Sprintf("with -yes, the record of migration %s is deleted from %s, in the "+
 			"transaction of its changes", name, s.cfg.MigrationsTable))
@@ -143,6 +144,15 @@ func applyCmd(o streams, args []string) error {
 		notes = append(notes, fmt.Sprintf("without -record, %s keeps recording migration %s as applied, so bun's "+
 			"migrator will not run it again; to take the record out afterwards, run apply -revert -yes -record, "+
 			"which finds the change set reverted and changes nothing more", s.cfg.MigrationsTable, name))
+	}
+	if *record && !*yes {
+		if locked, err := migratorLocked(o.ctx, db, s.cfg.MigrationLocksTable, s.cfg.MigrationsTable); err != nil {
+			return err
+		} else if locked {
+			notes = append(notes, fmt.Sprintf("%s holds the lock on %s, which bun's Lock took: a migrator is "+
+				"migrating now, or one that stopped without Unlock left it. With -yes, apply -record refuses while "+
+				"it is there", s.cfg.MigrationLocksTable, s.cfg.MigrationsTable))
+		}
 	}
 	if *revert {
 		note, err := revertNote(o.ctx, db, set, *record)
@@ -160,7 +170,8 @@ func applyCmd(o streams, args []string) error {
 	if *revert {
 		report.Direction = string(fixtureapply.DirectionDown)
 	}
-	runErr := applyAndRecord(o.ctx, db, set, *revert, *record, name, s.cfg.MigrationsTable, report)
+	runErr := applyAndRecord(o.ctx, db, set, *revert, *record, name, s.cfg.MigrationsTable, s.cfg.MigrationLocksTable,
+		report)
 	if runErr != nil {
 		report.Error = runErr.Error()
 	}
@@ -302,18 +313,27 @@ func applyDryRun(o streams, db *bun.DB, target planTarget, lockTimeout time.Dura
 // set holds its advisory lock: a migrator that recorded the migration in the
 // meantime has done so before running it, and its run waits for this one.
 //
+// With record, apply takes bun's lock on the migrations table first, in the
+// same transaction, and gives it back before it commits; see lockMigrator.
+//
 // A revert with record of a set the audit table says is reverted here already
 // deletes the record and does not run Revert again: the first revert, which
 // left out what the migration had not made, is what this one would repeat at
 // best. That is read under the advisory lock too.
-func applyAndRecord(ctx context.Context, db *bun.DB, set fixturechange.Set, revert, record bool, name, table string,
-	report *applyReport) error {
+func applyAndRecord(ctx context.Context, db *bun.DB, set fixturechange.Set, revert, record bool, name, table,
+	locks string, report *applyReport) error {
 
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	locked := false
+	if record {
+		if locked, err = lockMigrator(ctx, tx, locks, table); err != nil {
+			return err
+		}
+	}
 	if revert && record && set.AuditTable != "" {
 		if err := fixtureapply.WaitForChangeSets(ctx, tx); err != nil {
 			return err
@@ -371,12 +391,77 @@ func applyAndRecord(ctx context.Context, db *bun.DB, set fixturechange.Set, reve
 			report.Record = "unrecorded"
 		}
 	}
+	if locked {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM "+locks+" WHERE table_name = ?", table); err != nil {
+			return fmt.Errorf("give back the migrator's lock in %s: %w", locks, err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		report.Record, report.GroupID = "", 0
 		return err
 	}
 	report.Committed = true
 	return nil
+}
+
+// uniqueViolation is PostgreSQL's code for a row a unique index already holds.
+const uniqueViolation = "23505"
+
+// lockMigrator takes, in tx, the lock bun's Migrator.Lock takes on the
+// migrations table: a row of the locks table naming it (bun v1.2.18,
+// migrate/migrator.go, Lock), which the table's unique index lets one session
+// hold. The caller deletes the row again before it commits.
+//
+// The advisory lock every change set takes keeps two runs of the change set
+// apart, but not two records of the migration: a migrator that read which
+// migrations were pending before apply committed its record records the
+// migration a second time. One that took bun's Lock first holds the row, and
+// apply refuses (exit 2), changing nothing. One that calls Lock while apply
+// holds the row waits for apply to commit, and then reads the record apply
+// wrote. A migrator that does not call Lock is kept out by nothing; that is
+// what bun's Lock is for.
+//
+// Without the locks table, which bun's Init creates with the migrations table,
+// no migrator can hold the lock, and there is none to take.
+func lockMigrator(ctx context.Context, tx bun.Tx, locks, migrations string) (bool, error) {
+	var exists bool
+	if err := tx.QueryRowContext(ctx, "SELECT to_regclass(?) IS NOT NULL", locks).Scan(&exists); err != nil {
+		return false, fmt.Errorf("look for %s: %w", locks, err)
+	}
+	if !exists {
+		return false, nil
+	}
+	// The name was checked to be a plain, optionally schema-qualified
+	// identifier, and is used unquoted, as bun uses it.
+	if _, err := tx.ExecContext(ctx, "INSERT INTO "+locks+" (table_name) VALUES (?)", migrations); err != nil {
+		if pgerr.State(err) == uniqueViolation {
+			return false, exitError{2, fmt.Sprintf("%s holds the lock on %s, which bun's Lock took: a migrator is "+
+				"migrating now, or one that stopped without Unlock left it. apply -record does not record beside "+
+				"it, so nothing was changed; run it once the migrator is done, or, if none runs, delete the row",
+				locks, migrations)}
+		}
+		return false, fmt.Errorf("take the migrator's lock in %s, as bun's Lock does (set migration_locks_table if "+
+			"yours is another): %w", locks, err)
+	}
+	return true, nil
+}
+
+// migratorLocked reports whether the locks table holds bun's lock on the
+// migrations table now.
+func migratorLocked(ctx context.Context, db *bun.DB, locks, migrations string) (bool, error) {
+	var locked bool
+	err := db.RunInTx(ctx, &sql.TxOptions{ReadOnly: true}, func(ctx context.Context, tx bun.Tx) error {
+		var exists bool
+		if err := tx.QueryRowContext(ctx, "SELECT to_regclass(?) IS NOT NULL", locks).Scan(&exists); err != nil || !exists {
+			return err
+		}
+		return tx.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM "+locks+" WHERE table_name = ?)", migrations).
+			Scan(&locked)
+	})
+	if err != nil {
+		return false, fmt.Errorf("read %s, bun's locks table: %w", locks, err)
+	}
+	return locked, nil
 }
 
 func printApply(o streams, r *applyReport) {
