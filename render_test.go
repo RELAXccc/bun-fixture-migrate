@@ -76,6 +76,28 @@ func TestRenderListsWhatItRefused(t *testing.T) {
 	}
 }
 
+// The migration runs under the application's search_path: a seed guard table
+// in the configured schema has to say which schema it is in, or it is not
+// found, or a table of the same name in public is taken for it.
+func TestRenderQualifiesTheSeedGuardTable(t *testing.T) {
+	res := compute(t, base, replace(t, base, "      price_cents: 2000\n", "      price_cents: 2500\n"))
+	for _, tc := range []struct{ schema, table, want string }{
+		{"public", "plans", `SeedGuardTable: "plans"`},
+		{"app", "plans", `SeedGuardTable: "app.plans"`},
+		{"app", "other.plans", `SeedGuardTable: "other.plans"`},
+	} {
+		cfg := testConfig(t)
+		cfg.Schema, cfg.SeedGuardTable = tc.schema, tc.table
+		src, err := Render(cfg, "x", "20260921120000", res)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if text := strings.Join(strings.Fields(string(src)), " "); !strings.Contains(text, tc.want) {
+			t.Fatalf("schema %s, table %s: want %s in\n%s", tc.schema, tc.table, tc.want, src)
+		}
+	}
+}
+
 func TestRenderRefusesAnEmptyChangeSet(t *testing.T) {
 	if _, err := Render(testConfig(t), "nothing", "20260921120000", &Result{}); err == nil {
 		t.Fatal("expected an error")

@@ -87,7 +87,7 @@ func Render(cfg *Config, name, stamp string, res *Result) ([]byte, error) {
 	}
 	set := fixturechange.Set{
 		Name:            strings.TrimSuffix(FileName(stamp, name), ".go"),
-		SeedGuardTable:  cfg.SeedGuardTable,
+		SeedGuardTable:  seedGuardTable(cfg),
 		MigrationsTable: cfg.MigrationsTable,
 		LockTimeout:     cfg.LockTimeout,
 		Tables:          res.Tables,
@@ -203,6 +203,20 @@ func Render(cfg *Config, name, stamp string, res *Result) ([]byte, error) {
 		return nil, fmt.Errorf("the generated file does not parse, which is a bug in this tool: %w", err)
 	}
 	return src, nil
+}
+
+// seedGuardTable is the configuration's seed guard table, in the schema the
+// configuration names when it is not qualified already. The migration runs
+// under the application's search_path, not the tool's: unqualified, a table in
+// another schema than public is not found there, or a table of the same name
+// in public is taken for it. public stays unqualified, so the files of
+// projects that use it read as they always have.
+func seedGuardTable(cfg *Config) string {
+	t := cfg.SeedGuardTable
+	if t == "" || strings.Contains(t, ".") || cfg.Schema == "" || cfg.Schema == "public" {
+		return t
+	}
+	return cfg.Schema + "." + t
 }
 
 func kindIdent(k fixturechange.Kind) string {

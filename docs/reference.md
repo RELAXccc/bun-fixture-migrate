@@ -167,7 +167,7 @@ what changing it does. Unknown keys are an error.
 | `migrator` | `Migrations` | the `*migrate.Migrations` variable generated files register with |
 | `migrations_table` | `bun_migrations` | the migrator's table, when it is built `WithTableName`; may be schema-qualified |
 | `state` | `<out>/fixture_state.yml` | the state file |
-| `seed_guard_table` | | a table never empty in a seeded database; while it is empty a fixture migration does nothing |
+| `seed_guard_table` | | a table never empty in a seeded database; while it is empty a fixture migration does nothing. Written into the migration in `schema` when it names none and `schema` is not `public` |
 | `database` | | a DSN, or `env:NAME` to read one from the environment |
 | `schema` | `public` | the schema of tables named without one |
 | `policy` | | see below |
