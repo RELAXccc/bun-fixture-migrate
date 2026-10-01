@@ -305,7 +305,7 @@ func TestPlanAsARoleThatCannotWrite(t *testing.T) {
 		t.Fatal(out)
 	}
 	out = a.run(1, "plan", "-dsn", dsn("bfm_plan_reader"))
-	if !strings.Contains(out, "could not be planned") || !strings.Contains(out, "plan as the role the deploy uses") ||
+	if !strings.Contains(out, "could not be planned") || !strings.Contains(out, "if not, plan as that role") ||
 		strings.Contains(out, "and so would the deploy") {
 		t.Fatal(out)
 	}
