@@ -1,0 +1,70 @@
+description: |
+  Two teams, two branches, one state file. The tax team adds Denmark (its
+  currency, its one rate, a Nordic shipping zone and PostNord); merchandising
+  adds a smart-home category with its search texts, and a permission to
+  import products. The branches touch different fixture files, so git merges
+  those without a word, but each generated a migration against the same
+  state, and the state file conflicts, on purpose. While it holds git's
+  markers, status and generate refuse it. The runbook: keep the migration
+  merged first (Denmark), take the state file as it left it, delete the other
+  branch's migration and generate it again on top. The smart-home branch had
+  been deployed to staging for review before the merge, so staging applied
+  the deleted migration: bun lists it as applied and no longer in the
+  directory, and the migration generated again finds its changes made there.
+steps:
+  - merge:
+      branches:
+        - name: nordics
+          steps:
+            - overlay: branch-nordics
+            - generate: {name: denmark, at: "20271101100000"}
+              output: ["Currency: 1 insert", "Country: 1 insert", "TaxRate: 1 insert", "PaymentProvider: 1 update", "ShippingZone: 1 insert", "ShippingMethod: 1 insert"]
+        - name: smart-home
+          steps:
+            - overlay: branch-smart-home
+            - generate: {name: smart home, at: "20271102100000"}
+              output: ["Category: 1 insert", "CategorySEO: 1 insert", "AdminPermission: 1 insert", "AdminRolePermission: 1 insert"]
+            # A preview of the branch, deployed to staging for review.
+            - app: [migrate]
+              env: staging
+              output: ["20271102100000_fixture_smart_home"]
+      conflicts: [migrations/fixture_state.yml]
+      unresolved:
+        - cli: [status, -offline]
+          exit: 3
+          output: ["git's conflict markers"]
+        - cli: [generate, -name, merge, -at, "20271103100000"]
+          exit: 1
+          output: ["conflict"]
+      resolve: .
+      state: ours
+  # Both migrations are in the directory, and the state file is Denmark's.
+  - cli: [status, -offline]
+    exit: 3
+    output: ["20271102100000_fixture_smart_home is a generated fixture migration whose changes the state file does not include"]
+  - cli: [baseline, -force]
+    exit: 2
+  - cli: [generate, -name, smart home, -at, "20271103100000"]
+    exit: 2
+  # The runbook: delete the smart-home migration, generate it again on top of
+  # Denmark's.
+  - remove: [migrations/20271102100000_fixture_smart_home.go]
+  - generate: {name: smart home, at: "20271103100000"}
+    output: ["Category: 1 insert", "CategorySEO: 1 insert", "AdminPermission: 1 insert", "AdminRolePermission: 1 insert"]
+  - cli: [status, -offline]
+    output: ["not migrated nothing"]
+  - cli: [plan, -strict]
+    env: prod
+    output:
+      - "20271101100000_fixture_denmark: would succeed"
+      - "20271103100000_fixture_smart_home: would succeed"
+deploy: [prod, staging]
+plan:
+  - cli: [status]
+    env: staging
+    output: ["20271102100000"]
+expect:
+  migrate:
+    staging:
+      output:
+        - "Category slug=smart-home insert: the row is already there with these values, nothing to insert"

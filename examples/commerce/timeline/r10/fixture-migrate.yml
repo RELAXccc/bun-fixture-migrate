@@ -118,6 +118,12 @@ models:
     key: [code]
     ref: code
 
+  LoyaltyTier:
+    table: loyalty_tiers
+    serial: true
+    key: [code]
+    ref: code
+
   AdminPermission:
     table: admin_permissions
     serial: true

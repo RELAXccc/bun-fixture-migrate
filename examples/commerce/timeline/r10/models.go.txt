@@ -16,7 +16,7 @@ import (
 var masterModels = []any{
 	(*Currency)(nil), (*Country)(nil), (*TaxRate)(nil), (*PaymentProvider)(nil),
 	(*Category)(nil), (*CategorySEO)(nil), (*ShippingZone)(nil), (*ShippingMethod)(nil),
-	(*MenuItem)(nil), (*SenderIdentity)(nil),
+	(*MenuItem)(nil), (*SenderIdentity)(nil), (*LoyaltyTier)(nil),
 	(*AdminRole)(nil), (*AdminPermission)(nil), (*AdminRolePermission)(nil),
 	(*HsCode)(nil),
 }
@@ -133,6 +133,16 @@ type SenderIdentity struct {
 	Email       string
 	DisplayName string
 	ReplyTo     *string
+}
+
+type LoyaltyTier struct {
+	bun.BaseModel `bun:"table:loyalty_tiers"`
+
+	ID              int64 `bun:",pk,autoincrement"`
+	Code            string
+	Name            map[string]string `bun:"type:jsonb,notnull"`
+	MinPoints       int32             `bun:",notnull"`
+	DiscountPercent string            `bun:"type:numeric(4,1)"`
 }
 
 // AdminRole: the built-in roles are master data; a merchant's custom roles

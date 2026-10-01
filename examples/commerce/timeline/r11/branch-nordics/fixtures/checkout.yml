@@ -1,4 +1,5 @@
-# Checkout: how a customer pays, and where the shop ships to at what price.
+# Checkout: how a customer pays, where the shop ships to and at what price,
+# and the loyalty programme's tiers.
 
 # The providers every shop has. Ops add local ones in the back office; the
 # file never numbers them.
@@ -89,3 +90,10 @@
     - {id: 6, code: ups-world, zone_id: '{{ $.ShippingZone.world.ID }}', carrier: UPS, name: {en: Worldwide Saver}, base_price: 39.00, currency_code: '{{ $.Currency.usd.Code }}', min_days: 3, max_days: 8, is_default: true}
     - {id: 7, code: inpost-pl, zone_id: '{{ $.ShippingZone.pl.ID }}', carrier: InPost, name: {en: Parcel locker, pl: Paczkomat}, base_price: 12.99, currency_code: '{{ $.Currency.pln.Code }}', min_days: 1, max_days: 2, is_default: true}
     - {id: 8, code: postnord-dk, zone_id: '{{ $.ShippingZone.nordics.ID }}', carrier: PostNord, name: {en: MyPack Home, da: MyPack Home}, base_price: 49.00, currency_code: '{{ $.Currency.dkk.Code }}', min_days: 2, max_days: 4, is_default: true}
+
+- model: LoyaltyTier
+  rows:
+    - {id: 1, code: bronze, name: {en: Bronze, de: Bronze}, min_points: 0, discount_percent: 0.0}
+    - {id: 2, code: silver, name: {en: Silver, de: Silber}, min_points: 1000, discount_percent: 2.5}
+    - {id: 3, code: gold, name: {en: Gold, de: Gold}, min_points: 5000, discount_percent: 5.0}
+    - {id: 4, code: platinum, name: {en: Platinum, de: Platin}, min_points: 20000, discount_percent: 7.5}

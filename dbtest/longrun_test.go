@@ -200,6 +200,9 @@ type lrMerge struct {
 	} `yaml:"branches"`
 	// Conflicts are the files git must report conflicting.
 	Conflicts []string `yaml:"conflicts"`
+	// Unresolved are steps run while the merge stands in its conflicts,
+	// git's markers in the files, before anything is resolved.
+	Unresolved []lrStep `yaml:"unresolved"`
 	// Resolve is overlaid on the conflicted files: the resolution.
 	Resolve string `yaml:"resolve"`
 	// State is the side of the state file taken: ours or theirs.
@@ -962,6 +965,9 @@ func (lr *longrun) merge(project, relDir, label string, m *lrMerge) {
 	}
 	if len(conflicts) == 0 {
 		return
+	}
+	for i, s := range m.Unresolved {
+		lr.step(project, relDir, fmt.Sprintf("%s unresolved step %d", label, i+1), s, nil, false)
 	}
 	lr.overlay(filepath.Join(relDir, m.Resolve), project)
 	switch m.State {
