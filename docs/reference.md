@@ -181,13 +181,13 @@ Exit 2 when a finding the policy makes an error, or a difference `generate` woul
 
 | Code | Meaning |
 | --- | --- |
-| 0 | done; for `check`, `status` and `plan`: nothing found, or only findings the policy makes warnings |
+| 0 | done; for `check`, `status` and `plan`: nothing found. A finding the policy makes a warning is reported and is not a failure |
 | 1 | the command could not do its job: a bad flag, no connection, an unreadable file, output that could not be written, a plan that could not finish |
 | 2 | refused: a difference that needs a hand-written migration, a finding the policy makes an error, a state `baseline` will not replace, a file `export` will not write |
 | 3 | found something: drift (`check`), a change no migration makes or a migration not applied (`status`), a migration that would fail or skip, or a problem in the migrations directory (`status`, `plan`) |
 
 A pipeline can tell "the database drifted" (3) from "the check could not run" (1). Whatever the
-code, the last line on standard error says why, starting with `bun-fixture-migrate:`.
+code, unless it is 0, the last line on standard error says why, starting with `bun-fixture-migrate:`.
 
 ## Configuration
 
