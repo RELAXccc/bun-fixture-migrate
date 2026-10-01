@@ -42,8 +42,12 @@ it means to `dbfixture` and PostgreSQL. Each rule below is checked against the r
   [value](#values) is. A ref column that is itself a template, and a copy of a field that is, are
   refused: write the value.
 - A template copying a field other than the id stores what the field holds as Go's `fmt` prints it.
-  That is the value for a field of a string or an integer column, and nothing a file can write for
-  any other: a `float64` of 100000000 prints as `1e+08`, a `time.Time` as
+  That is the value for a field of a string or an integer column. A `bool` prints as `true` or
+  `false`, whichever spelling the file loads into it (`yes`, `On`). A `uuid` prints as written from a
+  string field and in lower case with hyphens from a uuid type with a `String` method
+  (`github.com/google/uuid`, pgx's `pgtype.UUID`): a `uuid` column holds both as one value, and any
+  other column takes the copy only where the file writes the uuid that way. Nothing else is a value a
+  file can write: a `float64` of 100000000 prints as `1e+08`, a `time.Time` as
   `2026-01-01 10:00:00 +0000 UTC`, a nil pointer as `<nil>`. So a copy of a null, of a mapping or
   sequence, or of a column of another type is refused; without the database, which says the column's
   type, a change carrying a copy is. An id written as a template is refused too: the tool reads the
