@@ -1,0 +1,17 @@
+description: |
+  The fixture file is split into four, by subject, listed under fixtures: in
+  the order the application loads them with one dbfixture Load. No row
+  changes, so generate has nothing to write and the release carries no
+  migration; a new database is seeded from the four files and ends up the same.
+steps:
+  - overlay: .
+  - remove: [fixtures/fixture.yml]
+  - generate: {name: split the fixture file, at: "20260629100000"}
+    output: ["nothing changed in fixtures/reference.yml, fixtures/catalog.yml, fixtures/access.yml, fixtures/i18n.yml since the state after 20260601100000_fixture_enterprise_plan"]
+  - cli: [status, -offline]
+    output: ["not migrated nothing"]
+deploy: [prod]
+expect:
+  migrate:
+    prod:
+      output: ["no migrations to run"]

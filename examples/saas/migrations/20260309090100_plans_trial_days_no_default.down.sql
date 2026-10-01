@@ -1,0 +1,1 @@
+ALTER TABLE plans ALTER COLUMN trial_days SET DEFAULT 14;

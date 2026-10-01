@@ -1,0 +1,12 @@
+description: |
+  The first release: the schema, the master data, and baseline, which records
+  that every database about to be created holds the fixture file as it is.
+  Production and the on-premises customer go live with it.
+steps:
+  - overlay: .
+  - cli: [baseline]
+    output: ["wrote migrations/fixture_state.yml"]
+  - cli: [status, -offline]
+    output: ["not migrated nothing"]
+create: [prod, onprem]
+deploy: [prod, onprem]

@@ -1,0 +1,56 @@
+description: |
+  A feature removed, a plan retired. Priority support is no longer sold: the
+  feature goes, and so do its grants to three plans, deleted before the
+  feature they point at. The scale plan has live subscriptions in production,
+  so it is retired (active: false) rather than deleted; deleting it is refused
+  by generate (deletes: refuse), and with deletes allowed the migration would
+  fail at run time, because invoices point at its prices.
+steps:
+  - overlay: .
+  - generate: {name: retire scale and priority support, at: "20260727100000"}
+    output:
+      - "Plan: 1 update"
+      - "Feature: 1 delete"
+      - "PlanFeature: 3 deletes"
+deploy: [prod, staging]
+before_deploy:
+  prod:
+    # A customer on the scale plan, invoiced: live data on the plan.
+    - INSERT INTO tenants (name, country_id) VALUES ('scale-customer', (SELECT id FROM countries WHERE code = 'CH'))
+    - >-
+      INSERT INTO subscriptions (tenant_id, plan_id, currency_id, seats)
+      SELECT t.id, p.id, c.id, 40 FROM tenants t, plans p, currencies c
+      WHERE t.name = 'scale-customer' AND p.code = 'scale' AND c.code = 'EUR'
+    - >-
+      INSERT INTO invoices (subscription_id, plan_price_id, amount)
+      SELECT s.id, pp.id, pp.amount * s.seats FROM subscriptions s JOIN tenants t ON t.id = s.tenant_id
+      JOIN plan_prices pp ON pp.plan_id = s.plan_id AND pp.currency_id = s.currency_id
+      WHERE t.name = 'scale-customer'
+plan:
+  - cli: [plan, -strict]
+    env: prod
+    output:
+      - "applied PlanFeature feature_id=Feature(priority_support),plan_id=Plan(scale) delete (1 row)"
+      - "applied Feature code=priority_support delete (1 row)"
+      - "applied Plan code=scale update (1 row)"
+probes:
+  - name: delete the scale plan
+    steps:
+      - overlay: probe-delete
+      - generate: {name: delete scale, at: "20260728100000"}
+        exit: 2
+        output:
+          - "refused: Plan Plan/code=scale: deletes of this model are refused by the configuration"
+          - "refused: PlanPrice PlanPrice/currency_id=Currency(EUR)/plan_id=Plan(scale)/valid_from=2026-03-01: deletes of this model are refused"
+  - name: delete the scale plan with deletes allowed
+    steps:
+      - overlay: probe-delete-allowed
+      - generate: {name: delete scale, at: "20260728100000"}
+        output: ["Plan: 1 delete", "PlanPrice: 2 deletes", "PlanFeature: 5 deletes", "Translation: 3 deletes"]
+      - cli: [plan]
+        env: prod
+        exit: 3
+        output:
+          - "failed PlanPrice currency_id=Currency(EUR),plan_id=Plan(scale),valid_from=2026-03-01 delete [referenced]"
+          - "of invoices point at plan_prices"
+          - "which refuses the delete: repoint or remove them first"

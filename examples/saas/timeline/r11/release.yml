@@ -1,0 +1,43 @@
+description: |
+  Two things the runbook covers. First, production still has the admin's name
+  for the dashboards category, and the file is right: generate -from-db against
+  production writes the migration that makes production match the file, which
+  every other database finds already made. Then a SQL migration renames
+  plans.sort_order to position. The older fixture migrations that insert plans
+  name sort_order; they run before the rename wherever they run. The fixture
+  file follows the rename, which generate refuses (a column written on one side
+  only), so the developer records the rename with baseline -force, as for any
+  change a hand-written migration makes, and only then reorders the plans.
+  Production gets it now; the on-premises customer, at r06, will cross it in
+  one migrate at r12.
+steps:
+  - generate: {name: dashboards name as in the file, at: "20261005100000", flags: [-from-db]}
+    env: prod
+    output: ["Category: 1 update"]
+  - overlay: .
+  - generate: {name: plan order, at: "20261019100000"}
+    exit: 2
+    output:
+      - 'refused: Plan Plan/code=free: column "position" is written on one side and left out on the other'
+      - "5 changes refused, nothing written"
+  - cli: [baseline]
+    exit: 2
+    output: ["baseline would record"]
+  - cli: [baseline, -force]
+    output: ["wrote migrations/fixture_state.yml"]
+  - overlay: then
+  - generate: {name: plan order, at: "20261019100000"}
+    output: ["Plan: 2 updates"]
+deploy: [prod]
+plan:
+  - cli: [plan, -with-sql, -strict]
+    env: prod
+    output:
+      - "20261005100000_fixture_dashboards_name_as_in_the_file: would succeed"
+      - "applied Category slug=dashboards update (1 row)"
+      - "20261019090000_plans_rename_sort_order (SQL): would succeed"
+      - "applied Plan code=scale update (1 row)"
+expect:
+  migrate:
+    prod:
+      output: ["Category slug=dashboards update: applied (1 row)"]

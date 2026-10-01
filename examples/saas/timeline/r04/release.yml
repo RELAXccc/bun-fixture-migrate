@@ -1,0 +1,136 @@
+description: |
+  Admin edits meet a release. Before the deploy, an admin rewrites two
+  translations in production through the admin UI. The release changes the
+  same two rows: the context (another column) of the German welcome subject,
+  and the value (the same column) of the English billing label. Under
+  changed_row: warn the first is made and keeps the admin's value, because a
+  guard only covers the columns the change writes; the second is skipped,
+  keeping the admin's edit. check reports both rows as drift until the next
+  release folds the admin's values into the file. Staging catches up two
+  releases at once.
+steps:
+  - overlay: .
+  - generate: {name: quotas and labels, at: "20260406100000"}
+    output:
+      - "Feature: 1 update"
+      - "PlanFeature: 2 updates"
+      - "Translation: 2 updates"
+deploy: [prod, staging]
+before_deploy:
+  prod:
+    - UPDATE translations SET value = 'Willkommen an Bord, {name}!' WHERE locale = 'de' AND key = 'email.welcome.subject'
+    - UPDATE translations SET value = 'Billing & invoices' WHERE locale = 'en' AND key = 'nav.billing'
+plan:
+  - cli: [plan]
+    env: prod
+    output:
+      - "applied Translation key=email.welcome.subject,locale=de update (1 row)"
+      - "skipped Translation key=nav.billing,locale=en update [changed row]"
+  - cli: [plan, -strict]
+    env: prod
+    exit: 3
+    output: ["1 change would be skipped"]
+  # Staging is two releases behind, with a SQL migration in between.
+  - cli: [plan, -with-sql, -strict]
+    env: staging
+    output:
+      - "20260309090000_plans_trial_days (SQL): would succeed"
+      - "20260309100000_fixture_trial_days_and_french: would succeed"
+      - "20260406100000_fixture_quotas_and_labels: would succeed"
+expect:
+  migrate:
+    prod:
+      output:
+        - "Translation key=email.welcome.subject,locale=de update: applied (1 row)"
+        - "Translation key=nav.billing,locale=en update: SKIPPED. translations key=nav.billing,locale=en no longer holds the values"
+  check:
+    prod:
+      exit: 3
+      output:
+        - "Different in the database and the fixture file:"
+        - "Translation key=email.welcome.subject,locale=de"
+        - "value: database Willkommen an Bord, {name}!, file Willkommen bei Acme!"
+        - "Translation key=nav.billing,locale=en"
+        - "value: database Billing & invoices, file Billing and invoices"
+probes:
+  - name: roll the release back on a copy of production and deploy it again
+    clone: prod
+    steps:
+      - app: [rollback]
+        env: clone
+        output:
+          - "Translation key=email.welcome.subject,locale=de update: applied (1 row)"
+          - "Translation key=nav.billing,locale=en update: SKIPPED"
+          - "rolled back group"
+      - sql: SELECT coalesce(context, 'NULL') FROM translations WHERE locale = 'de' AND key = 'email.welcome.subject'
+        env: clone
+        want: "NULL"
+      - sql: SELECT value FROM translations WHERE locale = 'en' AND key = 'nav.billing'
+        env: clone
+        want: "Billing & invoices"
+      - sql: SELECT quota::text FROM plan_features pf JOIN plans p ON p.id = pf.plan_id JOIN features f ON f.id = pf.feature_id WHERE p.code = 'team' AND f.code = 'storage'
+        env: clone
+        want: "100"
+      - cli: [status, -require-applied]
+        env: clone
+        exit: 3
+        output: ["1 migration not applied"]
+      - app: [migrate]
+        env: clone
+        output: ["migrated to group"]
+      - cli: [check]
+        env: clone
+        exit: 3
+        output: ["value: database Billing & invoices, file Billing and invoices"]
+  - name: export production into the file and generate, as the runbook says
+    steps:
+      - cli: [export]
+        env: prod
+        output: ["wrote fixtures/fixture.yml"]
+      # export writes every column of the table, roles.tenant_id included,
+      # which the fixture file never wrote; generate then refuses every role.
+      - cli: [generate, -dry-run, -name, admin edits]
+        env: prod
+        exit: 2
+        known: "F1: export writes columns the fixture files do not, so export-then-generate is refused"
+        output:
+          - "refused: Role Role/code=owner: column \"tenant_id\" is written on one side and left out on the other"
+      - edit:
+          file: fixture-migrate.yml
+          old: "    where: tenant_id IS NULL\n"
+          new: "    where: tenant_id IS NULL\n    defaults:\n      tenant_id: ~\n"
+        known: "F1: workaround, say what an omitted tenant_id means"
+      - cli: [generate, -dry-run, -name, admin edits]
+        env: prod
+        output: ["Translation: 2 updates"]
+        absent: ["Plan:", "Role:", "PlanPrice:", "Feature:", "Category:", "refused"]
+      # The export wrote production's ids into the file: the plans'
+      # gen_random_uuid() keys, and the serial ids of every price and
+      # translation, which the file never named and which differ in every
+      # database that got those rows from a migration rather than a seed.
+      # Every other database now drifts.
+      - cli: [check]
+        env: staging
+        exit: 3
+        known: "F2: export writes the source database's ids for rows the file left to the database"
+        output:
+          - "Plan Plan/code=free: its id changed from"
+          - "Translation id 10: renamed from Translation/key=plan.free.name/locale=de to Translation/key=plan.team.name/locale=de"
+      # And a later change carries production's ids into its guards. A
+      # delete of a translation nobody touched is skipped on staging.
+      - generate: {name: admin edits, at: "20260420100000"}
+        env: prod
+        output: ["Translation: 2 updates"]
+      - edit:
+          file: fixtures/fixture.yml
+          regexp: true
+          old: "    - _id: plan_scale_name_fr\\n      id: [0-9]+\\n(      .*\\n){4}"
+          new: ""
+      - generate: {name: drop a translation, at: "20260421100000"}
+        env: prod
+        output: ["Translation: 1 delete"]
+      - cli: [plan, -file, migrations/20260421100000_fixture_drop_a_translation.go]
+        env: staging
+        known: "F2: the delete guards on production's id"
+        output:
+          - "skipped Translation key=plan.scale.name,locale=fr delete [changed row]"

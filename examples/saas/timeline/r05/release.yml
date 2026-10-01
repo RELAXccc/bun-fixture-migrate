@@ -1,0 +1,98 @@
+description: |
+  Folding production's edits into the file, a permission renamed in place, and
+  a new master role. The developer reads the admin's two translations off an
+  export of production and writes them into the file. billing.write becomes
+  billing.manage under renames: update, so the role grants that point at it
+  stay where they are. A billing administrator role joins the master roles.
+  Roles are shared with the tenants' custom roles, whose ids come from the same
+  sequence, so the master role's id is taken from a range the sequence no longer
+  hands out (a SQL migration moves it to 10000). The probes show why: the next
+  free id is a tenant's on production, an id-less master row cannot be seeded,
+  and a code a tenant already uses lets the migration grant the master role's
+  permissions to the tenant's role.
+steps:
+  - cli: [export, -stdout]
+    env: prod
+    output:
+      - 'value: "Willkommen an Bord, {name}!"'
+      - 'value: "Billing & invoices"'
+  - overlay: .
+  - generate: {name: billing admin and folded edits, at: "20260504100000"}
+    output:
+      - "Role: 1 insert"
+      - "Permission: 2 updates"
+      - "RolePermission: 2 inserts"
+      - "Translation: 2 updates"
+deploy: [prod]
+before_deploy:
+  prod:
+    # A tenant creates a custom role named like a master role to come.
+    - INSERT INTO roles (tenant_id, code, name) VALUES ((SELECT min(id) FROM tenants), 'auditor', 'Auditor (custom)')
+    - INSERT INTO role_permissions (role_id, permission_id) SELECT r.id, p.id FROM roles r, permissions p WHERE r.code = 'auditor' AND r.tenant_id IS NOT NULL AND p.code = 'projects.read'
+plan:
+  - cli: [plan, -with-sql, -strict]
+    env: prod
+    output:
+      - "applied Permission code=billing.write update (1 row)"
+      - "unchanged Translation key=nav.billing,locale=en update"
+expect:
+  migrate:
+    prod:
+      output:
+        - "Translation key=nav.billing,locale=en update: the row already holds these values, nothing to do"
+known:
+  - "F3: no safe id for a new master row in a table the application inserts into too; worked around with a SQL migration that moves the sequence to 10000 and master ids below it"
+  - "F4: a reference to a model with a where clause resolves against every row of the table, tenant rows included"
+probes:
+  - name: a master role with the next free id
+    from: start
+    when: before-deploy
+    known: "F3"
+    steps:
+      - overlay: probe-role-id
+      - generate: {name: billing admin, at: "20260504100000"}
+        env: prod
+      - cli: [plan, -strict]
+        env: prod
+        exit: 3
+        output:
+          - "failed Role code=billing_admin insert [id drift]: roles id = 5 is already held by the row id = 5 (code custom-"
+  - name: a master role without an id
+    from: start
+    when: before-deploy
+    known: "F3"
+    clone: fresh
+    steps:
+      - overlay: probe-role-no-id
+      - generate: {name: billing admin, at: "20260504100000"}
+        env: prod
+      - app: [migrate]
+        env: clone
+        exit: 1
+        output: ['seed: ERROR: duplicate key value violates unique constraint "roles_pkey"']
+  - name: a master role whose code a tenant's custom role has
+    from: start
+    when: before-deploy
+    known: "F4"
+    clone: prod
+    steps:
+      - overlay: probe-role-code
+      - generate: {name: auditor role, at: "20260504100000"}
+        env: prod
+        output: ["Role: 1 insert", "RolePermission: 2 inserts"]
+      - app: [migrate]
+        env: clone
+        output:
+          - "Role code=auditor insert: SKIPPED"
+          - "RolePermission permission_id=Permission(billing.read),role_id=Role(auditor) insert: applied (1 row)"
+      # The tenant's custom role now grants billing.read and billing.manage.
+      - sql: >-
+          SELECT string_agg(p.code, ',' ORDER BY p.code) FROM role_permissions rp
+          JOIN roles r ON r.id = rp.role_id JOIN permissions p ON p.id = rp.permission_id
+          WHERE r.code = 'auditor' AND r.tenant_id IS NOT NULL
+        env: clone
+        want: "billing.manage,billing.read,projects.read"
+      - cli: [check]
+        env: clone
+        exit: 3
+        output: ["In the fixture file, not in the database:", "Role code=auditor"]

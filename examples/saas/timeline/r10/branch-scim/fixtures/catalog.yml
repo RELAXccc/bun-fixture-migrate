@@ -1,0 +1,251 @@
+# What is sold: plans, their prices and features, and the category tree.
+
+- model: Plan
+  rows:
+    - _id: free
+      code: free
+      name: Free
+      tier: free
+      active: true
+      sort_order: 1
+      trial_days: 0
+      settings: {max_projects: 3, support: community}
+      tags: [starter]
+    - _id: team
+      code: team
+      name: Team
+      tier: team
+      active: true
+      sort_order: 2
+      trial_days: 14
+      settings: {max_projects: 50, support: email, sso: false}
+      tags: [popular, monthly]
+    - _id: business
+      code: business
+      name: Business
+      tier: business
+      active: true
+      sort_order: 3
+      trial_days: 30
+      settings: {max_projects: 500, support: phone, sso: true, audit: {retention_days: 90}}
+      tags: [annual]
+    - _id: scale
+      code: scale
+      name: Scale
+      tier: business
+      active: false
+      sort_order: 4
+      trial_days: 30
+      settings: {max_projects: 5000, support: dedicated, sso: true, audit: {retention_days: 365}}
+      tags: [annual, enterprise-ready]
+    - _id: enterprise
+      code: enterprise
+      name: Enterprise
+      tier: enterprise
+      active: true
+      sort_order: 5
+      trial_days: 30
+      settings: {max_projects: null, support: dedicated, sso: true, audit: {retention_days: 3650}, sla: "99.95"}
+      tags: [annual, contract]
+
+- model: PlanPrice
+  rows:
+    - plan_id: '{{ $.Plan.free.ID }}'
+      currency_id: '{{ $.Currency.eur.ID }}'
+      valid_from: 2026-01-01
+      amount: 0
+    - plan_id: '{{ $.Plan.team.ID }}'
+      currency_id: '{{ $.Currency.eur.ID }}'
+      valid_from: 2026-01-01
+      amount: 29.00
+    - plan_id: '{{ $.Plan.team.ID }}'
+      currency_id: '{{ $.Currency.usd.ID }}'
+      valid_from: 2026-01-01
+      amount: 32.00
+    - plan_id: '{{ $.Plan.team.ID }}'
+      currency_id: '{{ $.Currency.eur.ID }}'
+      valid_from: 2026-04-01
+      amount: 35.00
+    - plan_id: '{{ $.Plan.team.ID }}'
+      currency_id: '{{ $.Currency.usd.ID }}'
+      valid_from: 2026-04-01
+      amount: 38.00
+    - plan_id: '{{ $.Plan.business.ID }}'
+      currency_id: '{{ $.Currency.eur.ID }}'
+      valid_from: 2026-01-01
+      amount: 99.00
+    - plan_id: '{{ $.Plan.business.ID }}'
+      currency_id: '{{ $.Currency.usd.ID }}'
+      valid_from: 2026-01-01
+      amount: 109.00
+    - plan_id: '{{ $.Plan.business.ID }}'
+      currency_id: '{{ $.Currency.jpy.ID }}'
+      valid_from: 2026-01-01
+      amount: 15000
+    - plan_id: '{{ $.Plan.scale.ID }}'
+      currency_id: '{{ $.Currency.eur.ID }}'
+      valid_from: 2026-03-01
+      amount: 199.00
+    - plan_id: '{{ $.Plan.scale.ID }}'
+      currency_id: '{{ $.Currency.usd.ID }}'
+      valid_from: 2026-03-01
+      amount: 219.00
+    - plan_id: '{{ $.Plan.enterprise.ID }}'
+      currency_id: '{{ $.Currency.eur.ID }}'
+      valid_from: 2026-07-01
+      amount: 499
+    - plan_id: '{{ $.Plan.enterprise.ID }}'
+      currency_id: '{{ $.Currency.usd.ID }}'
+      valid_from: 2026-07-01
+      amount: 549
+    - plan_id: '{{ $.Plan.enterprise.ID }}'
+      currency_id: '{{ $.Currency.chf.ID }}'
+      valid_from: 2026-07-01
+      amount: 479.95
+
+- model: Feature
+  rows:
+    - _id: projects
+      id: 1
+      code: projects
+      name: Projects
+      unit: projects
+    - _id: storage
+      id: 2
+      code: storage
+      name: Storage
+      unit: GB
+    - _id: api
+      id: 3
+      code: api
+      name: API calls
+      unit: requests/month
+    - _id: sso
+      id: 4
+      code: sso
+      name: Single sign-on
+    - _id: audit_log
+      id: 6
+      code: audit_log
+      name: Audit log
+    - _id: scim
+      id: 7
+      code: scim
+      name: SCIM provisioning
+
+- model: PlanFeature
+  rows:
+    - plan_id: '{{ $.Plan.free.ID }}'
+      feature_id: '{{ $.Feature.projects.ID }}'
+      quota: 5
+    - plan_id: '{{ $.Plan.free.ID }}'
+      feature_id: '{{ $.Feature.storage.ID }}'
+      quota: 1
+    - plan_id: '{{ $.Plan.team.ID }}'
+      feature_id: '{{ $.Feature.projects.ID }}'
+      quota: 50
+    - plan_id: '{{ $.Plan.team.ID }}'
+      feature_id: '{{ $.Feature.storage.ID }}'
+      quota: 200
+    - plan_id: '{{ $.Plan.team.ID }}'
+      feature_id: '{{ $.Feature.api.ID }}'
+      quota: 100000
+    - plan_id: '{{ $.Plan.business.ID }}'
+      feature_id: '{{ $.Feature.projects.ID }}'
+      quota: ~
+    - plan_id: '{{ $.Plan.business.ID }}'
+      feature_id: '{{ $.Feature.storage.ID }}'
+      quota: 1000
+    - plan_id: '{{ $.Plan.business.ID }}'
+      feature_id: '{{ $.Feature.api.ID }}'
+      quota: ~
+    - plan_id: '{{ $.Plan.business.ID }}'
+      feature_id: '{{ $.Feature.sso.ID }}'
+    - plan_id: '{{ $.Plan.business.ID }}'
+      feature_id: '{{ $.Feature.audit_log.ID }}'
+    - plan_id: '{{ $.Plan.scale.ID }}'
+      feature_id: '{{ $.Feature.projects.ID }}'
+    - plan_id: '{{ $.Plan.scale.ID }}'
+      feature_id: '{{ $.Feature.storage.ID }}'
+      quota: 5000
+    - plan_id: '{{ $.Plan.scale.ID }}'
+      feature_id: '{{ $.Feature.api.ID }}'
+    - plan_id: '{{ $.Plan.scale.ID }}'
+      feature_id: '{{ $.Feature.sso.ID }}'
+    - plan_id: '{{ $.Plan.scale.ID }}'
+      feature_id: '{{ $.Feature.audit_log.ID }}'
+    - plan_id: '{{ $.Plan.enterprise.ID }}'
+      feature_id: '{{ $.Feature.projects.ID }}'
+    - plan_id: '{{ $.Plan.enterprise.ID }}'
+      feature_id: '{{ $.Feature.storage.ID }}'
+    - plan_id: '{{ $.Plan.enterprise.ID }}'
+      feature_id: '{{ $.Feature.api.ID }}'
+    - plan_id: '{{ $.Plan.enterprise.ID }}'
+      feature_id: '{{ $.Feature.sso.ID }}'
+    - plan_id: '{{ $.Plan.enterprise.ID }}'
+      feature_id: '{{ $.Feature.audit_log.ID }}'
+    - plan_id: '{{ $.Plan.enterprise.ID }}'
+      feature_id: '{{ $.Feature.scim.ID }}'
+
+- model: Category
+  rows:
+    - _id: integrations
+      id: 1
+      slug: platform
+      name: Platform
+      position: 1
+    - _id: api
+      id: 2
+      slug: api
+      parent_id: '{{ $.Category.integrations.ID }}'
+      name: API
+      position: 1
+    - _id: rest
+      id: 3
+      slug: rest
+      parent_id: '{{ $.Category.api.ID }}'
+      name: REST
+      position: 1
+    - _id: graphql
+      id: 4
+      slug: graphql
+      parent_id: '{{ $.Category.api.ID }}'
+      name: GraphQL
+      position: 2
+    - _id: webhooks
+      id: 5
+      slug: webhooks
+      parent_id: '{{ $.Category.integrations.ID }}'
+      name: Webhooks
+      position: 2
+    - _id: analytics
+      id: 6
+      slug: analytics
+      parent_id: '{{ $.Category.integrations.ID }}'
+      name: Analytics
+      position: 3
+    # Not 9: a tree whose parent is 9 and child 10 is read back in the order
+    # 1, 10, 2, ..., 9 and the child cannot be resolved (known: F8).
+    - _id: developer_tools
+      id: 10
+      slug: developer-tools
+      name: Developer tools
+      position: 2
+    - _id: sdks
+      id: 11
+      slug: sdks
+      parent_id: '{{ $.Category.developer_tools.ID }}'
+      name: SDKs
+      position: 1
+    - _id: dashboards
+      id: 7
+      slug: dashboards
+      parent_id: '{{ $.Category.analytics.ID }}'
+      name: Dashboards
+      position: 1
+    - _id: exports
+      id: 8
+      slug: exports
+      parent_id: '{{ $.Category.analytics.ID }}'
+      name: Exports
+      position: 2

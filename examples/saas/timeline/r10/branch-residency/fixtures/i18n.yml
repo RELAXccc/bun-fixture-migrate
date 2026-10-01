@@ -1,0 +1,62 @@
+# Translations, by locale and key.
+
+- model: Translation
+  rows:
+    - {locale: en, key: plan.free.name, value: Free}
+    - {locale: en, key: plan.team.name, value: Team}
+    - {locale: en, key: plan.business.name, value: Business}
+    - {locale: en, key: plan.scale.name, value: Scale}
+    - {locale: en, key: plan.enterprise.name, value: Enterprise}
+    - {locale: en, key: nav.billing, value: Billing & invoices}
+    - {locale: en, key: nav.settings, value: Settings & data residency}
+    - {locale: en, key: errors.quota_exceeded, value: "You have used all {{quota}} of your plan's {{feature}}."}
+    - locale: en
+      key: email.welcome.subject
+      value: Welcome to Acme!
+    - locale: en
+      key: email.welcome.body
+      value: |
+        Hi {name},
+
+        welcome to Acme. Your workspace "{workspace}" is ready.
+        Questions? Reply to this e-mail — a human reads it.
+      context: Plain-text e-mail; keep the placeholders.
+    - {locale: de, key: plan.free.name, value: Kostenlos}
+    - {locale: de, key: plan.team.name, value: Team}
+    - {locale: de, key: plan.business.name, value: Business}
+    - {locale: de, key: plan.scale.name, value: Scale}
+    - {locale: de, key: plan.enterprise.name, value: Enterprise}
+    - {locale: de, key: nav.billing, value: Abrechnung}
+    - {locale: de, key: nav.settings, value: Einstellungen}
+    - {locale: de, key: errors.quota_exceeded, value: "Sie haben alle {{quota}} {{feature}} Ihres Tarifs verbraucht."}
+    - locale: de
+      key: email.welcome.subject
+      value: Willkommen an Bord, {name}!
+      context: Subject line of the welcome e-mail, at most 60 characters.
+    - locale: de
+      key: email.welcome.body
+      value: |
+        Hallo {name},
+
+        willkommen bei Acme. Dein Arbeitsbereich „{workspace}“ ist bereit.
+        Fragen? Antworte einfach auf diese E-Mail – hier liest ein Mensch mit. 🙂
+      context: Plain-text e-mail; keep the placeholders.
+    - {locale: fr, key: plan.free.name, value: Gratuit}
+    - {locale: fr, key: plan.team.name, value: Équipe}
+    - {locale: fr, key: plan.business.name, value: Entreprise}
+    - {locale: fr, key: plan.scale.name, value: Scale}
+    - {locale: fr, key: plan.enterprise.name, value: Entreprise+}
+    - {locale: fr, key: nav.billing, value: Facturation}
+    - {locale: fr, key: nav.settings, value: Paramètres}
+    - {locale: fr, key: errors.quota_exceeded, value: "Vous avez utilisé les {{quota}} {{feature}} de votre forfait."}
+    - locale: fr
+      key: email.welcome.subject
+      value: "Bienvenue chez Acme !"
+    - locale: fr
+      key: email.welcome.body
+      value: |
+        Bonjour {name},
+
+        bienvenue chez Acme. Votre espace « {workspace} » est prêt.
+        Une question ? Répondez à cet e-mail : un humain le lit.
+      context: Plain-text e-mail; keep the placeholders.
