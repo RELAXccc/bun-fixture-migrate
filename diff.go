@@ -540,6 +540,7 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 			for col := range cur.Key {
 				if v, ok := cur.Cells[col]; ok {
 					prev.Cells[col] = v
+					refs.add(model, prev, col)
 				}
 			}
 			prev.Key, prev.KeyStr, prev.folded = cur.Key, cur.KeyStr, cur.folded
@@ -659,14 +660,20 @@ func newRefIndex(cfg *Config, snap *Snapshot) *refIndex {
 	for _, model := range snap.Order {
 		for _, e := range snap.Entries[model] {
 			for _, col := range sortedColumns(e.Cells) {
-				if ref := e.Cells[col].Ref; ref != nil {
-					k := ref.Model + "\x00" + ref.Key
-					x.uses[k] = append(x.uses[k], refUse{model, e, col})
-				}
+				x.add(model, e, col)
 			}
 		}
 	}
 	return x
+}
+
+// add indexes a column of an entry, when it holds a reference: one the
+// entry was given after the index was built, by a rename of its key.
+func (x *refIndex) add(model string, e *Entry, col string) {
+	if ref := e.Cells[col].Ref; ref != nil {
+		k := ref.Model + "\x00" + ref.Key
+		x.uses[k] = append(x.uses[k], refUse{model, e, col})
+	}
 }
 
 // rewrite renames a row inside the snapshot: every reference to it, and
