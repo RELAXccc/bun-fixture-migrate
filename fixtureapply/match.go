@@ -2,6 +2,7 @@ package fixtureapply
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -25,9 +26,16 @@ type colType struct {
 	array bool
 	// equality is true when the type has an = operator of its own that says
 	// two values are the same value. json, xml and point have none, and
-	// neither, in pg_operator's terms, do arrays and enums, which compare
-	// through anyarray and anyenum. The other geometric types have one that
-	// says something else; see sameIsNotEqual.
+	// neither, in pg_operator's terms, do enums, which compare through
+	// anyenum. The other geometric types have one that says something else;
+	// see sameIsNotEqual.
+	//
+	// An array has it when its element type has the default equality of a
+	// btree or hash operator class, which is what an array's = compares the
+	// elements with: char(3)[] holds {EUR,"US "} for the fixture's
+	// ["EUR","US"], and only bpchar's = says those are the same, as it does
+	// for a char(3) column. Through their text they differ, and every guard on
+	// such a column failed to match.
 	equality bool
 	// loose is true when the type's = holds two values equal that are not
 	// the same value; see looseEquality. Only a natural key compares
@@ -68,10 +76,15 @@ func (r *runner) colTypes(ctx context.Context, model string) (map[string]colType
 SELECT a.attname, format_type(a.atttypid, a.atttypmod), format_type(a.atttypid, -1), bt.typname,
        bt.typcategory = 'A',
        EXISTS (SELECT 1 FROM pg_operator o WHERE o.oprname = '=' AND o.oprleft = bt.oid AND o.oprright = bt.oid),
-       coalesce((SELECT NOT c.collisdeterministic FROM pg_collation c WHERE c.oid = a.attcollation), false)
+       coalesce((SELECT NOT c.collisdeterministic FROM pg_collation c WHERE c.oid = a.attcollation), false),
+       eb.typname,
+       EXISTS (SELECT 1 FROM pg_opclass oc JOIN pg_am am ON am.oid = oc.opcmethod
+               WHERE oc.opcdefault AND am.amname IN ('btree', 'hash') AND oc.opcintype = eb.oid)
 FROM pg_attribute a
 JOIN pg_type t ON t.oid = a.atttypid
 JOIN pg_type bt ON bt.oid = CASE WHEN t.typbasetype <> 0 THEN t.typbasetype ELSE t.oid END
+LEFT JOIN pg_type et ON et.oid = bt.typelem AND bt.typcategory = 'A'
+LEFT JOIN pg_type eb ON eb.oid = CASE WHEN et.typbasetype <> 0 THEN et.typbasetype ELSE et.oid END
 WHERE a.attrelid = ?::regclass AND a.attnum > 0 AND NOT a.attisdropped`, table)
 	if err != nil {
 		return nil, fmt.Errorf("read the column types of %s: %w", r.set.Tables[model].Name, err)
@@ -80,11 +93,18 @@ WHERE a.attrelid = ?::regclass AND a.attnum > 0 AND NOT a.attisdropped`, table)
 	types := map[string]colType{}
 	for rows.Next() {
 		var name, full, bare string
+		var elem sql.NullString
+		var elemEquality bool
 		var ct colType
-		if err := rows.Scan(&name, &full, &bare, &ct.base, &ct.array, &ct.equality, &ct.loose); err != nil {
+		if err := rows.Scan(&name, &full, &bare, &ct.base, &ct.array, &ct.equality, &ct.loose,
+			&elem, &elemEquality); err != nil {
 			return nil, err
 		}
 		ct.loose = ct.loose || looseEquality[ct.base]
+		if ct.array {
+			ct.equality = elem.Valid && elemEquality && !sameIsNotEqual[elem.String]
+			ct.loose = ct.loose || looseEquality[elem.String]
+		}
 		ct.cast = full
 		switch ct.base {
 		case "varchar", "bpchar", "_varchar", "_bpchar":

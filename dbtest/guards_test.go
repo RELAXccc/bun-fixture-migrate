@@ -40,8 +40,9 @@ var strict = fixturechange.Policy{ChangedRow: fixturechange.ModeError}
 func TestAnIntervalGuardTellsAMonthFromThirtyDays(t *testing.T) {
 	db := connect(t)
 	run(t, db, "DROP TABLE IF EXISTS guard_intervals",
-		"CREATE TABLE guard_intervals (id bigint PRIMARY KEY, name text UNIQUE NOT NULL, trial interval)",
-		"INSERT INTO guard_intervals VALUES (1, 'team', '30 days'), (2, 'solo', '24 hours'), (3, 'free', '-1 days +02:03:04')")
+		"CREATE TABLE guard_intervals (id bigint PRIMARY KEY, name text UNIQUE NOT NULL, trial interval, steps interval[])",
+		"INSERT INTO guard_intervals VALUES (1, 'team', '30 days', '{30 days}'), (2, 'solo', '24 hours', NULL), "+
+			"(3, 'free', '-1 days +02:03:04', NULL)")
 	trial := func(name string) string {
 		return scan[string](t, db, "SELECT trial::text FROM guard_intervals WHERE name = ?", name)
 	}
@@ -49,6 +50,12 @@ func TestAnIntervalGuardTellsAMonthFromThirtyDays(t *testing.T) {
 		Key: lit("name", "team"), Old: lit("trial", "1 mon"), New: lit("trial", "14 days")})
 	if err == nil || out.Problem != fixtureapply.ProblemChangedRow || trial("team") != "30 days" {
 		t.Fatalf("the hand edit to 30 days has to be a changed row: %v %+v, trial %s", err, out, trial("team"))
+	}
+	// An array of them compares its elements alike.
+	out, err = guardOne(t, db, "guard_intervals", strict, fixturechange.Change{Kind: fixturechange.Update,
+		Key: lit("name", "team"), Old: lit("steps", `["1 mon"]`), New: lit("steps", `["14 days"]`)})
+	if err == nil || out.Problem != fixtureapply.ProblemChangedRow {
+		t.Fatalf("{30 days} is not {1 mon}: %v %+v", err, out)
 	}
 	out, err = guardOne(t, db, "guard_intervals", strict, fixturechange.Change{Kind: fixturechange.Update,
 		Key: lit("name", "solo"), Old: lit("trial", "2 days"), New: lit("trial", "1 day")})
@@ -140,5 +147,68 @@ func TestACaseInsensitiveColumnGuardsItsCase(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// dbfixture seeds []string{"EUR", "US"} into a char(3)[] column as
+// {EUR,"US "}: each element padded to the length. Compared through its text
+// with the fixture's {EUR,US}, the row never matched its guard, and under the
+// default policy every change to it was skipped as a changed row and the
+// migration recorded as applied.
+func TestACharArrayMatchesItsGuard(t *testing.T) {
+	db := connect(t)
+	reset := func() {
+		run(t, db, "DROP TABLE IF EXISTS guard_regions",
+			"CREATE TABLE guard_regions (id bigint PRIMARY KEY, name text UNIQUE NOT NULL, currencies char(3)[] NOT NULL, label text)",
+			"INSERT INTO guard_regions VALUES (1, 'emea', '{EUR,US}', 'EMEA')")
+	}
+	currencies := func() string {
+		return scan[string](t, db, "SELECT coalesce((SELECT currencies::text FROM guard_regions), 'gone')")
+	}
+	reset()
+	update := fixturechange.Change{Kind: fixturechange.Update, Key: lit("name", "emea"),
+		Old: lit("currencies", `["EUR","US"]`), New: lit("currencies", `["EUR","GBP"]`)}
+	for _, want := range []fixtureapply.Status{fixtureapply.StatusApplied, fixtureapply.StatusUnchanged} {
+		if out, err := guardOne(t, db, "guard_regions", strict, update); err != nil || out.Status != want {
+			t.Fatalf("update, want %s: %v %+v", want, err, out)
+		}
+	}
+	if got := currencies(); got != "{EUR,GBP}" {
+		t.Fatalf("currencies %s", got)
+	}
+
+	// A real difference is still one.
+	out, err := guardOne(t, db, "guard_regions", strict, fixturechange.Change{Kind: fixturechange.Update,
+		Key: lit("name", "emea"), Old: lit("currencies", `["EUR","US"]`), New: lit("currencies", `["EUR"]`)})
+	if err == nil || out.Problem != fixtureapply.ProblemChangedRow {
+		t.Fatalf("{EUR,GBP} is not the old value: %v %+v", err, out)
+	}
+
+	reset()
+	insert := fixturechange.Change{Kind: fixturechange.Insert, Key: lit("name", "emea"),
+		New: fixturechange.Values{"id": fixturechange.Lit("1"), "name": fixturechange.Lit("emea"),
+			"currencies": fixturechange.Lit(`["EUR","US"]`), "label": fixturechange.Lit("EMEA")}}
+	if out, err := guardOne(t, db, "guard_regions", strict, insert); err != nil || out.Status != fixtureapply.StatusUnchanged {
+		t.Fatalf("the row is there already: %v %+v", err, out)
+	}
+	remove := fixturechange.Change{Kind: fixturechange.Delete, Key: lit("name", "emea"),
+		Old: fixturechange.Values{"name": fixturechange.Lit("emea"), "currencies": fixturechange.Lit(`["EUR","US"]`),
+			"label": fixturechange.Lit("EMEA")}}
+	for _, want := range []fixtureapply.Status{fixtureapply.StatusApplied, fixtureapply.StatusUnchanged} {
+		if out, err := guardOne(t, db, "guard_regions", strict, remove); err != nil || out.Status != want {
+			t.Fatalf("delete, want %s: %v %+v", want, err, out)
+		}
+	}
+	if got := currencies(); got != "gone" {
+		t.Fatalf("currencies %s", got)
+	}
+	// And inserted again, padded as dbfixture would have it.
+	for _, want := range []fixtureapply.Status{fixtureapply.StatusApplied, fixtureapply.StatusUnchanged} {
+		if out, err := guardOne(t, db, "guard_regions", strict, insert); err != nil || out.Status != want {
+			t.Fatalf("insert, want %s: %v %+v", want, err, out)
+		}
+	}
+	if got := currencies(); got != `{EUR,"US "}` {
+		t.Fatalf("currencies %s", got)
 	}
 }
