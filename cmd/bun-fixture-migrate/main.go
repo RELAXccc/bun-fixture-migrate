@@ -498,6 +498,9 @@ func export(o streams, args []string) error {
 		if err != nil {
 			return err
 		}
+		if err := fixturemigrate.KeepOwned(o.ctx, tx, s.cfg, tables, head, snap); err != nil {
+			return err
+		}
 		fixturemigrate.LintZeroDefaults(s.cfg, snap, tables)
 		fixturemigrate.LintNullDefaults(s.cfg, snap, tables)
 		mode, findings = s.cfg.Worst(snap.Findings)

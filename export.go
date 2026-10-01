@@ -2,6 +2,7 @@ package fixturemigrate
 
 import (
 	"container/heap"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+
+	"github.com/uptrace/bun"
 )
 
 // Export writes a snapshot as a dbfixture YAML file.
@@ -31,6 +34,84 @@ import (
 // itself as well as on the terminal.
 func Export(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table, header []string) ([]byte, error) {
 	return exportModels(cfg, snap, tables, header, snap.Order)
+}
+
+// KeepOwned takes out of a database snapshot about to be exported what the
+// configuration gives to the database, so an export writes into the fixture
+// files what they own and nothing else:
+//
+//   - of a model the files hold under mode upsert or insert, only the rows
+//     they hold, by natural key: the database's other rows are a tenant's or
+//     the application's, and written into the files they would be seeded
+//     everywhere and owned from then on. A model the files hold no block of
+//     is exported whole, which is how one is first taken into them;
+//   - in a row the files hold, the files' value of every insert_only column,
+//     and under mode insert of every column but the key and the ref column:
+//     the database's value there is its own, and the files keep the one a
+//     new row starts with. A column the row leaves out stays out, unless no
+//     row of the files writes it.
+//
+// files is the fixture files the export replaces, as FixtureSnapshot reads
+// them, and is left as it is; nil, files that did not read, leaves snap
+// alone. db and tables are where snap was read: a copy of files is respelled
+// there, as Canonicalize does, so a row of the files is found in snap
+// whatever the spelling of its key.
+func KeepOwned(ctx context.Context, db bun.IDB, cfg *Config, tables map[string]*dbschema.Table, files, snap *Snapshot) error {
+	if files == nil {
+		return nil
+	}
+	var models []string
+	for _, model := range files.Order {
+		if m := cfg.Models[model]; m != nil && (m.Mode != OwnSync || len(m.insertOnly) > 0) {
+			models = append(models, model)
+		}
+	}
+	if len(models) == 0 {
+		return nil
+	}
+	held := files.clone()
+	// Canonicalize rewrites the findings and notes the catalog, in place.
+	held.Findings = append([]Finding(nil), files.Findings...)
+	held.unique, held.tables = nil, nil
+	if err := Canonicalize(ctx, db, cfg, held, tables); err != nil {
+		return err
+	}
+	for _, model := range models {
+		m := cfg.Models[model]
+		byKey := map[string]*Entry{}
+		for _, e := range held.Entries[model] {
+			if _, dup := byKey[e.KeyStr]; !dup {
+				byKey[e.KeyStr] = e
+			}
+		}
+		key := set(m.keyColumns())
+		written := set(held.Columns[model])
+		var kept []*Entry
+		for _, e := range snap.Entries[model] {
+			f, ok := byKey[e.KeyStr]
+			if !ok {
+				if m.Mode == OwnSync {
+					kept = append(kept, e)
+				}
+				continue
+			}
+			for _, col := range sortedColumns(e.Cells) {
+				// The key finds the row and the ref column is what every
+				// reference to it in this export names it by.
+				if m.ownsValue(col) || key[col] || col == m.Ref {
+					continue
+				}
+				if v, ok := f.Cells[col]; ok {
+					e.Cells[col] = v
+				} else if written[col] {
+					delete(e.Cells, col)
+				}
+			}
+			kept = append(kept, e)
+		}
+		snap.Entries[model] = kept
+	}
+	return nil
 }
 
 // ExportFiles writes a snapshot into several fixture files, the way an
@@ -171,8 +252,9 @@ func exportModels(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table
 			write(anchorColumn, yamlAnchor(e.Anchor), "", writtenCell{text: e.Anchor, exact: true})
 			// An identity GENERATED ALWAYS refuses an explicit id from
 			// dbfixture as from anybody, so the file names rows by anchor
-			// only and the database numbers them.
-			if idCol, ok := table.Column(m.ID); e.ID != "" && !idCol.IdentityAlways {
+			// only and the database numbers them; so does a model whose ids
+			// the configuration gives to the database.
+			if idCol, ok := table.Column(m.ID); e.ID != "" && !idCol.IdentityAlways && !m.idsFromDatabase() {
 				if !ok {
 					idCol = dbschema.Column{Type: "text"}
 				}
@@ -507,6 +589,12 @@ func exportValue(cfg *Config, model, col string, v fixturechange.Value, column d
 	case v.Ref != nil:
 		target := cfg.Models[v.Ref.Model]
 		anchor, ok := anchors[v.Ref.Model][v.Ref.Key]
+		if !ok && target.Mode != OwnSync {
+			return "", "", fmt.Errorf("%s.%s points at %s %q, which is not in the export: %s is under mode %s, and "+
+				"the export leaves out its rows the fixture files do not hold. A row pointing at one is no more the "+
+				"files' than it is: set mode %s on %s too, or limit it with where", model, col, v.Ref.Model,
+				v.Ref.Key, v.Ref.Model, target.Mode, target.Mode, model)
+		}
 		if !ok {
 			return "", "", fmt.Errorf("%s.%s points at %s %q, which is not in the export", model, col, v.Ref.Model, v.Ref.Key)
 		}
