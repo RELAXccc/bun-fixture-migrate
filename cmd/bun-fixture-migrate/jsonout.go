@@ -48,6 +48,17 @@ type checkReport struct {
 	// would do: an insert is a row only the file has, a delete a row only the
 	// database has, and an update's old values are the database's.
 	Changes []checkChange `json:"changes"`
+	// LeftAlone counts what the configuration gives to the database, mode
+	// upsert and insert and insert_only columns, which is no drift.
+	LeftAlone []checkLeftAlone `json:"left_alone"`
+}
+
+type checkLeftAlone struct {
+	Model   string         `json:"model"`
+	Mode    string         `json:"mode"`
+	Rows    int            `json:"rows"`
+	Changed int            `json:"changed"`
+	Columns map[string]int `json:"columns,omitempty"`
 }
 
 type checkFinding struct {
@@ -71,6 +82,8 @@ type checkChange struct {
 	Key   map[string]any `json:"key"`
 	Old   map[string]any `json:"database,omitempty"`
 	New   map[string]any `json:"file,omitempty"`
+	// Hints say, per column, why a value differs where check can tell.
+	Hints map[string]string `json:"hints,omitempty"`
 }
 
 // findingsJSON is findings as a program reads them, each with the level the
@@ -87,16 +100,19 @@ func findingsJSON(cfg *fixturemigrate.Config, findings []fixturemigrate.Finding)
 func checkJSON(cfg *fixturemigrate.Config, res *fixturemigrate.CheckResult) checkReport {
 	out := checkReport{Agree: res.Agree(cfg),
 		Findings: findingsJSON(cfg, res.Findings), Refusals: []checkRefusal{}, Warnings: []checkRefusal{},
-		Changes: []checkChange{}}
+		Changes: []checkChange{}, LeftAlone: []checkLeftAlone{}}
 	for _, r := range res.Refusals {
 		out.Refusals = append(out.Refusals, checkRefusal{r.Model, r.Key, r.Reason})
 	}
 	for _, w := range res.Warnings {
 		out.Warnings = append(out.Warnings, checkRefusal{w.Model, w.Key, w.Reason})
 	}
-	for _, c := range res.Changes {
+	for i, c := range res.Changes {
 		out.Changes = append(out.Changes, checkChange{c.Model, string(c.Kind), jsonValues(c.Key),
-			jsonValues(c.Old), jsonValues(c.New)})
+			jsonValues(c.Old), jsonValues(c.New), res.Hints[i]})
+	}
+	for _, a := range res.LeftAlone {
+		out.LeftAlone = append(out.LeftAlone, checkLeftAlone{a.Model, string(a.Mode), a.Rows, a.Changed, a.Columns})
 	}
 	return out
 }

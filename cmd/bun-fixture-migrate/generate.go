@@ -147,6 +147,11 @@ func generate(o streams, args []string) error {
 	for _, w := range res.Warnings {
 		fmt.Fprintln(o.stderr, "warning:", w.String())
 	}
+	// What the configuration leaves to the database is no change, said so a
+	// row taken out of an upsert model is not taken for one deleted.
+	for _, line := range res.LeftAloneLines() {
+		fmt.Fprintln(o.stderr, "note:", line)
+	}
 
 	dir := *out
 	if dir == "" {
@@ -217,8 +222,12 @@ func generate(o streams, args []string) error {
 			if err := fixturemigrate.WriteState(s.statePath, next); err != nil {
 				return err
 			}
-			fmt.Fprintf(o.stdout, "wrote %s: %s differs from it only in how it is written, which the state now "+
-				"records too\n", s.statePath, s.cfg.FixtureLabel())
+			how := "in how it is written"
+			if len(res.LeftAlone) > 0 {
+				how = "in how it is written and in what the configuration leaves to the database"
+			}
+			fmt.Fprintf(o.stdout, "wrote %s: %s differs from it only %s, which the state now records too\n",
+				s.statePath, s.cfg.FixtureLabel(), how)
 		}
 		noteLeftOut(o, prev)
 		return nil
