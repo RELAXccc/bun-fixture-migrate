@@ -142,13 +142,30 @@ migration is fine; run `baseline -force` once the cause is fixed, before generat
 ## Planning
 
 **`could not be planned` / `inconclusive`.** The plan itself failed: a row lock held longer than
-`-lock-timeout`, a statement timeout, a lost connection. Nothing is known about the migration. Try
-again, or raise `-lock-timeout`.
+`-lock-timeout`, a statement timeout, a lost connection, or something a single transaction cannot
+do, which the note under it names. Nothing is known about the migration. Try again, or raise
+`-lock-timeout`.
 
 **`pending before it and not simulated: ...`.** Migrations the tool did not write, such as schema
 changes, run before this one in the deploy but not in the plan. If they change the tables the
 fixture migration touches, run `plan -with-sql` so SQL migrations run too, or plan against a copy
 that already has them.
+
+**`bufio.Scanner: token too long`.** A line of a SQL migration is longer than 64 KiB, and bun reads
+SQL migrations a line at a time. The deploy fails before running any of the file, and unless the
+migrator is built `WithMarkAppliedOnSuccess(true)` bun keeps it recorded as applied, so it never runs
+again. Break the line up, for instance a long `VALUES` list into a row per line.
+
+**`holds "{{", which bun renders as a Go template`.** `plan -with-sql` does not run such a file: what
+bun runs depends on the migrator's `WithTemplateData`. Plan against a copy that has it applied.
+
+**`it uses an enum value a migration before it in this plan added`.** One transaction cannot use an
+enum value it added, and the plan is one transaction; the deploy commits the migration that adds it
+first. Plan again once that migration is applied.
+
+**`note: a quoted string or dollar-quoted body in it holds a blank line`.** Not an error under bun
+v1.2.18, which runs the file as written. bun after it drops blank lines from SQL migrations, which
+changes that string; write the line break as `E'\n'` or `chr(10)` before upgrading bun.
 
 ## At run time
 

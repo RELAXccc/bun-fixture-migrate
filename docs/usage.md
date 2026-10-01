@@ -126,10 +126,23 @@ one name, which bun's `Discover` only catches between two SQL files.
 
 `plan` cannot run arbitrary Go, so it names pending migrations it did not write and says which
 fixture migration they would run before. `plan -with-sql` runs pending SQL migrations in the same
-rolled-back transaction, split on `--bun:split` as bun splits them, so a fixture migration that
-writes a column a pending SQL migration adds is planned against that column. A SQL migration that
-cannot run in a transaction (`CREATE INDEX CONCURRENTLY`) makes the plan inconclusive rather than
-wrong.
+rolled-back transaction, so a fixture migration that writes a column a pending SQL migration adds is
+planned against that column. It reads each file exactly as bun v1.2.18 does:
+
+- split at `--bun:split` lines, any other `--bun:` line an error;
+- a line longer than 64 KiB fails the migration before any of it runs, as bun's line scanner does.
+  Under bun's default migrator that failed migration stays recorded as applied and never runs, so
+  plan reports it as a failure;
+- blank lines are kept. bun after v1.2.18 drops them, which changes a quoted string or a function
+  body that holds one; plan notes where a file has such a line;
+- a file holding `{{` is not run. bun renders SQL files as Go templates when the migrator is built
+  `WithTemplateData`, and plan does not have the data, so the migration is listed as not simulated.
+
+The plan's one transaction differs from the deploy, which commits each migration, and each statement
+of a SQL migration whose name has no `.tx.`. What cannot be reproduced makes the plan inconclusive
+(exit 1) rather than wrong: a SQL migration that
+cannot run in a transaction (`CREATE INDEX CONCURRENTLY`), and an enum value one migration adds and a
+later one uses, which no transaction can do in PostgreSQL. Plan again once those are applied.
 
 ## Several fixture files
 

@@ -41,4 +41,11 @@ const (
 	// UnsafeNewEnumValue is a value added to an enum used inside the
 	// transaction that added it.
 	UnsafeNewEnumValue = "55P04"
+	// ActiveSQLTransaction is a statement that cannot run inside a
+	// transaction block, such as CREATE INDEX CONCURRENTLY.
+	ActiveSQLTransaction = "25001"
+	// SerializationFailure is a transaction PostgreSQL cannot serialise.
+	SerializationFailure = "40001"
+	// DeadlockDetected is a transaction chosen to break a deadlock.
+	DeadlockDetected = "40P01"
 )

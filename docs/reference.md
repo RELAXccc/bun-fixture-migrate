@@ -118,13 +118,15 @@ is where they would run. Refused against a standby.
 | Flag | |
 | --- | --- |
 | `-file <path>` | plan this migration file, applied or not; repeat for several |
-| `-with-sql` | also run the pending `.up.sql` migrations, split as bun splits them |
+| `-with-sql` | also run the pending `.up.sql` migrations, read as bun v1.2.18 reads them; one holding `{{` is not run, because bun renders it as a template under `WithTemplateData` |
 | `-strict` | fail when a change would be skipped, too |
 | `-lock-timeout <d>` | give up on a row lock after this long, default `5s` |
 | `-json` | the report as JSON, see [plan](#plan-output) |
 
 Exit 3 when a migration would fail, or with `-strict` be skipped; exit 1 when the plan could not
-finish (a lock waited for too long, a lost connection), which says nothing about the migration.
+finish (a lock waited for too long, a lost connection, a SQL migration that cannot run in a
+transaction, an enum value a migration in the same plan added), which says nothing about the
+migration.
 
 ### sync
 
@@ -269,13 +271,17 @@ Finding kinds: `duplicate key`, `zero against a default`, `null against a defaul
      "changes": [{"set": "20260930165255_fixture_plan_prices", "index": 0, "model": "Plan",
                   "kind": "insert", "key": "name=pro", "status": "applied", "rows": 1}]}
   ],
-  "not_simulated": ["20260930160000_schema"]
+  "not_simulated": ["20260930160000_schema"],
+  "notes": []
 }
 ```
 
 `result` is `succeeds`, `fails`, `unseeded`, `not reached` (after one that fails), or `inconclusive`
 when the plan itself could not finish. `kind` is `fixture`, or `sql` for a migration `-with-sql`
-ran. `after` names pending migrations that were not simulated and run before this one.
+ran. `after` names pending migrations that were not simulated and run before this one. A
+migration's `notes`, when there are any, say what its `result` and `error` do not: why the plan
+could not tell, or where the deploy can differ from the plan. The top-level `notes` say why a
+migration `-with-sql` would have run is in `not_simulated`.
 
 ### sync output
 
