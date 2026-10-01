@@ -106,6 +106,65 @@ func (a *adoption) write(rel, content string) {
 	}
 }
 
+func TestAdoptingAsTheREADMESays(t *testing.T) {
+	a := newAdoption(t)
+
+	// $ bun-fixture-migrate scaffold -o fixture-migrate.yml
+	a.run(0, "scaffold", "-o", "fixture-migrate.yml")
+	cfg := a.read("fixture-migrate.yml")
+	for _, want := range []string{
+		`seed_guard_table: "currencies"`, "migrations_table: bun_migrations\n",
+		"  User:\n    # GUESS: proposed because the schema has it. Delete this model unless",
+	} {
+		if !strings.Contains(cfg, want) {
+			t.Fatalf("scaffold is missing %q:\n%s", want, cfg)
+		}
+	}
+	if strings.Contains(cfg, "table: bun_migrations\n    ") || strings.Contains(cfg, "BunMigration") {
+		t.Fatalf("bun's tables proposed as master data:\n%s", cfg)
+	}
+	// "then read it": the users are the application's, not master data.
+	user := regexp.MustCompile(`(?s)\n  User:\n.*?(\n\n|$)`)
+	a.write("fixture-migrate.yml", user.ReplaceAllString(cfg, "\n"))
+
+	// $ bun-fixture-migrate export
+	if out := a.run(0, "export"); !strings.Contains(out, "wrote fixtures/fixture.yml") {
+		t.Fatal(out)
+	}
+	exported := a.read("fixtures/fixture.yml")
+	if strings.Contains(exported, "ann@example.com") || strings.Contains(exported, "20260101000000") {
+		t.Fatalf("the export holds data that is not master data:\n%s", exported)
+	}
+	a.run(0, "check")
+
+	// $ bun-fixture-migrate baseline
+	if out := a.run(0, "baseline"); !strings.Contains(out, "wrote internal/migrations/fixture_state.yml") {
+		t.Fatal(out)
+	}
+	a.run(0, "status")
+
+	// Then, for every change to master data, edit the fixture file and:
+	// $ bun-fixture-migrate generate -name "plan prices"
+	a.write("fixtures/fixture.yml", strings.Replace(exported, "price_cents: 2500", "price_cents: 2600", 1))
+	a.run(3, "status")
+	out := a.run(0, "generate", "-name", "plan prices")
+	if !strings.Contains(out, "Plan: 1 update") || strings.Contains(out, "seed_guard_table") {
+		t.Fatal(out)
+	}
+	files, _ := filepath.Glob(filepath.Join(a.dir, "internal", "migrations", "*_fixture_plan_prices.go"))
+	if len(files) != 1 {
+		t.Fatalf("no migration: %v", files)
+	}
+	if src, _ := os.ReadFile(files[0]); !strings.Contains(string(src), `SeedGuardTable:  "currencies"`) {
+		t.Fatalf("the migration is not guarded:\n%s", src)
+	}
+	// $ bun-fixture-migrate plan
+	if out := a.run(0, "plan"); !strings.Contains(out, "would succeed") || !strings.Contains(out, "applied  Plan name=team update") {
+		t.Fatal(out)
+	}
+	a.run(0, "status", "-offline")
+}
+
 // What the configuration gets wrong about a table is a sentence, not the
 // error of a query nobody wrote; a column the fixture file writes and the
 // table lacks is the unknown column finding; and status lints the fixture
@@ -157,4 +216,25 @@ func TestTheConfigurationAgainstTheCatalog(t *testing.T) {
 		t.Fatal(out)
 	}
 	a.run(2, "generate", "-name", "zero")
+}
+
+// A table asked for that scaffold would not propose is refused rather than
+// left out without a word, and so is a schema with nothing in it.
+func TestScaffoldRefusesWhatItCannotPropose(t *testing.T) {
+	a := newAdoption(t)
+	for args, want := range map[string]string{
+		"-tables plan,currencies":      "-tables names plan, which is not a table of schema public",
+		"-tables plans,bun_migrations": "-tables names bun_migrations, which is the migrator's own table",
+		"-schema nosuch":               "schema nosuch has no table to propose as a model",
+	} {
+		if out := a.run(1, append([]string{"scaffold"}, strings.Fields(args)...)...); !strings.Contains(out, want) {
+			t.Errorf("%s: %s", args, out)
+		}
+	}
+	// Built WithTableName, the migrator's table is named and left out.
+	run(t, a.db, "ALTER TABLE bun_migrations RENAME TO schema_migrations")
+	out := a.run(0, "scaffold", "-migrations-table", "schema_migrations")
+	if !strings.Contains(out, "migrations_table: schema_migrations\n") || strings.Contains(out, "SchemaMigration:") {
+		t.Fatal(out)
+	}
 }

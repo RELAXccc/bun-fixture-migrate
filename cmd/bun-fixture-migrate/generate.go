@@ -254,6 +254,9 @@ func generate(o streams, args []string) error {
 	for _, w := range fixturemigrate.RenderWarnings(res) {
 		fmt.Fprintln(o.stderr, "warning:", w)
 	}
+	if w := seedGuardWarning(s.cfg); w != "" {
+		fmt.Fprintln(o.stderr, "warning:", w)
+	}
 	if *dryRun {
 		return writeOut(o.stdout, src)
 	}
@@ -345,4 +348,29 @@ func (s *setup) baseState(o streams, state *fixturemigrate.State, oldPath, rev s
 		return nil, "", fmt.Errorf("%w; or run baseline to record what the databases hold", err)
 	}
 	return files, "HEAD:" + s.cfg.FixtureLabel(), nil
+}
+
+// seedGuardWarning is what is wrong with the seed guard table for a migration
+// about to be written, "" when nothing is. Without one, a database that was
+// never seeded runs every fixture migration before its seed, against empty
+// tables, and the first that changes a row fails the deploy. One the fixture
+// files do not fill can be empty in a seeded database too, and there every
+// fixture migration does nothing and is recorded as applied.
+func seedGuardWarning(cfg *fixturemigrate.Config) string {
+	guard := cfg.SeedGuardTable
+	if guard == "" {
+		return "no seed_guard_table: on a database that was never seeded this migration runs before the seed and " +
+			"fails; set it to a table the fixture files fill"
+	}
+	if !strings.Contains(guard, ".") {
+		guard = cfg.Schema + "." + guard
+	}
+	for _, name := range cfg.ModelNames() {
+		if cfg.QualifiedTable(cfg.Models[name]) == guard {
+			return ""
+		}
+	}
+	return fmt.Sprintf("seed_guard_table %s is the table of no model, so the fixture files do not fill it: on a "+
+		"seeded database where it is empty, this migration does nothing and is recorded as applied all the same",
+		cfg.SeedGuardTable)
 }

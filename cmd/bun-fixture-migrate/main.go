@@ -671,10 +671,14 @@ func check(o streams, args []string) error {
 func scaffold(o streams, args []string) error {
 	fs := flag.NewFlagSet("scaffold", flag.ContinueOnError)
 	var (
-		dsn    = fs.String("dsn", "", "PostgreSQL DSN (there is no configuration file yet)")
-		schema = fs.String("schema", "public", "schema to read")
-		only   = fs.String("tables", "", "comma-separated tables to include, default all of them")
-		out    = fs.String("o", "", "write here instead of standard output")
+		dsn        = fs.String("dsn", "", "PostgreSQL DSN (there is no configuration file yet)")
+		schema     = fs.String("schema", "public", "schema to read")
+		only       = fs.String("tables", "", "comma-separated tables to include, default all of them")
+		out        = fs.String("o", "", "write here instead of standard output")
+		migrations = fs.String("migrations-table", "bun_migrations", "the table the migrator records migrations in, "+
+			"which is left out and written into the configuration")
+		locks = fs.String("migration-locks-table", "bun_migration_locks", "the table the migrator keeps its lock in, "+
+			"which is left out and written into the configuration")
 	)
 	if err := parseFlags(o, fs, args); err != nil {
 		return err
@@ -695,12 +699,13 @@ func scaffold(o streams, args []string) error {
 	}
 	defer db.Close()
 	var tables map[string]*dbschema.Table
-	var opts fixturemigrate.ScaffoldOptions
+	opts := fixturemigrate.ScaffoldOptions{MigrationsTable: *migrations, MigrationLocksTable: *locks}
 	err = readOnly(o.ctx, db, func(tx bun.Tx) error {
 		if tables, err = dbschema.Load(o.ctx, tx, *schema); err != nil {
 			return err
 		}
-		opts, err = fixturemigrate.LoadScaffoldOptions(o.ctx, tx, *schema)
+		read, err := fixturemigrate.LoadScaffoldOptions(o.ctx, tx, *schema)
+		opts.Partitions, opts.Triggers = read.Partitions, read.Triggers
 		return err
 	})
 	if err != nil {
@@ -713,6 +718,32 @@ func scaffold(o streams, args []string) error {
 			wanted[i] = strings.TrimSpace(wanted[i])
 		}
 	}
+	// A table asked for that is not proposed is refused rather than left
+	// out without a word: a typo, or a table of another schema.
+	proposed := map[string]bool{}
+	for _, n := range fixturemigrate.ScaffoldTables(tables, nil, *schema, opts) {
+		proposed[n] = true
+	}
+	for _, t := range wanted {
+		q := t
+		if !strings.Contains(q, ".") {
+			q = *schema + "." + q
+		}
+		switch {
+		case proposed[q]:
+		case tables[q] == nil:
+			return fmt.Errorf("-tables names %s, which is not a table of schema %s", t, *schema)
+		case opts.Partitions[q]:
+			return fmt.Errorf("-tables names %s, a partition: its rows are its partitioned table's, which is the "+
+				"model", t)
+		default:
+			return fmt.Errorf("-tables names %s, which is the migrator's own table and no master data", t)
+		}
+	}
+	if len(fixturemigrate.ScaffoldTables(tables, wanted, *schema, opts)) == 0 {
+		return fmt.Errorf("schema %s has no table to propose as a model: it does not exist, the role cannot see "+
+			"its tables, or it holds only the migrator's; pass -schema", *schema)
+	}
 	data := fixturemigrate.Scaffold(tables, wanted, *schema, opts)
 	if *out == "" {
 		return writeOut(o.stdout, data)
@@ -724,7 +755,8 @@ func scaffold(o streams, args []string) error {
 		return err
 	}
 	fmt.Fprintln(o.stderr, "wrote", *out)
-	fmt.Fprintln(o.stderr, "read it: the natural keys and the model names are guesses")
+	fmt.Fprintln(o.stderr, "read it: which tables are master data, the natural keys, the model names and the "+
+		"seed guard table are guesses")
 	return nil
 }
 

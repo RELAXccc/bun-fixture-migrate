@@ -460,3 +460,23 @@ func TestWriteOutFailsWithTheWriter(t *testing.T) {
 type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("no space left on device") }
+
+// A migration without a seed guard runs on a database that was never seeded,
+// before the seed, and fails there; one guarded by a table the fixture files
+// do not fill does nothing on a seeded database where that table is empty.
+// generate says so, and writes the migration all the same.
+func TestGenerateWarnsAboutTheSeedGuard(t *testing.T) {
+	for guard, want := range map[string]string{
+		"seed_guard_table: plans\n":        "",
+		"seed_guard_table: public.plans\n": "",
+		"":                                 "warning: no seed_guard_table: on a database that was never seeded this migration runs before the seed and fails",
+		"seed_guard_table: \"\"\n":         "warning: no seed_guard_table",
+		"seed_guard_table: users\n":        "warning: seed_guard_table users is the table of no model",
+	} {
+		cfg, base := projectWith(t, strings.Replace(config, "seed_guard_table: plans\n", guard, 1), newFixture, oldFixture)
+		code, out, errs := call(t, "generate", "-config", cfg, "-old", base, "-name", "x")
+		if code != 0 || (want == "") != !strings.Contains(errs, "seed_guard_table") || !strings.Contains(errs, want) {
+			t.Errorf("%q: exit %d\n%s%s", guard, code, out, errs)
+		}
+	}
+}
