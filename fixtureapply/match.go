@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+
+	"github.com/uptrace/bun"
 )
 
 // colType is what a comparison needs to know about a column's type.
@@ -72,13 +74,32 @@ WHERE a.attrelid = ?::regclass AND a.attnum > 0 AND NOT a.attisdropped`, table)
 }
 
 // guard is the WHERE clause of an update or a delete: the natural key, the old
-// values, and the id when the change carries one.
+// values, and the id when the change carries one, among the model's rows.
 func (r *runner) guard(ctx context.Context, c fixturechange.Change, t fixturechange.Table) (string, []any, error) {
 	sets := []fixturechange.Values{c.Key, c.Old}
 	if c.ID != "" {
 		sets = append(sets, fixturechange.Values{t.ID: fixturechange.Lit(c.ID)})
 	}
-	return r.matchAll(ctx, c.Model, sets...)
+	where, args, err := r.matchAll(ctx, c.Model, sets...)
+	if err != nil {
+		return "", nil, err
+	}
+	where, args = r.scoped(c.Model, where, args)
+	return where, args, nil
+}
+
+// scoped limits a condition on a model's rows to the rows its Where holds for.
+//
+// The predicate goes in as a bun.Safe argument rather than as text: bun reads
+// every ? in a query's text as a placeholder, and jsonb's ? operator is a
+// likely thing to find in one. It ends in a line break, so a -- comment at its
+// end cannot swallow the rest of the statement.
+func (r *runner) scoped(model, cond string, args []any) (string, []any) {
+	w := r.set.Tables[model].Where
+	if w == "" {
+		return cond, args
+	}
+	return cond + " AND (?\n)", append(append([]any{}, args...), bun.Safe(w))
 }
 
 // match renders "col IS NOT DISTINCT FROM <value>" for every column, joined by
@@ -268,8 +289,9 @@ func (r *runner) resolve(ctx context.Context, ref fixturechange.Ref) (string, er
 	if err != nil {
 		return "", err
 	}
+	where, args := r.scoped(ref.Model, keyCol+" = ?", []any{ref.Key})
 	rows, err := r.tx.QueryContext(ctx,
-		fmt.Sprintf("SELECT %s FROM %s WHERE %s = ? LIMIT 2", idCol, table, keyCol), ref.Key)
+		fmt.Sprintf("SELECT %s FROM %s WHERE %s LIMIT 2", idCol, table, where), args...)
 	if err != nil {
 		return "", err
 	}

@@ -163,6 +163,9 @@ func (r *runner) idTakenByAnotherRow(ctx context.Context, c fixturechange.Change
 	if err != nil {
 		return "", err
 	}
+	// The primary key is the table's, not the model's: an id a row outside
+	// the model's Where holds is taken all the same.
+	keyWhere, keyArgs = r.scoped(c.Model, keyWhere, keyArgs)
 	idCol, err := quoteIdent(t.ID)
 	if err != nil {
 		return "", err
@@ -200,6 +203,7 @@ func (r *runner) idsFor(ctx context.Context, model, table string, t fixturechang
 	if err != nil {
 		return nil, err
 	}
+	where, args = r.scoped(model, where, args)
 	idCol, err := quoteIdent(t.ID)
 	if err != nil {
 		return nil, err
@@ -229,6 +233,7 @@ func (r *runner) count(ctx context.Context, model, table string, sets ...fixture
 	if err != nil {
 		return 0, err
 	}
+	where, args = r.scoped(model, where, args)
 	var n int64
 	if err := r.tx.QueryRowContext(ctx,
 		fmt.Sprintf("SELECT count(*) FROM %s WHERE %s", table, where), args...).Scan(&n); err != nil {

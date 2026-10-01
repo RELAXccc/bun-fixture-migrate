@@ -191,7 +191,7 @@ listed stops every command.
 | `derived` | | columns the application recalculates: never compared, written or exported |
 | `ignore` | | columns that take no part |
 | `deletes` | `policy.deletes` | `allow`, `refuse` or `cascade` |
-| `where` | | an SQL predicate limiting which rows are master data; your SQL, used as written |
+| `where` | | an SQL predicate limiting which rows are master data; your SQL, used as written. A generated migration carries it: every statement, natural-key lookup and reference for the model sees only those rows, and a row it writes must hold it. A `;` or a parenthesis it does not open is refused |
 
 ### policy
 

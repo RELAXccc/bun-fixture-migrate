@@ -157,6 +157,9 @@ func Render(cfg *Config, name, stamp string, res *Result) ([]byte, error) {
 		if t.Cascade {
 			b.WriteString(", Cascade: true")
 		}
+		if t.Where != "" {
+			fmt.Fprintf(&b, ", Where: %s", goString(t.Where))
+		}
 		b.WriteString("},\n")
 	}
 	b.WriteString("\t},\n")

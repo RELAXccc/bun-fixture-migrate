@@ -378,3 +378,43 @@ func TestBunsMigrationFilePattern(t *testing.T) {
 		}
 	}
 }
+
+// A model's Where is written into every statement for it, inside parentheses.
+// One that could reach outside them would change which rows a guard matches,
+// so a migration would write rows it was never generated for.
+func TestValidateChecksAWhere(t *testing.T) {
+	for _, ok := range []string{
+		"tenant_id IS NULL",
+		"(kind = 'global') AND deleted_at IS NULL",
+		"flags ? 'global'",
+		"note <> 'a) OR (b;'",
+		`"weird)name" IS NULL`,
+		"note <> E'it\\'s ) here'",
+		"note <> $$ ) ; $$ AND x <> $t$ ( $t$",
+		"tenant_id IS NULL -- global rows only ) ;",
+		"tenant_id IS NULL /* not (a tenant's ;) /* nested ) */ */",
+		"price$usd > 0",
+	} {
+		set := fixturechange.Set{Tables: fixturechange.Tables{"Tag": {Name: "tags", ID: "id", Where: ok}}}
+		if err := Validate(set); err != nil {
+			t.Errorf("%q: %v", ok, err)
+		}
+	}
+	for bad, want := range map[string]string{
+		"tenant_id IS NULL) OR (true":                     "closes a parenthesis",
+		"(tenant_id IS NULL":                              "does not close",
+		"tenant_id IS NULL; DROP TABLE tags":              "holds a ;",
+		"note <> 'unterminated":                           "quote that does not end",
+		"note <> E'it\\'s":                                "quote that does not end",
+		`"unterminated IS NULL`:                           "quoted name",
+		"x <> $q$ never closed":                           "dollar quote",
+		"x /* never closed":                               "comment that does not end",
+		"(x -- the closing parenthesis is in a comment )": "does not close",
+		"x\x00": "NUL",
+	} {
+		set := fixturechange.Set{Tables: fixturechange.Tables{"Tag": {Name: "tags", ID: "id", Where: bad}}}
+		if err := Validate(set); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: want an error containing %q, got %v", bad, want, err)
+		}
+	}
+}

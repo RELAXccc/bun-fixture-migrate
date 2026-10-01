@@ -44,6 +44,11 @@ func TestAGeneratedFileReadsBackAsTheSetItRuns(t *testing.T) {
 	if len(res.Refusals) != 0 {
 		t.Fatalf("refusals: %+v", res.Refusals)
 	}
+	// The diff fills Where from the configuration; whatever it carries is
+	// written and read back.
+	plan := res.Tables["Plan"]
+	plan.Where = `"tenant_id" IS NULL AND kind <> 'x'`
+	res.Tables["Plan"] = plan
 	src, err := Render(cfg, "all kinds", "20260921120000", res)
 	if err != nil {
 		t.Fatal(err)

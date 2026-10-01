@@ -2,10 +2,13 @@ package fixtureapply
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+
+	"github.com/uptrace/bun"
 )
 
 func (r *runner) exec(ctx context.Context, c fixturechange.Change) (outcome, error) {
@@ -68,10 +71,11 @@ func (r *runner) insert(ctx context.Context, c fixturechange.Change, t fixturech
 	if err != nil {
 		return outcome{}, err
 	}
+	where, whereArgs = r.scoped(c.Model, where, whereArgs)
 	args = append(args, whereArgs...)
 	query := fmt.Sprintf("INSERT INTO %s (%s) SELECT %s WHERE NOT EXISTS (SELECT 1 FROM %s WHERE %s)",
 		table, strings.Join(cols, ", "), strings.Join(exprs, ", "), table, where)
-	n, err := r.run(ctx, query, args)
+	n, err := r.write(ctx, c.Model, query, args)
 	if err != nil {
 		return outcome{}, err
 	}
@@ -108,7 +112,7 @@ func (r *runner) update(ctx context.Context, c fixturechange.Change, t fixturech
 	if err != nil {
 		return outcome{}, err
 	}
-	n, err := r.run(ctx, fmt.Sprintf("UPDATE %s SET %s WHERE %s", table, strings.Join(sets, ", "), where), args)
+	n, err := r.write(ctx, c.Model, fmt.Sprintf("UPDATE %s SET %s WHERE %s", table, strings.Join(sets, ", "), where), args)
 	if err != nil {
 		return outcome{}, err
 	}
@@ -151,6 +155,7 @@ func (r *runner) onlyRow(ctx context.Context, c fixturechange.Change, table, whe
 	if err != nil {
 		return "", nil, err
 	}
+	keyWhere, keyArgs = r.scoped(c.Model, keyWhere, keyArgs)
 	return fmt.Sprintf("%s AND (SELECT count(*) FROM %s WHERE %s) = 1", where, table, keyWhere),
 		append(append([]any{}, args...), keyArgs...), nil
 }
@@ -161,4 +166,44 @@ func (r *runner) run(ctx context.Context, query string, args []any) (int64, erro
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// write runs an INSERT or an UPDATE and returns its row count. For a model with
+// a Where it also makes sure every row it wrote holds it: a fixture row whose
+// values put it outside the predicate would otherwise be written, and then be
+// invisible to export, check and every later migration, which only look
+// inside it.
+func (r *runner) write(ctx context.Context, model, query string, args []any) (int64, error) {
+	t := r.set.Tables[model]
+	if t.Where == "" {
+		return r.run(ctx, query, args)
+	}
+	rows, err := r.tx.QueryContext(ctx, query+" RETURNING (?\n)", append(append([]any{}, args...), bun.Safe(t.Where))...)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var n, outside int64
+	for rows.Next() {
+		var holds sql.NullBool
+		if err := rows.Scan(&holds); err != nil {
+			return 0, err
+		}
+		n++
+		if !holds.Valid || !holds.Bool {
+			outside++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	if outside > 0 {
+		return 0, fmt.Errorf("the row written into %s does not hold the model's where, %s, so it would not be master "+
+			"data and nothing would find it again; nothing was changed. The fixture file and the where in the "+
+			"configuration disagree about this row", t.Name, t.Where)
+	}
+	return n, nil
 }

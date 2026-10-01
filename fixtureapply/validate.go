@@ -70,6 +70,11 @@ func Validate(set fixturechange.Set) error {
 				return fmt.Errorf("model %q: %s %w", model, part.what, err)
 			}
 		}
+		if t.Where != "" {
+			if err := checkPredicate(t.Where); err != nil {
+				return fmt.Errorf("model %q: where %q %w", model, t.Where, err)
+			}
+		}
 	}
 	if set.SeedGuardTable != "" {
 		if _, err := quoteIdent(set.SeedGuardTable); err != nil {
@@ -151,3 +156,91 @@ func Validate(set fixturechange.Set) error {
 	}
 	return nil
 }
+
+// checkPredicate refuses a Where that could reach outside the parentheses
+// every statement puts it in: a ; that ends the statement, or a parenthesis
+// that closes one of the statement's own. "a) OR (b" would turn a guard into
+// one that matches every row holding b, so a migration would change rows it
+// was never generated for instead of failing. Quoted text, quoted names and
+// comments may hold either character, and are skipped.
+func checkPredicate(w string) error {
+	depth := 0
+	identChar := func(c byte) bool {
+		return c == '_' || c == '$' || (c >= '0' && c <= '9') || (c|0x20 >= 'a' && c|0x20 <= 'z') || c >= 0x80
+	}
+	for i := 0; i < len(w); i++ {
+		c := w[i]
+		switch {
+		case c == 0:
+			return fmt.Errorf("holds a NUL character")
+		case c == '\'':
+			// E'...' reads a backslash as an escape; '' is two strings
+			// back to back, which this reads the same way.
+			escapes := i > 0 && (w[i-1]|0x20) == 'e' && (i == 1 || !identChar(w[i-2]))
+			j := i + 1
+			for ; j < len(w) && w[j] != '\''; j++ {
+				if escapes && w[j] == '\\' {
+					j++
+				}
+			}
+			if j >= len(w) {
+				return fmt.Errorf("has a quote that does not end")
+			}
+			i = j
+		case c == '"':
+			j := strings.IndexByte(w[i+1:], '"')
+			if j < 0 {
+				return fmt.Errorf("has a quoted name that does not end")
+			}
+			i += j + 1
+		case c == '$' && (i == 0 || !identChar(w[i-1])):
+			tag := dollarTag.FindString(w[i:])
+			if tag == "" {
+				continue
+			}
+			j := strings.Index(w[i+len(tag):], tag)
+			if j < 0 {
+				return fmt.Errorf("has a dollar quote that does not end")
+			}
+			i += len(tag) + j + len(tag) - 1
+		case c == '-' && strings.HasPrefix(w[i:], "--"):
+			j := strings.IndexByte(w[i:], '\n')
+			if j < 0 {
+				j = len(w) - i
+			}
+			i += j
+		case c == '/' && strings.HasPrefix(w[i:], "/*"):
+			// Block comments nest in PostgreSQL.
+			nest, j := 1, i+2
+			for ; j < len(w) && nest > 0; j++ {
+				switch {
+				case strings.HasPrefix(w[j:], "/*"):
+					nest, j = nest+1, j+1
+				case strings.HasPrefix(w[j:], "*/"):
+					nest, j = nest-1, j+1
+				}
+			}
+			if nest > 0 {
+				return fmt.Errorf("has a comment that does not end")
+			}
+			i = j - 1
+		case c == ';':
+			return fmt.Errorf("holds a ;, which would end the statement it is written into; " +
+				"a predicate never needs one")
+		case c == '(':
+			depth++
+		case c == ')':
+			if depth--; depth < 0 {
+				return fmt.Errorf("closes a parenthesis it did not open, which would reach outside the " +
+					"parentheses every statement puts it in")
+			}
+		}
+	}
+	if depth != 0 {
+		return fmt.Errorf("opens a parenthesis it does not close")
+	}
+	return nil
+}
+
+// dollarTag is the opening of a dollar-quoted string, $$ or $tag$.
+var dollarTag = regexp.MustCompile(`^\$([A-Za-z_][A-Za-z0-9_]*)?\$`)

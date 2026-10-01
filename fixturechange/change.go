@@ -41,6 +41,19 @@ type Table struct {
 	// deleted: removing a plan must not quietly delete or detach the
 	// subscriptions on it.
 	Cascade bool
+	// Where, when set, is an SQL predicate over the table's columns that
+	// limits which of its rows are master data: the configuration's where,
+	// such as tenant_id IS NULL for global rows that share a table with each
+	// tenant's own. Every statement, every lookup by natural key and every
+	// reference to the model sees only the rows it holds for, and a row a
+	// change writes has to hold it afterwards. Without it, a change to a
+	// global row would also reach a tenant's row with the same key, and a
+	// reference could bind a global row to a tenant's private one.
+	//
+	// It is the configuration's own SQL, written into the statements as it
+	// stands; fixtureapply refuses one that could reach outside the
+	// parentheses it is put in.
+	Where string
 }
 
 // Tables maps a model name to its table.

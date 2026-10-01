@@ -643,3 +643,97 @@ func TestAGuardReferenceToARenamedRowFollowsThePolicy(t *testing.T) {
 		})
 	}
 }
+
+// Global tags and each tenant's own share one table, and the model's where says
+// which rows are master data. Every statement, lookup and reference has to stay
+// inside it: before, the relabel of a global tag relabelled a tenant's tag too,
+// the insert of a global tag was skipped because a tenant had one by that code,
+// and a new rule was bound to a tenant's private tag.
+func TestAModelsWhereLimitsEveryStatement(t *testing.T) {
+	db := connect(t)
+	ctx := context.Background()
+	run(t, db,
+		"DROP TABLE IF EXISTS scoped_tag_rules", "DROP TABLE IF EXISTS scoped_tags",
+		`CREATE TABLE scoped_tags (id bigserial PRIMARY KEY, tenant_id bigint, code text NOT NULL, label text NOT NULL,
+			flags jsonb NOT NULL DEFAULT '{}')`,
+		"CREATE UNIQUE INDEX ON scoped_tags (code) WHERE tenant_id IS NULL",
+		`CREATE TABLE scoped_tag_rules (id bigserial PRIMARY KEY, name text NOT NULL UNIQUE,
+			tag_id bigint NOT NULL REFERENCES scoped_tags (id))`,
+		"INSERT INTO scoped_tags (id, code, label) VALUES (1, 'urgent', 'Urgent'), (2, 'later', 'Later'), (3, 'done', 'Done')",
+		"INSERT INTO scoped_tag_rules (id, name, tag_id) VALUES (1, 'escalate', 1)",
+		// Tenant 1's own tags, with the codes and labels of global ones.
+		`INSERT INTO scoped_tags (id, tenant_id, code, label) VALUES (5, 1, 'urgent', 'Urgent'), (6, 1, 'blocked', 'Blocked'),
+			(7, 1, 'later', 'Later')`,
+		`INSERT INTO scoped_tags (id, code, label, flags) VALUES (8, 'secret', 'Secret', '{"private": true}')`)
+	dump := func() string {
+		return scan[string](t, db, `SELECT string_agg(concat_ws(' ', id, tenant_id, code, label), ', ' ORDER BY id) FROM scoped_tags`) +
+			" | " + scan[string](t, db, `SELECT string_agg(concat_ws(' ', id, name, tag_id), ', ' ORDER BY id) FROM scoped_tag_rules`)
+	}
+	before := dump()
+	tag := func(code string) fixturechange.Values { return fixturechange.Values{"code": fixturechange.Lit(code)} }
+	set := fixturechange.Set{
+		Name:           "20260921120000_fixture_tags",
+		SeedGuardTable: "scoped_tags",
+		Tables: fixturechange.Tables{
+			// A ? that bun must not take for a placeholder, and a comment that
+			// must not swallow the rest of the statement.
+			"Tag":     {Name: "scoped_tags", ID: "id", Key: "code", Serial: true, Where: "tenant_id IS NULL AND NOT flags ? 'private' -- global rows"},
+			"TagRule": {Name: "scoped_tag_rules", ID: "id", Key: "name", Serial: true},
+		},
+		Changes: []fixturechange.Change{
+			{Model: "Tag", Kind: fixturechange.Update, Key: tag("urgent"),
+				Old: fixturechange.Values{"label": fixturechange.Lit("Urgent")},
+				New: fixturechange.Values{"label": fixturechange.Lit("URGENT")}},
+			{Model: "Tag", Kind: fixturechange.Insert, Key: tag("blocked"),
+				New: fixturechange.Values{"id": fixturechange.Lit("100"), "code": fixturechange.Lit("blocked"),
+					"label": fixturechange.Lit("Blocked globally")}},
+			{Model: "TagRule", Kind: fixturechange.Insert, Key: fixturechange.Values{"name": fixturechange.Lit("page")},
+				New: fixturechange.Values{"id": fixturechange.Lit("3"), "name": fixturechange.Lit("page"),
+					"tag_id": fixturechange.RefTo("Tag", "urgent")}},
+			{Model: "Tag", Kind: fixturechange.Delete, Key: tag("later"),
+				Old: fixturechange.Values{"id": fixturechange.Lit("2"), "code": fixturechange.Lit("later"),
+					"label": fixturechange.Lit("Later")}},
+		},
+	}
+	outcomes, err := applyReporting(t, db, set)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	for _, o := range outcomes {
+		if o.Index >= 0 && (o.Status != fixtureapply.StatusApplied || o.Rows != 1) {
+			t.Fatalf("every change applies to exactly the global row: %+v", o)
+		}
+	}
+	const after = "1 urgent URGENT, 3 done Done, 5 1 urgent Urgent, 6 1 blocked Blocked, 7 1 later Later, " +
+		"8 secret Secret, 100 blocked Blocked globally | 1 escalate 1, 3 page 1"
+	if got := dump(); got != after {
+		t.Fatalf("after Apply\n got %s\nwant %s", got, after)
+	}
+	outcomes, err = applyReporting(t, db, set)
+	if err != nil {
+		t.Fatalf("second Apply: %v", err)
+	}
+	for _, o := range outcomes {
+		if o.Index >= 0 && o.Status != fixtureapply.StatusUnchanged {
+			t.Fatalf("a second run finds every change made: %+v", o)
+		}
+	}
+	if err := fixtureapply.Revert(ctx, db, set, quiet()); err != nil {
+		t.Fatalf("Revert: %v", err)
+	}
+	if got := dump(); got != before {
+		t.Fatalf("after Revert\n got %s\nwant %s", got, before)
+	}
+
+	// A row the change writes has to be master data afterwards, or nothing
+	// would find it again.
+	set.Changes = []fixturechange.Change{{Model: "Tag", Kind: fixturechange.Insert, Key: tag("mine"),
+		New: fixturechange.Values{"code": fixturechange.Lit("mine"), "label": fixturechange.Lit("Mine"),
+			"tenant_id": fixturechange.Lit("1")}}}
+	if _, err := applyReporting(t, db, set); err == nil || !strings.Contains(err.Error(), "does not hold the model's where") {
+		t.Fatalf("want the row outside the where refused, got %v", err)
+	}
+	if got := dump(); got != before {
+		t.Fatalf("nothing may change\n got %s\nwant %s", got, before)
+	}
+}
