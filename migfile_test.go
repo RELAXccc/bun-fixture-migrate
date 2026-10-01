@@ -96,6 +96,7 @@ func TestAHandEditedFileReadsBack(t *testing.T) {
 import fc "github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 
 var set = fc.Set{
+	Format: 1,
 	Name:   "x",
 	Tables: fc.Tables{"Plan": fc.Table{Name: "plans", ID: "id", Serial: false}},
 	Policy: fc.Policy{MissingRow: fc.ModeWarn},
@@ -110,6 +111,9 @@ var set = fc.Set{
 	set, isFixture, err := ReadChangeSet(src)
 	if err != nil || !isFixture {
 		t.Fatalf("%v %v", isFixture, err)
+	}
+	if set.Format != 1 {
+		t.Fatalf("Format: %d", set.Format)
 	}
 	if set.Policy.MissingRow != fixturechange.ModeWarn || set.Changes[0].Kind != fixturechange.Update ||
 		!set.Changes[0].Old["note"].IsNull {
@@ -128,7 +132,19 @@ import "github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 var s = fixturechange.Set{
 	Owner: "x",
 }
-`, "line 4: unknown field Owner"},
+`, "line 4: unknown field Owner; the file may have been written by a newer version"},
+		"unknown table field": {`package m
+import "github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+var s = fixturechange.Set{Tables: fixturechange.Tables{"Plan": {Name: "plans", Partition: "x"}}}
+`, "unknown field Partition; the file may have been written by a newer version"},
+		"unknown value": {`package m
+import "github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+var s = fixturechange.Set{Changes: []fixturechange.Change{{Key: fixturechange.Values{"a": fixturechange.Expr("now()")}}}}
+`, "not Lit, Null or RefTo but Expr; the file may have been written by a newer version"},
+		"newer format": {`package m
+import "github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+var s = fixturechange.Set{Format: 2}
+`, "the change set is in format 2, and this version of bun-fixture-migrate reads formats up to 1: upgrade it"},
 		"two sets": {`package m
 import "github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 var a, b = fixturechange.Set{}, fixturechange.Set{}

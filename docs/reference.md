@@ -325,6 +325,19 @@ in a savepoint inside it, which is how a migration that also does other work kee
 transaction. Only on the migrator's `*bun.DB` does a failure take back bun's record of the
 migration.
 
+### Generated files over time
+
+A generated migration stays in your repository for good, and is compiled against whichever version
+of `fixtureapply` the application uses later. Every version reads, compiles and runs the files the
+earlier ones wrote: the repository keeps one of each shape, unchanged, under `testdata/generated`,
+and its tests run them all under bun's migrator.
+
+`fixturechange.Set` has a `Format`, which a file leaves out while it is 1. A new field needs no new
+format: a file that uses one does not compile against an older `fixtureapply`, which is refusal
+enough. Only a change to what an existing field means raises it, and then an older `fixtureapply`
+refuses the file, and an older `status` or `plan` cannot read it, with a sentence saying to upgrade
+`github.com/RELAXccc/bun-fixture-migrate`.
+
 `fixturemigrate.Sync(ctx, db, cfg, files, SyncOptions{DryRun, Logf})` is the `sync` command,
 returning a `*SyncResult` with the diff, the findings and the outcomes; `ErrSyncRefused` wraps a
 refusal. See [tests and development servers](usage.md#tests-and-development-servers).

@@ -233,6 +233,12 @@ func (r *setReader) set(lit *ast.CompositeLit) (fixturechange.Set, error) {
 	err := r.fields(lit, func(key string, value ast.Expr) error {
 		var err error
 		switch key {
+		case "Format":
+			set.Format, err = r.integer(value)
+			if err == nil && (set.Format < 0 || set.Format > fixturechange.CurrentFormat) {
+				err = r.errorf(value, "the change set is in format %d, and this version of bun-fixture-migrate reads "+
+					"formats up to %d: upgrade it", set.Format, fixturechange.CurrentFormat)
+			}
 		case "Name":
 			set.Name, err = r.str(value)
 		case "SeedGuardTable":
@@ -248,7 +254,7 @@ func (r *setReader) set(lit *ast.CompositeLit) (fixturechange.Set, error) {
 		case "Changes":
 			set.Changes, err = r.changes(value)
 		default:
-			err = r.errorf(value, "unknown field %s", key)
+			err = r.unknown(value, key)
 		}
 		return err
 	})
@@ -302,7 +308,7 @@ func (r *setReader) tables(expr ast.Expr) (fixturechange.Tables, error) {
 			case "Where":
 				t.Where, err = r.str(value)
 			default:
-				err = r.errorf(value, "unknown field %s", key)
+				err = r.unknown(value, key)
 			}
 			return err
 		})
@@ -332,7 +338,7 @@ func (r *setReader) policy(expr ast.Expr) (fixturechange.Policy, error) {
 		case "DuplicateKey":
 			p.DuplicateKey = mode
 		default:
-			err = r.errorf(value, "unknown field %s", key)
+			err = r.unknown(value, key)
 		}
 		return err
 	})
@@ -385,7 +391,7 @@ func (r *setReader) changes(expr ast.Expr) ([]fixturechange.Change, error) {
 			case "New":
 				c.New, err = r.values(value)
 			default:
-				err = r.errorf(value, "unknown field %s", key)
+				err = r.unknown(value, key)
 			}
 			return err
 		})
@@ -407,7 +413,8 @@ func (r *setReader) kind(expr ast.Expr) (fixturechange.Kind, error) {
 		case "Delete":
 			return fixturechange.Delete, nil
 		}
-		return "", r.errorf(expr, "unknown kind %s", sel.Sel.Name)
+		return "", r.errorf(expr, "unknown kind %s; the file may have been written by a newer version of "+
+			"bun-fixture-migrate, which this one cannot read: upgrade it", sel.Sel.Name)
 	}
 	s, err := r.str(expr)
 	return fixturechange.Kind(s), err
@@ -466,6 +473,10 @@ func (r *setReader) value(expr ast.Expr) (fixturechange.Value, error) {
 		return fixturechange.Null(), nil
 	case sel.Sel.Name == "RefTo" && len(args) == 2:
 		return fixturechange.RefTo(args[0], args[1]), nil
+	case sel.Sel.Name != "Lit" && sel.Sel.Name != "Null" && sel.Sel.Name != "RefTo":
+		return fixturechange.Value{}, r.errorf(expr, "a value that is not Lit, Null or RefTo but %s; the file may "+
+			"have been written by a newer version of bun-fixture-migrate, which this one cannot read: upgrade it",
+			sel.Sel.Name)
 	}
 	return fixturechange.Value{}, r.errorf(expr, "a value that is not Lit, Null or RefTo")
 }
@@ -476,6 +487,27 @@ func (r *setReader) str(expr ast.Expr) (string, error) {
 		return "", r.errorf(expr, "expected a string literal")
 	}
 	return strconv.Unquote(lit.Value)
+}
+
+func (r *setReader) integer(expr ast.Expr) (int, error) {
+	lit, ok := expr.(*ast.BasicLit)
+	if !ok || lit.Kind != token.INT {
+		return 0, r.errorf(expr, "expected a whole number")
+	}
+	n, err := strconv.ParseInt(lit.Value, 0, 32)
+	if err != nil {
+		return 0, r.errorf(expr, "%v", err)
+	}
+	return int(n), nil
+}
+
+// unknown is the error for a field this version does not know. A file names
+// one when somebody edited it by hand, or when a newer version wrote it: a new
+// field is how the format grows, and then this version cannot read the file
+// and the application's fixtureapply cannot compile it.
+func (r *setReader) unknown(n ast.Node, field string) error {
+	return r.errorf(n, "unknown field %s; the file may have been written by a newer version of bun-fixture-migrate, "+
+		"which this one cannot read: upgrade it", field)
 }
 
 func (r *setReader) boolean(expr ast.Expr) (bool, error) {

@@ -418,3 +418,20 @@ func TestValidateChecksAWhere(t *testing.T) {
 		}
 	}
 }
+
+// A set written for a format this version does not know is refused rather than
+// run with a meaning it may not have; 0, a set from before formats were
+// numbered, is format 1.
+func TestValidateKnowsItsFormats(t *testing.T) {
+	for _, format := range []int{0, fixturechange.CurrentFormat} {
+		if err := Validate(fixturechange.Set{Format: format, Tables: tables()}); err != nil {
+			t.Errorf("format %d: %v", format, err)
+		}
+	}
+	for _, format := range []int{-1, fixturechange.CurrentFormat + 1} {
+		err := Validate(fixturechange.Set{Format: format, Tables: tables()})
+		if err == nil || !strings.Contains(err.Error(), "upgrade github.com/RELAXccc/bun-fixture-migrate") {
+			t.Errorf("format %d: %v", format, err)
+		}
+	}
+}
