@@ -161,6 +161,12 @@ func DatabaseSnapshot(ctx context.Context, db bun.IDB, cfg *Config, tables map[s
 			}
 			e.setKey(model, key)
 			e.Anchor = uniqueAnchor(anchorOf(key), r.id, taken)
+			// The id this database gave a row of an ids: database model is
+			// its own: the rows pointing at it are resolved above, and a
+			// comparison, a guard or an export has no use for it.
+			if m.idsFromDatabase() {
+				e.ID = ""
+			}
 			snap.Entries[model] = append(snap.Entries[model], e)
 		}
 		snap.reportDuplicates(model)

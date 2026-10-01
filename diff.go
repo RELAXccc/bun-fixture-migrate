@@ -59,6 +59,73 @@ type Result struct {
 	Order []string
 	// Base and Head name the two snapshots, for the generated file's comment.
 	Base, Head string
+	// LeftAlone counts, per model in model order, the differences the
+	// configuration gives to the database (mode upsert and insert, and
+	// insert_only columns), which are no change and no drift. Only a model
+	// with something to count is in it.
+	LeftAlone []LeftAlone
+
+	alone map[string]*LeftAlone
+}
+
+// LeftAlone is what the diff found different in one model and left alone,
+// because the configuration says the database owns it.
+type LeftAlone struct {
+	Model string
+	// Mode is the model's mode.
+	Mode Ownership
+	// Rows is how many rows only the base state holds, which mode upsert
+	// and mode insert never delete: a tenant's, or one the application
+	// added, or one that left the fixture files.
+	Rows int
+	// Changed is how many rows both states hold with other values, which
+	// mode insert never updates.
+	Changed int
+	// Columns is, per insert_only column, how many rows both states hold
+	// with another value in it.
+	Columns map[string]int
+}
+
+// leftAlone is the count of a model, made on first use.
+func (r *Result) leftAlone(model string) *LeftAlone {
+	if r.alone == nil {
+		r.alone = map[string]*LeftAlone{}
+	}
+	if r.alone[model] == nil {
+		r.alone[model] = &LeftAlone{Model: model}
+	}
+	return r.alone[model]
+}
+
+// LeftAloneLines says what LeftAlone counts, a line per model and kind, for
+// a person: "Tenant: 3 rows only in the database, which mode upsert never
+// deletes".
+func (r *Result) LeftAloneLines() []string {
+	var out []string
+	for _, a := range r.LeftAlone {
+		if a.Rows > 0 {
+			out = append(out, fmt.Sprintf("%s: %s only in %s, which mode %s never deletes", a.Model,
+				plural(a.Rows, "row"), r.Base, a.Mode))
+		}
+		if a.Changed > 0 {
+			out = append(out, fmt.Sprintf("%s: %s with other values in %s, which mode insert never updates",
+				a.Model, plural(a.Changed, "row"), r.Base))
+		}
+		for _, col := range sortedKeysOfCounts(a.Columns) {
+			out = append(out, fmt.Sprintf("%s: %s with another %s in %s, which insert_only leaves to the database",
+				a.Model, plural(a.Columns[col], "row"), col, r.Base))
+		}
+	}
+	return out
+}
+
+func sortedKeysOfCounts(m map[string]int) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Totals counts the changes by kind.
@@ -255,9 +322,13 @@ func undecided(label string, m *Model, c fixturechange.Change, prev, cur *Entry)
 // respelled refuses a row whose value resolves the same on both sides but is
 // written differently, 1.10 before and 1.1 after: no change for a number
 // column, a change for a string column, and without the column's type there is
-// no telling which.
+// no telling which. A column the files do not own in a row the database
+// holds, or an id the database gives, is no change either way.
 func respelled(model string, m *Model, prev, cur *Entry) (Refusal, bool) {
 	cols := undecidedColumns(m, prev, cur, func(col, pr, cr string) bool {
+		if (col == m.ID && m.idsFromDatabase()) || (col != m.ID && !m.ownsValue(col)) {
+			return false
+		}
 		_, pw, okP := writtenAs(m, prev, col)
 		_, cw, okC := writtenAs(m, cur, col)
 		return okP && okC && pr == cr && pw != cw
@@ -297,6 +368,9 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 	// another.
 	skipped := map[string]map[string]bool{}
 	renamed := map[string]bool{}
+	// kept holds the ref values a row of a mode insert model took in the new
+	// state, by "Model\x00value", with the one it keeps in a database.
+	kept := map[string]string{}
 	shared := sharedRefs(cfg, old, next)
 	refs := newRefIndex(cfg, old)
 	for _, model := range order {
@@ -304,7 +378,14 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 		// renames nothing, but every row pointing at it named it by the old
 		// value, and will by the new one. The base state follows it here, as
 		// it follows a rename, so those rows do not differ in that alone.
-		movedRefs(cfg, model, old, next, shared, refs)
+		moves := movedRefs(cfg, model, old, next, shared, refs)
+		// Under mode insert the row keeps its old ref value wherever it is,
+		// so a change naming it by the new one would find nothing there.
+		if cfg.Models[model].Mode == OwnInsert {
+			for _, mv := range moves {
+				kept[model+"\x00"+mv.to] = mv.from
+			}
+		}
 		skip := map[string]bool{}
 		if err := identity(cfg, model, old, next, res, skip, renamed, shared, refs, &renames); err != nil {
 			return nil, err
@@ -316,6 +397,9 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 	// what it points at, or the id it writes.
 	refused := func(c fixturechange.Change) (Refusal, bool) {
 		if r, ok := refusedByRename(renamed, c); ok {
+			return r, true
+		}
+		if r, ok := refusedByKeptRef(cfg, kept, c); ok {
 			return r, true
 		}
 		if r, ok := refusedByShared(shared, c); ok {
@@ -336,6 +420,14 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 			}
 			cur, prev := newGroups[k], oldGroups[k]
 			label := cur[0].label(model)
+			// Under mode insert a row the base holds is the database's, values
+			// and all, whatever the new state says about it.
+			if m.Mode == OwnInsert && len(prev) > 0 {
+				if !sameRowSet(prev, cur) {
+					res.leftAlone(model).Changed++
+				}
+				continue
+			}
 			// A key that is not unique cannot be turned into a WHERE clause
 			// that hits the right row. As long as the group did not change
 			// that costs nothing; once it does, it has to be hand-written.
@@ -366,7 +458,16 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 				inserts = append(inserts, planned{change, nil, cur[0].Full(m)})
 				continue
 			}
-			change, refusal := diffRow(model, prev[0], cur[0])
+			for _, col := range sortedKeysOfBools(m.insertOnly) {
+				if !sameCell(prev[0], cur[0], col) {
+					a := res.leftAlone(model)
+					if a.Columns == nil {
+						a.Columns = map[string]int{}
+					}
+					a.Columns[col]++
+				}
+			}
+			change, refusal := diffRow(model, m, prev[0], cur[0])
 			if refusal != nil {
 				res.Refusals = append(res.Refusals, *refusal)
 				continue
@@ -398,6 +499,13 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 			}
 			prev := oldGroups[k]
 			label := prev[0].label(model)
+			// Under upsert and insert a row the new state does not hold is
+			// not the files' to delete: a tenant's, the application's, or
+			// one that left the files and stays wherever it is.
+			if m.Mode != OwnSync {
+				res.leftAlone(model).Rows += len(prev)
+				continue
+			}
 			if m.Deletes == DeleteRefuse {
 				res.Refusals = append(res.Refusals, Refusal{model, label,
 					"deletes of this model are refused by the configuration because other rows may point at it: " +
@@ -410,7 +518,7 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 				continue
 			}
 			change := fixturechange.Change{
-				Model: model, Kind: fixturechange.Delete, Key: prev[0].Key, Old: prev[0].Full(m)}
+				Model: model, Kind: fixturechange.Delete, Key: prev[0].Key, Old: owned(m, prev[0].Full(m))}
 			if r, ok := refused(change); ok {
 				res.Refusals = append(res.Refusals, r)
 				continue
@@ -430,6 +538,12 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 	res.Changes, notes = orderChanges(cfg, uniqueIndexes(cfg, old, next), renames, deletes, updates, inserts)
 	res.Warnings = append(res.Warnings, notes...)
 	res.Tables = tablesFor(cfg, res.Changes)
+	for _, model := range order {
+		if a := res.alone[model]; a != nil {
+			a.Mode = cfg.Models[model].Mode
+			res.LeftAlone = append(res.LeftAlone, *a)
+		}
+	}
 	for _, list := range [][]Refusal{res.Refusals, res.Warnings} {
 		sort.SliceStable(list, func(i, j int) bool {
 			if list[i].Model != list[j].Model {
@@ -487,8 +601,9 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 	}
 
 	// rename settles a row whose key changed: prev in the base state, cur in
-	// the new one. where names the row in a refusal.
-	rename := func(prev, cur *Entry, where string) error {
+	// the new one. where names the row in a refusal; byID says an id pairs
+	// the two, rather than their keys being one value to the key's type.
+	rename := func(prev, cur *Entry, where string, byID bool) error {
 		if keyString(model, cur.Key) == keyString(model, prev.Key) {
 			// Only the spelling of a key value changed, 0012 to 012: the
 			// same key in a numeric column and a rename in a text one.
@@ -496,6 +611,26 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 			if r, ok := respelled(model, m, prev, cur); ok {
 				res.Refusals = append(res.Refusals, r)
 			}
+			return nil
+		}
+		if m.Mode == OwnInsert {
+			skip[prev.KeyStr], skip[cur.KeyStr] = true, true
+			if !byID {
+				// Go and GO in a citext key: the database finds the row by
+				// either, so the row is there, and its spelling is the
+				// database's under mode insert.
+				res.leftAlone(model).Changed++
+				return nil
+			}
+			for _, e := range []*Entry{prev, cur} {
+				if v := e.refValue(m); v != "" {
+					renamed[model+"\x00"+v] = true
+				}
+			}
+			res.Refusals = append(res.Refusals, Refusal{model, where, fmt.Sprintf(
+				"renamed from %s to %s, and mode insert never changes a row a database holds, its key included: "+
+					"put the key back, or give the row of the new key an %s of its own to add it beside the old one",
+				prev.label(model), cur.label(model), m.ID)})
 			return nil
 		}
 		// A rename into a name another row still holds cannot be written in
@@ -574,7 +709,7 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 		if !ok || cur.KeyStr == prev.KeyStr {
 			continue
 		}
-		if err := rename(prev, cur, m.ID+" "+prev.ID); err != nil {
+		if err := rename(prev, cur, m.ID+" "+prev.ID, true); err != nil {
 			return err
 		}
 	}
@@ -588,12 +723,14 @@ func identity(cfg *Config, model string, old, next *Snapshot, res *Result,
 		if p.prev.ID != "" {
 			where = m.ID + " " + p.prev.ID
 		}
-		if err := rename(p.prev, p.cur, where); err != nil {
+		if err := rename(p.prev, p.cur, where, false); err != nil {
 			return err
 		}
 	}
 
-	if cfg.Policy.IDDrift == ModeIgnore {
+	// Under ids: database a file's id only names a row inside the files, and
+	// a database's is its own: neither says anything about the other.
+	if cfg.Policy.IDDrift == ModeIgnore || m.idsFromDatabase() {
 		return nil
 	}
 	// A natural key two rows of either snapshot share says nothing about
@@ -716,10 +853,10 @@ func (x *refIndex) rewrite(model, from, to string) {
 // set would have it wait for the country's update and the country wait for
 // it. A value more than one row holds, or one another row still holds, is
 // left alone: there the name says nothing about which row is meant.
-func movedRefs(cfg *Config, model string, old, next *Snapshot, shared map[string][]string, refs *refIndex) {
+func movedRefs(cfg *Config, model string, old, next *Snapshot, shared map[string][]string, refs *refIndex) []refMove {
 	m := cfg.Models[model]
 	if m == nil || m.Ref == m.ID {
-		return
+		return nil
 	}
 	oldGroups, oldOrder := byKey(old.Entries[model])
 	newGroups, _ := byKey(next.Entries[model])
@@ -729,8 +866,7 @@ func movedRefs(cfg *Config, model string, old, next *Snapshot, shared map[string
 			holders[v]++
 		}
 	}
-	type move struct{ from, to string }
-	var moves []move
+	var moves []refMove
 	for _, k := range oldOrder {
 		prev, cur := oldGroups[k], newGroups[k]
 		if len(prev) != 1 || len(cur) != 1 {
@@ -751,11 +887,44 @@ func movedRefs(cfg *Config, model string, old, next *Snapshot, shared map[string
 		if _, undecided := c.AsWritten[m.Ref]; undecided {
 			continue
 		}
-		moves = append(moves, move{from, to})
+		moves = append(moves, refMove{from, to})
 	}
 	for _, mv := range moves {
 		refs.rewrite(model, mv.from, mv.to)
 	}
+	return moves
+}
+
+// refMove is a row's ref value in the base state and in the new one.
+type refMove struct{ from, to string }
+
+// refusedByKeptRef reports a change that names a row of a mode insert model
+// by a ref value the row only has in the new state. A database holding the
+// row keeps the value it had, because mode insert never updates the row, so
+// the reference finds nothing there. kept maps "Model\x00new value" to the
+// old one.
+func refusedByKeptRef(cfg *Config, kept map[string]string, c fixturechange.Change) (Refusal, bool) {
+	if len(kept) == 0 {
+		return Refusal{}, false
+	}
+	for _, values := range []fixturechange.Values{c.Key, c.Old, c.New} {
+		for _, col := range sortedColumns(values) {
+			ref := values[col].Ref
+			if ref == nil {
+				continue
+			}
+			from, ok := kept[ref.Model+"\x00"+ref.Key]
+			if !ok {
+				continue
+			}
+			column := cfg.Models[ref.Model].Ref
+			return Refusal{c.Model, keyLabel(c.Model, c.Key), fmt.Sprintf(
+				"%s points at %s %q, whose %s was %q, and mode insert never updates a row a database holds: there "+
+					"it is still %q, and a reference to %q finds nothing. Put the %s of %s back, or hand-write this "+
+					"change", col, ref.Model, ref.Key, column, from, from, ref.Key, column, ref.Model)}, true
+		}
+	}
+	return Refusal{}, false
 }
 
 // foldPair is a row of the base state and a row of the new one whose keys
@@ -824,10 +993,16 @@ func (e *Entry) refValue(m *Model) string {
 //
 // A row without an id, which only a key respelled in a type that holds both
 // spellings equal is taken for a rename of, is guarded by its old key alone:
-// that finds it under either spelling, and only it.
+// that finds it under either spelling, and only it. So is a row of a model
+// whose ids the database gives: the files' id says which row was renamed,
+// and is no row's id in a database.
 func renameChange(m *Model, model string, prev, cur *Entry) (fixturechange.Change, error) {
 	if prev.ID == "" && prev.foldKey(model) == "" {
 		return fixturechange.Change{}, fmt.Errorf("%s %s: a rename needs the row's %s", model, prev.label(model), m.ID)
+	}
+	id := prev.ID
+	if m.idsFromDatabase() {
+		id = ""
 	}
 	oldVals, newVals := fixturechange.Values{}, fixturechange.Values{}
 	for _, col := range sortedColumns(cur.Key) {
@@ -852,7 +1027,7 @@ func renameChange(m *Model, model string, prev, cur *Entry) (fixturechange.Chang
 			model, prev.label(model), col)
 	}
 	return fixturechange.Change{
-		Model: model, Kind: fixturechange.Update, Key: prev.Key, ID: prev.ID,
+		Model: model, Kind: fixturechange.Update, Key: prev.Key, ID: id,
 		Old: oldVals, New: newVals}, nil
 }
 
@@ -1634,15 +1809,22 @@ func leftOut(model, label string, e *Entry, columns []string) (Refusal, bool) {
 
 // diffRow compares two revisions of one row. A column that is spelled out on
 // one side and missing on the other with no configured default is refused: the
-// generator would have to invent what the missing one means.
-func diffRow(model string, prev, cur *Entry) (*fixturechange.Change, *Refusal) {
+// generator would have to invent what the missing one means. A column whose
+// value the database owns once the row exists (Model.ownsValue) is not
+// compared at all.
+func diffRow(model string, m *Model, prev, cur *Entry) (*fixturechange.Change, *Refusal) {
 	oldVals, newVals := fixturechange.Values{}, fixturechange.Values{}
 	cols := map[string]bool{}
 	for col := range prev.Cells {
-		cols[col] = true
+		cols[col] = m.ownsValue(col)
 	}
 	for col := range cur.Cells {
-		cols[col] = true
+		cols[col] = m.ownsValue(col)
+	}
+	for col, compared := range cols {
+		if !compared {
+			delete(cols, col)
+		}
 	}
 	names := make([]string, 0, len(cols))
 	for col := range cols {
@@ -1667,6 +1849,23 @@ func diffRow(model string, prev, cur *Entry) (*fixturechange.Change, *Refusal) {
 	}
 	return &fixturechange.Change{
 		Model: model, Kind: fixturechange.Update, Key: cur.Key, Old: oldVals, New: newVals}, nil
+}
+
+// sameCell reports whether two revisions of a row agree on a column: both
+// leave it out, or both hold one value.
+func sameCell(prev, cur *Entry, col string) bool {
+	ov, inOld := prev.Cells[col]
+	nv, inNew := cur.Cells[col]
+	return inOld == inNew && (!inOld || sameValue(ov, nv))
+}
+
+func sortedKeysOfBools(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // sameRowSet compares two groups of rows that share one natural key, as
@@ -1706,7 +1905,7 @@ func tablesFor(cfg *Config, changes []fixturechange.Change) fixturechange.Tables
 			Name:    cfg.RunTimeTable(m.Table),
 			ID:      m.ID,
 			Serial:  m.Serial,
-			Cascade: m.Deletes == DeleteCascade,
+			Cascade: m.Deletes == DeleteCascade && m.Mode == OwnSync,
 			Where:   m.Where,
 		}
 		if referenced {
