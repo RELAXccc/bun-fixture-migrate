@@ -245,24 +245,27 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 // time.Time it becomes with an offset, so "2026-01-01 10:00:00" in a fixture
 // file is 10:00 UTC in the seeded database whatever the server's TimeZone. A
 // migration binding the same text has to read it the same way, and a date such
-// as 2026-01-02 has to be year-month-day. The settings are local to the
-// transaction; restore puts back what a caller's own transaction had, and a
-// rollback does that by itself. restore also puts back lock_timeout, which run
-// changes, and lockTimeout is the session's.
+// as 2026-01-02 has to be year-month-day. IntervalStyle is postgres, as when
+// the generator read the values: it decides how an interval such as
+// '-1 2:03:04' is read, and how one is spelled where intervals compare through
+// their text (see looseEquality). The settings are local to the transaction;
+// restore puts back what a caller's own transaction had, and a rollback does
+// that by itself. restore also puts back lock_timeout, which run changes, and
+// lockTimeout is the session's.
 func session(ctx context.Context, tx bun.IDB) (restore func(context.Context) error, lockTimeout string, err error) {
-	var tz, ds string
-	if err := tx.QueryRowContext(ctx,
-		"SELECT current_setting('TimeZone'), current_setting('DateStyle'), current_setting('lock_timeout')").
-		Scan(&tz, &ds, &lockTimeout); err != nil {
+	var tz, ds, is string
+	if err := tx.QueryRowContext(ctx, "SELECT current_setting('TimeZone'), current_setting('DateStyle'), "+
+		"current_setting('IntervalStyle'), current_setting('lock_timeout')").
+		Scan(&tz, &ds, &is, &lockTimeout); err != nil {
 		return nil, "", fmt.Errorf("read the session's settings: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, "SELECT set_config('TimeZone', 'UTC', true), "+
-		"set_config('DateStyle', 'ISO, YMD', true)"); err != nil {
+		"set_config('DateStyle', 'ISO, YMD', true), set_config('IntervalStyle', 'postgres', true)"); err != nil {
 		return nil, "", fmt.Errorf("fix the session's settings: %w", err)
 	}
 	return func(ctx context.Context) error {
 		if _, err := tx.ExecContext(ctx, "SELECT set_config('TimeZone', ?, true), set_config('DateStyle', ?, true), "+
-			"set_config('lock_timeout', ?, true)", tz, ds, lockTimeout); err != nil {
+			"set_config('IntervalStyle', ?, true), set_config('lock_timeout', ?, true)", tz, ds, is, lockTimeout); err != nil {
 			return fmt.Errorf("restore the session's settings: %w", err)
 		}
 		return nil

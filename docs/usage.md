@@ -267,8 +267,8 @@ nothing in the migrations table. `SyncOptions{DryRun: true}` rolls back and repo
 
 The command connects with `pgdriver`. The run time, `fixtureapply`, runs in your application with
 whatever driver it uses: it is tested under bun's `pgdriver` and under `pgx/v5/stdlib` with
-`pgdialect`. It sets `TimeZone` and `DateStyle` for its own transaction and restores them, so values
-compare the same whatever the connection's settings.
+`pgdialect`. It sets `TimeZone`, `DateStyle` and `IntervalStyle` for its own transaction and restores
+them, so values compare the same whatever the connection's settings.
 
 The DSN is a URL (`postgres://user:password@host:5432/db?sslmode=require`). The command refuses a
 keyword DSN (`host=... user=...`) with a sentence, never repeats a password in a message, and sets

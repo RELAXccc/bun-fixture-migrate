@@ -122,7 +122,7 @@ func (r *runner) insert(ctx context.Context, c fixturechange.Change, t fixturech
 	// exists under a different id is somebody else's row, not ours to insert
 	// again: keying on the id as well is how a second copy appears, and then
 	// every later lookup by name finds two.
-	where, whereArgs, err := r.match(ctx, c.Model, c.Key)
+	where, whereArgs, err := r.match(ctx, c.Model, c.Key, true)
 	if err != nil {
 		return outcome{}, err
 	}
@@ -207,7 +207,7 @@ func (r *runner) delete(ctx context.Context, c fixturechange.Change, t fixturech
 // why. The subquery reads the table as it was before the statement, which is
 // what the count has to be about.
 func (r *runner) onlyRow(ctx context.Context, c fixturechange.Change, table, where string, args []any) (string, []any, error) {
-	keyWhere, keyArgs, err := r.match(ctx, c.Model, c.Key)
+	keyWhere, keyArgs, err := r.match(ctx, c.Model, c.Key, true)
 	if err != nil {
 		return "", nil, err
 	}

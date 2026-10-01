@@ -230,7 +230,7 @@ func (r *runner) diagnoseInsert(ctx context.Context, c fixturechange.Change, t f
 func (r *runner) idTakenByAnotherRow(ctx context.Context, c fixturechange.Change, t fixturechange.Table,
 	table, id string) (string, error) {
 
-	keyWhere, keyArgs, err := r.match(ctx, c.Model, c.Key)
+	keyWhere, keyArgs, err := r.match(ctx, c.Model, c.Key, true)
 	if err != nil {
 		return "", err
 	}
@@ -278,7 +278,7 @@ func (r *runner) idTakenByAnotherRow(ctx context.Context, c fixturechange.Change
 func (r *runner) idsFor(ctx context.Context, model, table string, t fixturechange.Table,
 	key fixturechange.Values) ([]string, error) {
 
-	where, args, err := r.match(ctx, model, key)
+	where, args, err := r.match(ctx, model, key, true)
 	if err != nil {
 		return nil, err
 	}
@@ -307,8 +307,11 @@ func (r *runner) idsFor(ctx context.Context, model, table string, t fixturechang
 	return out, rows.Close()
 }
 
-func (r *runner) count(ctx context.Context, model, table string, sets ...fixturechange.Values) (int64, error) {
-	where, args, err := r.matchAll(ctx, model, sets...)
+// count counts the rows of a model holding a natural key and further values.
+func (r *runner) count(ctx context.Context, model, table string, key fixturechange.Values,
+	values ...fixturechange.Values) (int64, error) {
+
+	where, args, err := r.matchAll(ctx, model, key, values...)
 	if err != nil {
 		return 0, err
 	}

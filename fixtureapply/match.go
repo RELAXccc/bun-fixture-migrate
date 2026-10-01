@@ -29,6 +29,10 @@ type colType struct {
 	// through anyarray and anyenum. The other geometric types have one that
 	// says something else; see sameIsNotEqual.
 	equality bool
+	// loose is true when the type's = holds two values equal that are not
+	// the same value; see looseEquality. Only a natural key compares
+	// through it.
+	loose bool
 }
 
 // sameIsNotEqual are the types whose = is not "the same value": box and circle
@@ -37,6 +41,19 @@ type colType struct {
 // box of the same area for the value the change was generated against, and
 // overwrite it. They compare through their text, as point does.
 var sameIsNotEqual = map[string]bool{"box": true, "circle": true, "path": true, "lseg": true, "line": true}
+
+// looseEquality are the types whose = holds values equal that a person tells
+// apart: interval's says '1 mon' is '30 days' and '1 day' is '24:00:00', which
+// are different values ('2026-01-31' plus one month is not plus 30 days), and
+// citext's ignores case. A column under a nondeterministic collation is the
+// same. A guard comparing an old value through it would take a hand edit for
+// the value the change was generated against, and overwrite it even under
+// ChangedRow error, so an old or a new value compares through its text.
+//
+// A natural key keeps the type's own =, which is what the table's unique
+// index holds the key to: a row with name 'Team' in a citext column is the
+// row the key 'team' names, as an insert of 'team' would find out.
+var looseEquality = map[string]bool{"interval": true, "citext": true}
 
 // colTypes reads the column types of a model's table, once per run.
 func (r *runner) colTypes(ctx context.Context, model string) (map[string]colType, error) {
@@ -50,7 +67,8 @@ func (r *runner) colTypes(ctx context.Context, model string) (map[string]colType
 	rows, err := r.tx.QueryContext(ctx, `
 SELECT a.attname, format_type(a.atttypid, a.atttypmod), format_type(a.atttypid, -1), bt.typname,
        bt.typcategory = 'A',
-       EXISTS (SELECT 1 FROM pg_operator o WHERE o.oprname = '=' AND o.oprleft = bt.oid AND o.oprright = bt.oid)
+       EXISTS (SELECT 1 FROM pg_operator o WHERE o.oprname = '=' AND o.oprleft = bt.oid AND o.oprright = bt.oid),
+       coalesce((SELECT NOT c.collisdeterministic FROM pg_collation c WHERE c.oid = a.attcollation), false)
 FROM pg_attribute a
 JOIN pg_type t ON t.oid = a.atttypid
 JOIN pg_type bt ON bt.oid = CASE WHEN t.typbasetype <> 0 THEN t.typbasetype ELSE t.oid END
@@ -63,9 +81,10 @@ WHERE a.attrelid = ?::regclass AND a.attnum > 0 AND NOT a.attisdropped`, table)
 	for rows.Next() {
 		var name, full, bare string
 		var ct colType
-		if err := rows.Scan(&name, &full, &bare, &ct.base, &ct.array, &ct.equality); err != nil {
+		if err := rows.Scan(&name, &full, &bare, &ct.base, &ct.array, &ct.equality, &ct.loose); err != nil {
 			return nil, err
 		}
+		ct.loose = ct.loose || looseEquality[ct.base]
 		ct.cast = full
 		switch ct.base {
 		case "varchar", "bpchar", "_varchar", "_bpchar":
@@ -89,11 +108,11 @@ WHERE a.attrelid = ?::regclass AND a.attnum > 0 AND NOT a.attisdropped`, table)
 // guard is the WHERE clause of an update or a delete: the natural key, the old
 // values, and the id when the change carries one, among the model's rows.
 func (r *runner) guard(ctx context.Context, c fixturechange.Change, t fixturechange.Table) (string, []any, error) {
-	sets := []fixturechange.Values{c.Key, c.Old}
+	values := []fixturechange.Values{c.Old}
 	if c.ID != "" {
-		sets = append(sets, fixturechange.Values{t.ID: fixturechange.Lit(c.ID)})
+		values = append(values, fixturechange.Values{t.ID: fixturechange.Lit(c.ID)})
 	}
-	where, args, err := r.matchAll(ctx, c.Model, sets...)
+	where, args, err := r.matchAll(ctx, c.Model, c.Key, values...)
 	if err != nil {
 		return "", nil, err
 	}
@@ -117,14 +136,15 @@ func (r *runner) scoped(model, cond string, args []any) (string, []any) {
 
 // match renders "col IS NOT DISTINCT FROM <value>" for every column, joined by
 // AND. IS NOT DISTINCT FROM rather than = so a NULL compares like any other
-// value.
+// value. key says whether values are a natural key, which compares as the
+// table's unique index does; see compare.
 //
 // A reference that names no row is a value no row holds, so its column
 // matches nothing. The change then goes through the same diagnosis as any
 // other that found no row, under the policy: a plan whose currency an admin
 // renamed no longer holds what the change was generated against, which is a
 // changed row and not a reason to fail the deploy whatever changed_row says.
-func (r *runner) match(ctx context.Context, model string, values fixturechange.Values) (string, []any, error) {
+func (r *runner) match(ctx context.Context, model string, values fixturechange.Values, key bool) (string, []any, error) {
 	var parts []string
 	var args []any
 	for _, col := range sortedColumns(values) {
@@ -137,7 +157,7 @@ func (r *runner) match(ctx context.Context, model string, values fixturechange.V
 		if err != nil {
 			return "", nil, err
 		}
-		part, err := r.compare(ctx, model, col, expr)
+		part, err := r.compare(ctx, model, col, expr, key)
 		if err != nil {
 			return "", nil, err
 		}
@@ -150,14 +170,17 @@ func (r *runner) match(ctx context.Context, model string, values fixturechange.V
 	return strings.Join(parts, " AND "), args, nil
 }
 
-func (r *runner) matchAll(ctx context.Context, model string, sets ...fixturechange.Values) (string, []any, error) {
+// matchAll is match of a natural key and of further values, joined by AND.
+func (r *runner) matchAll(ctx context.Context, model string, key fixturechange.Values,
+	values ...fixturechange.Values) (string, []any, error) {
+
 	var parts []string
 	var args []any
-	for _, values := range sets {
-		if len(values) == 0 {
+	for i, vs := range append([]fixturechange.Values{key}, values...) {
+		if len(vs) == 0 {
 			continue
 		}
-		part, a, err := r.match(ctx, model, values)
+		part, a, err := r.match(ctx, model, vs, i == 0)
 		if err != nil {
 			return "", nil, err
 		}
@@ -277,8 +300,10 @@ func (r *runner) unresolved(ctx context.Context, values ...fixturechange.Values)
 // 1.005 in a numeric(10,2) is 1.01, an upper-case uuid is the lower-case one.
 // A json column compares through jsonb, and a type without an equality of its
 // own through the text of both sides; for json, xml or point the bare
-// comparison is an error, and it would fail the migration at deploy time.
-func (r *runner) compare(ctx context.Context, model, col, value string) (string, error) {
+// comparison is an error, and it would fail the migration at deploy time. So
+// does a value, but not a natural key, of a type whose equality is loose (see
+// looseEquality). The text compares byte for byte, under the "C" collation.
+func (r *runner) compare(ctx context.Context, model, col, value string, key bool) (string, error) {
 	q, err := quoteIdent(col)
 	if err != nil {
 		return "", err
@@ -293,10 +318,10 @@ func (r *runner) compare(ctx context.Context, model, col, value string) (string,
 		return q + " IS NOT DISTINCT FROM " + value, nil
 	case ct.base == "json":
 		return q + "::jsonb IS NOT DISTINCT FROM (" + value + ")::jsonb", nil
-	case ct.equality:
+	case ct.equality && (key || !ct.loose):
 		return q + " IS NOT DISTINCT FROM (" + value + ")::" + ct.cast, nil
 	}
-	return q + "::text IS NOT DISTINCT FROM ((" + value + ")::" + ct.cast + ")::text", nil
+	return "(" + q + `::text COLLATE "C") IS NOT DISTINCT FROM (((` + value + ")::" + ct.cast + `)::text COLLATE "C")`, nil
 }
 
 func (r *runner) resolve(ctx context.Context, ref fixturechange.Ref) (string, error) {
