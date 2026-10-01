@@ -41,7 +41,9 @@ var fixtureChanges20260727100000RetireScaleAndPrioritySupport = fixturechange.Se
 		"Plan":        {Name: "plans", ID: "id", Key: "code"},
 		"PlanFeature": {Name: "plan_features", ID: "id"},
 	},
-	Policy: fixturechange.Policy{MissingRow: "error", ChangedRow: "warn", IDDrift: "error"},
+	Policy: fixturechange.Policy{
+		MissingRow: "error", ChangedRow: "warn", IDDrift: "error", DuplicateKey: "error",
+	},
 	Changes: []fixturechange.Change{
 		{Model: "Plan", Kind: fixturechange.Update,
 			Key: fixturechange.Values{"code": fixturechange.Lit("scale")},

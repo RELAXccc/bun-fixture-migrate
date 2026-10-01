@@ -37,7 +37,9 @@ var fixtureChanges20260824100000PlatformCategories = fixturechange.Set{
 	Tables: fixturechange.Tables{
 		"Category": {Name: "categories", ID: "id", Key: "slug", Serial: true},
 	},
-	Policy: fixturechange.Policy{MissingRow: "error", ChangedRow: "warn", IDDrift: "error"},
+	Policy: fixturechange.Policy{
+		MissingRow: "error", ChangedRow: "warn", IDDrift: "error", DuplicateKey: "error",
+	},
 	Changes: []fixturechange.Change{
 		{Model: "Category", Kind: fixturechange.Update,
 			ID:  "1",

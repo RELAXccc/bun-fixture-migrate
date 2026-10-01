@@ -37,7 +37,9 @@ var fixtureChanges20261019100000PlanOrder = fixturechange.Set{
 	Tables: fixturechange.Tables{
 		"Plan": {Name: "plans", ID: "id"},
 	},
-	Policy: fixturechange.Policy{MissingRow: "error", ChangedRow: "warn", IDDrift: "error"},
+	Policy: fixturechange.Policy{
+		MissingRow: "error", ChangedRow: "warn", IDDrift: "error", DuplicateKey: "error",
+	},
 	Changes: []fixturechange.Change{
 		{Model: "Plan", Kind: fixturechange.Update,
 			Key: fixturechange.Values{"code": fixturechange.Lit("scale")},

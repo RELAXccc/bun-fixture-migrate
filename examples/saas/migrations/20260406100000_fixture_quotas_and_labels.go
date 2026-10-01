@@ -42,7 +42,9 @@ var fixtureChanges20260406100000QuotasAndLabels = fixturechange.Set{
 		"PlanFeature": {Name: "plan_features", ID: "id"},
 		"Translation": {Name: "translations", ID: "id", Serial: true},
 	},
-	Policy: fixturechange.Policy{MissingRow: "error", ChangedRow: "warn", IDDrift: "error"},
+	Policy: fixturechange.Policy{
+		MissingRow: "error", ChangedRow: "warn", IDDrift: "error", DuplicateKey: "error",
+	},
 	Changes: []fixturechange.Change{
 		{Model: "Feature", Kind: fixturechange.Update,
 			Key: fixturechange.Values{"code": fixturechange.Lit("api")},

@@ -28,18 +28,19 @@ plan:
     output:
       - 'failed Plan code=enterprise insert [error]: ERROR: invalid input value for enum plan_tier: "enterprise"'
       - "pending before it and not simulated: 20260601090000_plan_tier_enterprise"
-  # With it, the plan reports a failure the deploy does not have.
+  # With it, the value exists, but in the plan's one transaction, which may
+  # not use an enum value it added; the deploy commits the SQL migration
+  # first. So the plan cannot tell, and says why.
   - cli: [plan, -with-sql]
     env: prod
-    exit: 3
-    known: "F5: plan -with-sql runs SQL and fixture migrations in one transaction, so a new enum value cannot be used"
+    exit: 1
     output:
       - "20260601090000_plan_tier_enterprise (SQL): would succeed"
-      - 'unsafe use of new value "enterprise" of enum type plan_tier'
+      - "20260601100000_fixture_enterprise_plan: could not be planned"
+      - "it uses an enum value a migration before it in this plan added"
   - cli: [plan, -with-sql]
     env: onprem
-    exit: 3
-    known: "F5"
+    exit: 1
     output:
       - "20260309090000_plans_trial_days (SQL): would succeed"
       - "20260504090000_roles_master_id_range (SQL): would succeed"

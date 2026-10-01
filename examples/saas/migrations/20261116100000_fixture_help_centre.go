@@ -37,7 +37,9 @@ var fixtureChanges20261116100000HelpCentre = fixturechange.Set{
 	Tables: fixturechange.Tables{
 		"Translation": {Name: "translations", ID: "id", Serial: true},
 	},
-	Policy: fixturechange.Policy{MissingRow: "error", ChangedRow: "warn", IDDrift: "error"},
+	Policy: fixturechange.Policy{
+		MissingRow: "error", ChangedRow: "warn", IDDrift: "error", DuplicateKey: "error",
+	},
 	Changes: []fixturechange.Change{
 		{Model: "Translation", Kind: fixturechange.Insert,
 			Key: fixturechange.Values{

@@ -87,50 +87,33 @@ probes:
       - cli: [export]
         env: prod
         output: ["wrote fixtures/fixture.yml"]
-      # export writes every column of the table, roles.tenant_id included,
-      # which the fixture file never wrote; generate then refuses every role.
-      - cli: [generate, -dry-run, -name, admin edits]
-        env: prod
-        exit: 2
-        known: "F1: export writes columns the fixture files do not, so export-then-generate is refused"
-        output:
-          - "refused: Role Role/code=owner: column \"tenant_id\" is written on one side and left out on the other"
-      - edit:
-          file: fixture-migrate.yml
-          old: "    where: tenant_id IS NULL\n"
-          new: "    where: tenant_id IS NULL\n    defaults:\n      tenant_id: ~\n"
-        known: "F1: workaround, say what an omitted tenant_id means"
+      # export writes the columns and the ids the fixture files hold, so the
+      # file differs from what it was only by the admin's two edits.
       - cli: [generate, -dry-run, -name, admin edits]
         env: prod
         output: ["Translation: 2 updates"]
         absent: ["Plan:", "Role:", "PlanPrice:", "Feature:", "Category:", "refused"]
-      # The export wrote production's ids into the file: the plans'
-      # gen_random_uuid() keys, and the serial ids of every price and
-      # translation, which the file never named and which differ in every
-      # database that got those rows from a migration rather than a seed.
-      # Every other database now drifts.
+      # No database's own ids made it into the file, so a database whose ids
+      # differ from production's only lacks the admin's edits.
       - cli: [check]
         env: staging
         exit: 3
-        known: "F2: export writes the source database's ids for rows the file left to the database"
-        output:
-          - "Plan Plan/code=free: its id changed from"
-          - "Translation id 10: renamed from Translation/key=plan.free.name/locale=de to Translation/key=plan.team.name/locale=de"
-      # And a later change carries production's ids into its guards. A
-      # delete of a translation nobody touched is skipped on staging.
+        output: ["Translation"]
+        absent: ["its id changed", "renamed from"]
       - generate: {name: admin edits, at: "20260420100000"}
         env: prod
         output: ["Translation: 2 updates"]
       - edit:
           file: fixtures/fixture.yml
           regexp: true
-          old: "    - _id: plan_scale_name_fr\\n      id: [0-9]+\\n(      .*\\n){4}"
+          old: "    - _id: plan_scale_name_fr\\n(      .*\\n)+"
           new: ""
       - generate: {name: drop a translation, at: "20260421100000"}
         env: prod
         output: ["Translation: 1 delete"]
+      # The delete guards on the row's natural key and values, which staging
+      # holds too, not on production's id.
       - cli: [plan, -file, migrations/20260421100000_fixture_drop_a_translation.go]
         env: staging
-        known: "F2: the delete guards on production's id"
         output:
-          - "skipped Translation key=plan.scale.name,locale=fr delete [changed row]"
+          - "applied Translation key=plan.scale.name,locale=fr delete (1 row)"

@@ -23,13 +23,15 @@ steps:
 deploy: [prod]
 plan:
   # Without the SQL migrations the plan runs against a table without the
-  # column, and says so.
+  # column. A migration it did not run may add it, so the plan cannot tell
+  # whether the deploy fails, and says so rather than predict a failure.
   - cli: [plan]
     env: prod
-    exit: 3
+    exit: 1
     output:
-      - "would FAIL"
+      - "could not be planned"
       - "pending before it and not simulated: 20260309090000_plans_trial_days, 20260309090100_plans_trial_days_no_default"
+      - "a migration that runs before it in the deploy but was not simulated can create it"
   - cli: [plan, -with-sql, -strict]
     env: prod
     output:

@@ -45,7 +45,9 @@ var fixtureChanges20260601100000EnterprisePlan = fixturechange.Set{
 		"PlanPrice":   {Name: "plan_prices", ID: "id", Serial: true},
 		"Translation": {Name: "translations", ID: "id", Serial: true},
 	},
-	Policy: fixturechange.Policy{MissingRow: "error", ChangedRow: "warn", IDDrift: "error"},
+	Policy: fixturechange.Policy{
+		MissingRow: "error", ChangedRow: "warn", IDDrift: "error", DuplicateKey: "error",
+	},
 	Changes: []fixturechange.Change{
 		{Model: "Plan", Kind: fixturechange.Insert,
 			Key: fixturechange.Values{"code": fixturechange.Lit("enterprise")},

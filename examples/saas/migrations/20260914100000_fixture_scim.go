@@ -42,7 +42,9 @@ var fixtureChanges20260914100000Scim = fixturechange.Set{
 		"PlanFeature": {Name: "plan_features", ID: "id"},
 		"Translation": {Name: "translations", ID: "id", Serial: true},
 	},
-	Policy: fixturechange.Policy{MissingRow: "error", ChangedRow: "warn", IDDrift: "error"},
+	Policy: fixturechange.Policy{
+		MissingRow: "error", ChangedRow: "warn", IDDrift: "error", DuplicateKey: "error",
+	},
 	Changes: []fixturechange.Change{
 		{Model: "Feature", Kind: fixturechange.Insert,
 			Key: fixturechange.Values{"code": fixturechange.Lit("scim")},

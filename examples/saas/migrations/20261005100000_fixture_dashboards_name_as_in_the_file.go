@@ -37,7 +37,9 @@ var fixtureChanges20261005100000DashboardsNameAsInTheFile = fixturechange.Set{
 	Tables: fixturechange.Tables{
 		"Category": {Name: "categories", ID: "id", Serial: true},
 	},
-	Policy: fixturechange.Policy{MissingRow: "error", ChangedRow: "warn", IDDrift: "error"},
+	Policy: fixturechange.Policy{
+		MissingRow: "error", ChangedRow: "warn", IDDrift: "error", DuplicateKey: "error",
+	},
 	Changes: []fixturechange.Change{
 		{Model: "Category", Kind: fixturechange.Update,
 			Key: fixturechange.Values{"slug": fixturechange.Lit("dashboards")},

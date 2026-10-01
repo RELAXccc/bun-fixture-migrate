@@ -43,7 +43,9 @@ var fixtureChanges20260504100000BillingAdminAndFoldedEdits = fixturechange.Set{
 		"RolePermission": {Name: "role_permissions", ID: "id"},
 		"Translation":    {Name: "translations", ID: "id", Serial: true},
 	},
-	Policy: fixturechange.Policy{MissingRow: "error", ChangedRow: "warn", IDDrift: "error"},
+	Policy: fixturechange.Policy{
+		MissingRow: "error", ChangedRow: "warn", IDDrift: "error", DuplicateKey: "error",
+	},
 	Changes: []fixturechange.Change{
 		{Model: "Permission", Kind: fixturechange.Update,
 			ID:  "2",

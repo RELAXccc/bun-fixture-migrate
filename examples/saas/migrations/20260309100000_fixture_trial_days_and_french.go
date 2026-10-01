@@ -43,7 +43,9 @@ var fixtureChanges20260309100000TrialDaysAndFrench = fixturechange.Set{
 		"Plan":        {Name: "plans", ID: "id"},
 		"Translation": {Name: "translations", ID: "id", Serial: true},
 	},
-	Policy: fixturechange.Policy{MissingRow: "error", ChangedRow: "warn", IDDrift: "error"},
+	Policy: fixturechange.Policy{
+		MissingRow: "error", ChangedRow: "warn", IDDrift: "error", DuplicateKey: "error",
+	},
 	Changes: []fixturechange.Change{
 		{Model: "Currency", Kind: fixturechange.Insert,
 			Key: fixturechange.Values{"code": fixturechange.Lit("CHF")},

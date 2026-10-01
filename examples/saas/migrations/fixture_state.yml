@@ -5,15 +5,19 @@
 # it with every migration it writes. "baseline" rewrites it without writing a
 # migration, for a change you migrated by hand.
 #
-# Two branches that each generate a migration both change the two lines below,
-# so their merge conflicts here, on purpose. Keep both migrations, check with
-# "bun-fixture-migrate plan" against a copy of production that they do not
-# change the same rows, then run "bun-fixture-migrate baseline" on the merged
-# fixture file.
+# Two branches that each generate a migration both change the lines below, so
+# their merge conflicts here, on purpose: each migration expects the rows as
+# they were before it, and whichever runs second finds the other's changes.
+# Keep the migration a database already applied and delete the other, take
+# this file as the one you kept left it, then run "bun-fixture-migrate
+# generate" on the merged fixture file.
 #
+# format: 2
 # migration: 20261116100000_fixture_help_centre
-# sha256: 6a0117364818b2897effb260f9377ef072e67d501129e9e96602d2d96bc401aa
-# ----- fixture file: fixtures/reference.yml -----
+# covers: 20261116100000_fixture_help_centre
+# base: 20261019100000_fixture_plan_order
+# sha256: 3f484a79e3987cddff5fb3d273e7488624f1b7c3207211a48355932406a95874
+# ----- 61 lines of fixtures/reference.yml -----
 # Currencies and countries.
 
 - model: Currency
@@ -75,7 +79,7 @@
       name: Schweiz
       currency_id: '{{ $.Currency.chf.ID }}'
       tax_rate: 0.081
-# ----- fixture file: fixtures/catalog.yml -----
+# ----- 262 lines of fixtures/catalog.yml -----
 # What is sold: plans, their prices and features, and the category tree.
 
 - model: Plan
@@ -338,7 +342,7 @@
       parent_id: '{{ $.Category.analytics.ID }}'
       name: Exports
       position: 2
-# ----- fixture file: fixtures/access.yml -----
+# ----- 70 lines of fixtures/access.yml -----
 # Master roles, permissions and what each role grants. A tenant's custom
 # roles live in the same tables and are not here.
 
@@ -409,7 +413,7 @@
     - {role_id: '{{ $.Role.viewer.ID }}', permission_id: '{{ $.Permission.projects_read.ID }}'}
     - {role_id: '{{ $.Role.billing_admin.ID }}', permission_id: '{{ $.Permission.billing_read.ID }}'}
     - {role_id: '{{ $.Role.billing_admin.ID }}', permission_id: '{{ $.Permission.billing_write.ID }}'}
-# ----- fixture file: fixtures/i18n.yml -----
+# ----- 64 lines of fixtures/i18n.yml -----
 # Translations, by locale and key.
 
 - model: Translation
@@ -474,7 +478,7 @@
         bienvenue chez Acme. Votre espace « {workspace} » est prêt.
         Une question ? Répondez à cet e-mail : un humain le lit.
       context: Plain-text e-mail; keep the placeholders.
-# ----- fixture file: fixtures/help.yml -----
+# ----- 1505 lines of fixtures/help.yml -----
 # The help centre: 500 articles, each with a title in three languages.
 # Loaded after i18n.yml; the same model may sit in several files.
 
