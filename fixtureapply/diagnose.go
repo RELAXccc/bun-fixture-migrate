@@ -50,6 +50,9 @@ func (r *runner) diagnose(ctx context.Context, c fixturechange.Change, t fixture
 				"made. Put the row back, or drop this change from the migration",
 			t.Name, keyLabel(c.Key), note)}, nil
 	}
+	if err := r.stopped(ctx, c, t, table); err != nil {
+		return outcome{}, err
+	}
 	if len(wanted) > 0 {
 		already, err := r.count(ctx, c.Model, table, c.Key, wanted)
 		if err != nil {
@@ -85,9 +88,33 @@ func (r *runner) diagnose(ctx context.Context, c fixturechange.Change, t fixture
 		return outcome{}, err
 	}
 	return outcome{problem: problemChanged, message: fmt.Sprintf(
-		"%s %s no longer holds the values this change was generated against, so somebody changed it in this "+
-			"database.%s It was left alone. Compare it with the fixture file and decide which one is right",
-		t.Name, keyLabel(c.Key), note)}, nil
+		"%s %s no longer holds the values this change was generated against: it was changed in this database, or "+
+			"by a migration that ran before this one.%s It was left alone. Compare it with the fixture file and "+
+			"decide which one is right", t.Name, keyLabel(c.Key), note)}, nil
+}
+
+// stopped fails a change whose statement changed no row although its guard
+// matches one: something other than the data stopped it, a BEFORE trigger that
+// returned NULL, a rule, or a row-level security policy. Read as a changed row
+// it would be skipped, and the migration recorded as applied with the change
+// never made.
+func (r *runner) stopped(ctx context.Context, c fixturechange.Change, t fixturechange.Table, table string) error {
+	where, args, err := r.guard(ctx, c, t)
+	if err != nil {
+		return err
+	}
+	var n int64
+	if err := r.tx.QueryRowContext(ctx, fmt.Sprintf("SELECT count(*) FROM %s WHERE %s", table, where),
+		args...).Scan(&n); err != nil {
+		return fmt.Errorf("count the rows the change should have matched: %w", err)
+	}
+	if n == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s %s holds the values this change was generated against, and the %s changed no row all "+
+		"the same: a BEFORE trigger that returned NULL, a rule, or a row-level security policy stopped it. "+
+		"Nothing was changed; the change set cannot be made until whatever stopped it lets it",
+		t.Name, keyLabel(c.Key), c.Kind)
 }
 
 // diagnoseMoved looks for the row of an update that writes a key column -- a
@@ -141,6 +168,11 @@ func (r *runner) diagnoseInsert(ctx context.Context, c fixturechange.Change, t f
 	if byKey > 1 {
 		return duplicate(t, c, byKey), nil
 	}
+	if byKey == 0 {
+		return outcome{}, fmt.Errorf("no row of %s has %s, and the insert wrote none all the same: a BEFORE trigger "+
+			"that returned NULL, a rule, or a row-level security policy stopped it. Nothing was changed; the change "+
+			"set cannot be made until whatever stopped it lets it", t.Name, keyLabel(c.Key))
+	}
 	same, err := r.count(ctx, c.Model, table, c.Key, withoutColumn(c.New, t.ID))
 	if err != nil {
 		return outcome{}, err
@@ -149,9 +181,9 @@ func (r *runner) diagnoseInsert(ctx context.Context, c fixturechange.Change, t f
 		return outcome{problem: problemBenign, message: "the row is already there with these values, nothing to insert"}, nil
 	}
 	return outcome{problem: problemChanged, message: fmt.Sprintf(
-		"%s %s already exists and holds different values, so nothing was inserted. Somebody added or edited this "+
-			"row in this database. Compare it with the fixture file and decide which one is right",
-		t.Name, keyLabel(c.Key))}, nil
+		"%s %s already exists and holds different values, so nothing was inserted: it was added or changed in this "+
+			"database, or by a migration that ran before this one. Compare it with the fixture file and decide which "+
+			"one is right", t.Name, keyLabel(c.Key))}, nil
 }
 
 // idTakenByAnotherRow returns a description of the row holding that id when it

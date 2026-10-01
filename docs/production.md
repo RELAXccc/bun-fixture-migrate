@@ -90,12 +90,13 @@ migrations table by hand before the next deploy, or the migration will not run a
 ## A change was skipped
 
 **Symptom.** The migration succeeded and logged a line such as
-`skipped Plan name=team update [changed row]: ... somebody changed it in this database. It was left
-alone.`
+`skipped Plan name=team update [changed row]: ... it was changed in this database, or by a migration
+that ran before this one. It was left alone.`
 
-**What happened.** The row no longer held the values the migration expected, because somebody
-edited it in this database. Under `changed_row: warn`, the default, their edit wins and the
-migration moves on. The migration is recorded as applied; that change will not be attempted again.
+**What happened.** The row no longer held the values the migration expected: somebody edited it in
+this database, or a migration that ran before this one changed it, as when two branches each
+generated a migration for the same row and the older one was merged last. Under `changed_row: warn`,
+the default, the row as it is wins and the migration moves on. The migration is recorded as applied; that change will not be attempted again.
 
 **Steps.** Run `check`. It lists the row with the database's and the file's values side by side.
 Then decide which one is right:

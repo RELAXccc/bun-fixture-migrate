@@ -422,7 +422,7 @@ func TestAChangedRowIsAWarningOrAnError(t *testing.T) {
 		fixtureapply.WithLogger(func(f string, a ...any) { log = append(log, fmt.Sprintf(f, a...)) })); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if !strings.Contains(strings.Join(log, "\n"), "somebody changed it in this database") {
+	if !strings.Contains(strings.Join(log, "\n"), "it was changed in this database") {
 		t.Fatalf("the operator has to be told what happened: %v", log)
 	}
 	if got := scan[int64](t, db, `SELECT price_cents FROM plans WHERE name = 'team'`); got != 3333 {
@@ -735,5 +735,76 @@ func TestAModelsWhereLimitsEveryStatement(t *testing.T) {
 	}
 	if got := dump(); got != before {
 		t.Fatalf("nothing may change\n got %s\nwant %s", got, before)
+	}
+}
+
+// Something other than the data can stop a guarded statement: a row-level
+// security policy, a BEFORE trigger that returns NULL, a rule. Each made the
+// statement change nothing, which was read as a row somebody had changed: the
+// change was skipped and the migration recorded as applied. A policy that hid
+// the seed guard table's rows made the whole set a recorded no-op. Each is an
+// error now.
+func TestAStatementSomethingElseStoppedFails(t *testing.T) {
+	db := testDB(t)
+	seed(t, db)
+	ctx := context.Background()
+	update := changeSet()
+	update.Changes = update.Changes[2:3] // team's price, rating, flag and note
+	insert := changeSet()
+	insert.Changes = insert.Changes[:1] // pro
+
+	t.Run("a trigger", func(t *testing.T) {
+		run(t, db, `CREATE OR REPLACE FUNCTION bfm_refuse() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NULL; END$$`,
+			"CREATE TRIGGER bfm_refuse BEFORE UPDATE OR INSERT ON plans FOR EACH ROW EXECUTE FUNCTION bfm_refuse()")
+		defer run(t, db, "DROP TRIGGER bfm_refuse ON plans")
+		for _, set := range []fixturechange.Set{update, insert} {
+			outcomes, err := applyReporting(t, db, set)
+			if err == nil || !strings.Contains(err.Error(), "a BEFORE trigger that returned NULL, a rule, or a row-level security policy stopped it") {
+				t.Fatalf("want the stopped statement named, got %v", err)
+			}
+			if len(outcomes) != 1 || outcomes[0].Status != fixtureapply.StatusFailed {
+				t.Fatalf("outcomes %+v", outcomes)
+			}
+		}
+	})
+
+	// The policies apply to a role that does not own the table, as an
+	// application role often does not.
+	run(t, db,
+		`DO $$BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'bfm_rls') THEN CREATE ROLE bfm_rls; END IF; END$$`,
+		"GRANT USAGE ON SCHEMA public TO bfm_rls",
+		"GRANT SELECT, INSERT, UPDATE, DELETE ON plans, features TO bfm_rls",
+		"GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO bfm_rls",
+		"ALTER TABLE plans ENABLE ROW LEVEL SECURITY",
+		"CREATE POLICY plans_read ON plans FOR SELECT USING (true)",
+		"CREATE POLICY plans_write ON plans FOR UPDATE USING (name <> 'team')",
+		"CREATE POLICY plans_add ON plans FOR INSERT WITH CHECK (true)")
+	asRole := func(set fixturechange.Set) error {
+		t.Helper()
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback()
+		if _, err := tx.ExecContext(ctx, "SET LOCAL ROLE bfm_rls"); err != nil {
+			t.Fatal(err)
+		}
+		return fixtureapply.Apply(ctx, tx, set, quiet())
+	}
+	t.Run("an update policy", func(t *testing.T) {
+		err := asRole(update)
+		if err == nil || !strings.Contains(err.Error(), "a row-level security policy applies to it") {
+			t.Fatalf("want the policy named, got %v", err)
+		}
+	})
+	t.Run("a policy that hides the seed guard table", func(t *testing.T) {
+		run(t, db, "DROP POLICY plans_read ON plans", "CREATE POLICY plans_read ON plans FOR SELECT USING (false)")
+		err := asRole(update)
+		if err == nil || !strings.Contains(err.Error(), "a row-level security policy applies to it") {
+			t.Fatalf("want the policy named rather than an unseeded database, got %v", err)
+		}
+	})
+	if got := scan[int64](t, db, "SELECT price_cents FROM plans WHERE name = 'team'"); got != 2000 {
+		t.Fatalf("nothing may change, price_cents = %d", got)
 	}
 }

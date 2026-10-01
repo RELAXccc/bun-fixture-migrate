@@ -41,4 +41,7 @@ const (
 	// UnsafeNewEnumValue is a value added to an enum used inside the
 	// transaction that added it.
 	UnsafeNewEnumValue = "55P04"
+	// InsufficientPrivilege is a privilege the role lacks, or, with
+	// row_security off, a row-level security policy that applies to it.
+	InsufficientPrivilege = "42501"
 )

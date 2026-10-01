@@ -123,7 +123,7 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 	if set.SeedGuardTable != "" {
 		seeded, err := tableHasRows(ctx, tx, set.SeedGuardTable)
 		if err != nil {
-			return err
+			return privilege(err)
 		}
 		if !seeded {
 			msg := set.SeedGuardTable + " is empty, nothing to do (the fixture loader seeds this database)"
@@ -153,6 +153,7 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 		out := Outcome{Set: set.Name, Index: i, Model: c.Model, Kind: c.Kind, Key: keyLabel(c.Key)}
 		res, err := r.exec(ctx, c)
 		if err != nil {
+			err = privilege(err)
 			out.Status, out.Problem, out.Message = StatusFailed, ProblemError, err.Error()
 			if pgerr.State(err) == pgerr.LockNotAvailable && set.LockTimeout != "" {
 				err = fmt.Errorf("another session held a lock on a row of %s for longer than the lock timeout "+
@@ -195,23 +196,45 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 // as 2026-01-02 has to be year-month-day. The settings are local to the
 // transaction; restore puts back what a caller's own transaction had, and a
 // rollback does that by itself.
+//
+// row_security is turned off as well, which makes PostgreSQL raise an error
+// instead of quietly filtering when a row-level security policy applies to
+// the role. Filtered, a policy that hides a row from UPDATE makes the update
+// change nothing, which reads as a row somebody edited and is skipped, and one
+// that hides the seed guard table's rows makes the whole set a no-op that bun
+// records as applied. A role the policies do not apply to -- the table's owner
+// without FORCE ROW LEVEL SECURITY, a superuser, one with BYPASSRLS -- notices
+// nothing.
 func session(ctx context.Context, tx bun.IDB) (func(context.Context) error, error) {
-	var tz, ds string
+	var tz, ds, rs string
 	if err := tx.QueryRowContext(ctx,
-		"SELECT current_setting('TimeZone'), current_setting('DateStyle')").Scan(&tz, &ds); err != nil {
+		"SELECT current_setting('TimeZone'), current_setting('DateStyle'), current_setting('row_security')").
+		Scan(&tz, &ds, &rs); err != nil {
 		return nil, fmt.Errorf("read the session's settings: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx,
-		"SELECT set_config('TimeZone', 'UTC', true), set_config('DateStyle', 'ISO, YMD', true)"); err != nil {
+	if _, err := tx.ExecContext(ctx, "SELECT set_config('TimeZone', 'UTC', true), "+
+		"set_config('DateStyle', 'ISO, YMD', true), set_config('row_security', 'off', true)"); err != nil {
 		return nil, fmt.Errorf("fix the session's settings: %w", err)
 	}
 	return func(ctx context.Context) error {
-		if _, err := tx.ExecContext(ctx,
-			"SELECT set_config('TimeZone', ?, true), set_config('DateStyle', ?, true)", tz, ds); err != nil {
+		if _, err := tx.ExecContext(ctx, "SELECT set_config('TimeZone', ?, true), set_config('DateStyle', ?, true), "+
+			"set_config('row_security', ?, true)", tz, ds, rs); err != nil {
 			return fmt.Errorf("restore the session's settings: %w", err)
 		}
 		return nil
 	}, nil
+}
+
+// privilege adds what to do to an error PostgreSQL raised because the role may
+// not do something. With row_security off, that is also how a row-level
+// security policy that applies to the role makes itself known.
+func privilege(err error) error {
+	if pgerr.State(err) != pgerr.InsufficientPrivilege {
+		return err
+	}
+	return fmt.Errorf("%w. The role running the migration lacks a privilege, or a row-level security policy "+
+		"applies to it, which would hide rows from the change set or stop its changes: run migrations as the "+
+		"tables' owner or a role with BYPASSRLS, or grant what is missing. Nothing was changed", err)
 }
 
 // withLockTimeout sets lock_timeout for the rest of the transaction, and

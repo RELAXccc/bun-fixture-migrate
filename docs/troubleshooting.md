@@ -160,6 +160,8 @@ Messages a generated migration returns through bun's migrator:
 | `is to point at Currency "EUR", and no row of currencies has code = "EUR"` | error: the row a change writes a reference to is not there | put it back, or fix the fixture file and generate again |
 | `Currency "EUR" is not in this database under that name` | added to a missing or changed row: a guard names a row that was renamed or removed | [a migration failed](production.md#a-fixture-migration-failed-during-a-deploy) |
 | `no longer holds the values this change was generated against` | changed row | [a change was skipped](production.md#a-change-was-skipped) |
+| `changed no row all the same: a BEFORE trigger that returned NULL, a rule, or a row-level security policy stopped it` | error | find the trigger, rule or policy on the table; the change set cannot be made past it |
+| `a row-level security policy applies to it` | error: `row_security` is off while a change set runs, so a policy raises an error instead of hiding rows | run migrations as the tables' owner or a role with `BYPASSRLS` |
 | `exists, but under id 7 and not 3` | id drift | [a migration failed](production.md#a-fixture-migration-failed-during-a-deploy) |
 | `2 rows of features point at plans name=pro through ...` | referenced | [a migration failed](production.md#a-fixture-migration-failed-during-a-deploy) |
 | `plans is empty, nothing to do` | not a problem: the database is not seeded yet | [a new environment](production.md#a-new-environment) |

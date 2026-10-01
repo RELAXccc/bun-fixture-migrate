@@ -69,7 +69,7 @@ read it, run plan against a copy of production, then deploy
 $ bun-fixture-migrate plan
 20260921120000_fixture_plan_prices: would succeed
   applied  Plan name=pro insert (1 row)
-  skipped  Plan name=team update [changed row]: plans name=team no longer holds the values this change was generated against, so somebody changed it in this database. It was left alone. Compare it with the fixture file and decide which one is right
+  skipped  Plan name=team update [changed row]: plans name=team no longer holds the values this change was generated against: it was changed in this database, or by a migration that ran before this one. It was left alone. Compare it with the fixture file and decide which one is right
 
 rolled back: nothing was changed, except that an id an insert drew from a sequence stays drawn, which only leaves a gap
 ```
