@@ -122,9 +122,14 @@ Four details matter:
 | `Rollback` | runs the generated down function, which reverts the change set with the same guards |
 
 The record removal only happens when `Apply` runs under bun's migrator, on the migrator's own
-`*bun.DB`, and only to the row that, before the change set ran, was the newest of the migrations
-table, carried the migration's name and had been written in the last minute: the record bun's
-default mode makes just before calling the migration. A generated file registers
+`*bun.DB`, and only to the rows that, before the change set ran, carried the migration's name, had
+been written in the last minute and were newer than every other migration's record: the record bun's
+default mode makes just before calling the migration, or one per replica when replicas start it at
+the same moment without bun's `Lock`. A failing replica deletes them all, so the migration is not
+left recorded by the record of another replica that failed too; when that other replica succeeded
+instead, the next migrate runs the migration again and finds every change made. bun's `Lock`, or
+`WithUpsert(true)`, which keeps one record per name, keeps replicas from writing more than one record
+of a run in the first place. A generated file registers
 `fixtureapply.Up(set)` and `fixtureapply.Down(set)`; `Up` reads the migration's name from the file
 that calls it, as bun's `Register` reads it from the same file, so both are called in the
 migration's own file. Files from earlier versions register functions that call `Apply` and `Revert`

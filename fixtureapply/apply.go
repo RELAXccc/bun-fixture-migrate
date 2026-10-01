@@ -54,16 +54,23 @@ import (
 // deploy once more, and nothing happens.
 //
 // So Apply, running under bun's migrator, first looks for that record: the
-// newest row of the migrations table, if it carries this migration's name and
-// was written in the last minute, which is what bun's default mode has just
-// done. If the change set then fails, that row and no other is deleted. A
-// migrator that records on success has made no such row, and a record another
-// process writes while this one runs is not the row found before it ran, so
-// neither is touched. The one exception is RunMigration re-running the newest
-// migration, whose record bun updates in place; after a failure the next
-// migrate runs it again and finds its changes made. The error says whether a
-// record was deleted. The name is the one bun derived from the migration's
-// file name; see WithMigrationName.
+// rows of the migrations table that carry this migration's name, were written
+// in the last minute, and are newer than every other migration's record, which
+// is what bun's default mode has just done -- one row, or one per replica that
+// started the migration at the same moment without bun's Lock. If the change
+// set then fails, those rows and no others are deleted. A migrator that records
+// on success has made no such row, and a record another process writes while
+// this one runs is not among the rows found before it ran, so neither is
+// touched. A replica's record deleted along with this one's, of a run that
+// succeeds, leaves the migration pending with its changes made; the next
+// migrate runs it again and finds every change made. So does RunMigration
+// re-running the newest migration, whose record bun updates in place. The
+// error says whether a record was deleted. The name is the one bun derived
+// from the migration's file name; see WithMigrationName.
+//
+// Two replicas starting together are best kept apart by bun's Lock, or by
+// building the migrator WithUpsert(true), which keeps one record per name;
+// either way only one record of a run is ever there to take back.
 func Apply(ctx context.Context, db bun.IDB, set fixturechange.Set, opts ...Option) error {
 	o := newOptions(opts)
 	if o.migration == "" {
