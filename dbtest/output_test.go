@@ -179,3 +179,44 @@ models:
 	// The owner, and anyone else the policy does not limit, reads it all.
 	c.must(0, "check")
 }
+
+// An export writes back what the fixture files hold: the columns they use,
+// and ids only for a model whose rows name them. The database's other columns
+// and its ids, written into a file that had none, would be a change of every
+// row to generate, and wrong ids in every other database.
+func TestAnExportWritesWhatTheFixtureFilesHold(t *testing.T) {
+	db := itemDB(t)
+	loadFixture(t, db, itemFixture)
+	run(t, db, "DROP TABLE IF EXISTS u_things",
+		"CREATE TABLE u_things (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), code text UNIQUE NOT NULL, label text)",
+		"INSERT INTO u_things (code, label) VALUES ('a', 'A')")
+	c := buildCLI(t)
+	c.write("fixture-migrate.yml", cliConfig+"  Thing:\n    table: u_things\n    ref: code\n    key: [code]\n")
+	// The items without their ids and their notes.
+	var file []string
+	inItems := false
+	for _, line := range strings.Split(itemFixture, "\n") {
+		inItems = inItems || strings.HasPrefix(line, "- model: Item")
+		if inItems && (strings.HasPrefix(line, "      id: ") || strings.HasPrefix(line, "      note: ")) {
+			continue
+		}
+		file = append(file, line)
+	}
+	c.write("fixtures/fixture.yml", strings.Join(file, "\n"))
+
+	out := c.must(0, "export", "-stdout")
+	items := out[strings.Index(out, "- model: Item"):strings.Index(out, "- model: Thing")]
+	if strings.Contains(items, " id: ") || strings.Contains(items, "note:") || !strings.Contains(items, "cost: 120") {
+		t.Fatalf("the items as the file holds them:\n%s", out)
+	}
+	if regions := out[:strings.Index(out, "- model: Item")]; !strings.Contains(regions, "id: 1") {
+		t.Fatalf("the file names the regions' ids:\n%s", out)
+	}
+	if things := out[strings.Index(out, "- model: Thing"):]; strings.Contains(things, " id: ") ||
+		!strings.Contains(things, `label: "A"`) {
+		t.Fatalf("a model new to the file, without the ids gen_random_uuid() made up:\n%s", out)
+	}
+	if out := c.must(0, "export", "-stdout", "-all-columns"); !strings.Contains(out, `note: "heavy"`) {
+		t.Fatalf("-all-columns:\n%s", out)
+	}
+}

@@ -184,7 +184,8 @@ file, the newer truth. Three settings and one loop keep that safe:
   ```
 
   The migration brings every other database to the file; on production itself every change is
-  already made and reports `unchanged`. Review the export's diff like any other change. The
+  already made and reports `unchanged`. Review the export's diff like any other change: it holds
+  the columns and ids the file held, so it shows the edits and nothing else. The
   read-only role has to see every row of the master data: one a row-level security policy limits
   is refused, because an export without the rows it hides would delete them everywhere else.
 

@@ -373,8 +373,9 @@ func databaseSnapshot(ctx context.Context, db bun.IDB, cfg *fixturemigrate.Confi
 func export(o streams, args []string) error {
 	fs := flag.NewFlagSet("export", flag.ContinueOnError)
 	var (
-		out    = fs.String("o", "", "write here instead of the fixture file of the configuration (one fixture file only)")
-		stdout = fs.Bool("stdout", false, "write to standard output")
+		out        = fs.String("o", "", "write here instead of the fixture file of the configuration (one fixture file only)")
+		stdout     = fs.Bool("stdout", false, "write to standard output")
+		allColumns = fs.Bool("all-columns", false, "write every column, not only those the fixture files already use")
 	)
 	s, err := common(o, fs, args)
 	if err != nil {
@@ -393,6 +394,13 @@ func export(o streams, args []string) error {
 		}
 		current = append(current, fixturemigrate.FixtureFile{Path: s.cfg.Fixtures[i], Data: data})
 	}
+	// What the files hold now decides which columns and ids the export
+	// writes. Files it cannot read are being replaced, as they are.
+	head, err := s.snapshotOf(current, s.cfg.FixtureLabel())
+	if err != nil {
+		fmt.Fprintf(o.stderr, "note: every column and id is exported, because the fixture files do not read: %v\n", err)
+		head = nil
+	}
 	db, err := s.connect(o.ctx)
 	if err != nil {
 		return err
@@ -406,13 +414,18 @@ func export(o streams, args []string) error {
 		if err != nil {
 			return err
 		}
-		snap, err := fixturemigrate.DatabaseSnapshot(o.ctx, tx, s.cfg, tables, fixturemigrate.SnapshotOptions{})
+		var opts fixturemigrate.SnapshotOptions
+		if !*allColumns {
+			opts.Columns = exportColumns(s.cfg, tables, head)
+		}
+		snap, err := fixturemigrate.DatabaseSnapshot(o.ctx, tx, s.cfg, tables, opts)
 		if err != nil {
 			return err
 		}
 		fixturemigrate.LintZeroDefaults(s.cfg, snap, tables)
 		fixturemigrate.LintNullDefaults(s.cfg, snap, tables)
 		mode, findings = s.cfg.Worst(snap.Findings)
+		dropIDs(s.cfg, tables, head, snap)
 		// No time, nor anything else that differs between two exports of
 		// one database: CI diffs an export against the committed file, and
 		// a header that always changes is a diff that always fails.
@@ -467,6 +480,75 @@ func export(o streams, args []string) error {
 		fmt.Fprintln(o.stdout, "wrote", target)
 	}
 	return nil
+}
+
+// exportColumns is the columns an export writes of each model the fixture
+// files hold: those the files use, and the ref column, which references to the
+// model name rows by; DatabaseSnapshot adds the key. A column the files never
+// wrote is not master data, and exported it would be a difference generate
+// refuses, a column written on one side and left out on the other. A model
+// the files do not hold yet is exported whole.
+func exportColumns(cfg *fixturemigrate.Config, tables map[string]*dbschema.Table,
+	head *fixturemigrate.Snapshot) map[string][]string {
+
+	if head == nil {
+		return nil
+	}
+	out := map[string][]string{}
+	for model, cols := range head.Columns {
+		m := cfg.Models[model]
+		table := tables[cfg.QualifiedTable(m)]
+		if len(cols) == 0 || table == nil {
+			continue
+		}
+		out[model] = append([]string{}, cols...)
+		if _, ok := table.Column(m.Ref); ok {
+			out[model] = append(out[model], m.Ref)
+		}
+	}
+	return out
+}
+
+// dropIDs takes the ids out of the export of every model whose ids the
+// fixture files leave to the database. The ids of the database exported from
+// mean nothing in another: written into a file that had none, they are an id
+// change of every row, and a delete guarded on one of them misses its row
+// everywhere else. A model the files do not hold yet keeps its ids when they
+// come from a sequence or nothing makes them up, and loses them when a default
+// such as gen_random_uuid() does.
+func dropIDs(cfg *fixturemigrate.Config, tables map[string]*dbschema.Table, head *fixturemigrate.Snapshot,
+	snap *fixturemigrate.Snapshot) {
+
+	inFiles := map[string]bool{}
+	if head != nil {
+		for _, model := range head.Order {
+			inFiles[model] = true
+		}
+	}
+	for model, entries := range snap.Entries {
+		m := cfg.Models[model]
+		table := tables[cfg.QualifiedTable(m)]
+		if table == nil {
+			continue
+		}
+		id, ok := table.Column(m.ID)
+		if !ok || id.Default == "" && !id.Identity {
+			// Without an id, dbfixture could not insert the row at all.
+			continue
+		}
+		keep := !inFiles[model] && id.Serial()
+		if head != nil {
+			for _, e := range head.Entries[model] {
+				keep = keep || e.ID != ""
+			}
+		}
+		if keep {
+			continue
+		}
+		for _, e := range entries {
+			e.ID = ""
+		}
+	}
 }
 
 // check reports the drift between the database and the fixture file.

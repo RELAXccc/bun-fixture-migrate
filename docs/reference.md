@@ -61,10 +61,18 @@ such as a zero bun would replace with a column default. Two exports of one datab
 bytes: the header holds no time. Output that cannot all be written, to a full disk or a closed pipe,
 is exit 1.
 
+For a model the fixture files hold, it writes what they hold: the columns their rows use, with the
+key and the `ref` column, and the ids only when the rows name them. A column the files never wrote
+is not master data, and the ids of the database exported from mean nothing in another one; written
+into the file, either would be a change of every row to `generate`. A model the files do not hold
+yet is written whole, ids included, unless a default other than a sequence makes its ids up, as
+`gen_random_uuid()` does. Fixture files that cannot be read are replaced whole, with a note.
+
 | Flag | |
 | --- | --- |
 | `-o` | write here instead, with one fixture file only |
 | `-stdout` | write to standard output |
+| `-all-columns` | write every column of every model, not only those the fixture files use |
 
 ### check
 
