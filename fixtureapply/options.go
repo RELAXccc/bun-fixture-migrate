@@ -31,11 +31,12 @@ func WithReport(fn func(Outcome)) Option {
 
 // WithMigrationName names the bun migration Apply is running as: the
 // timestamp at the front of the migration's file name, which is what bun
-// stores in its migrations table. Apply reads it off the call stack the way
-// bun's own Register does -- the nearest caller in a file named like a
-// migration -- so a generated migration never needs this, and neither does a
-// helper in an ordinary file. A helper that lives in another migration's file
-// does: the stack would name that migration.
+// stores in its migrations table. A generated migration registers Up, which
+// knows it from the file it is called in. Without either, Apply reads it off
+// the call stack the way bun's own Register does -- the nearest caller in a
+// file named like a migration -- so neither a file an earlier version wrote,
+// nor a helper in an ordinary file, needs this. A helper that lives in another
+// migration's file does: the stack would name that migration.
 func WithMigrationName(name string) Option {
 	return func(o *options) { o.migration = name }
 }

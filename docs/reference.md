@@ -311,13 +311,14 @@ does, and is tested under `pgdriver` and `pgx`.
 
 | Function | |
 | --- | --- |
+| `Up(set, opts...)`, `Down(set, opts...)` | the up and down functions a generated file registers with `MustRegister`; they run `Apply` and `Revert`, and `Up` knows the migration's name from the file it is called in |
 | `Apply(ctx, db, set, opts...)` | run a change set in one transaction; see [what a migration does](../README.md#what-a-generated-migration-does) |
 | `Revert(ctx, db, set, opts...)` | the same set backwards, every change inverted; it assumes `Apply` made every change on this database ([rolling back](production.md#rolling-back)) |
 | `Validate(set)` | check a set without a database |
 | `SyncSequences(ctx, db, tables...)` | move the sequences of serial and identity columns past the values present, forward only; after a `dbfixture` seed |
 | `WithLogger(fn)` | where the per-row lines go; default `log.Printf` |
 | `WithReport(fn)` | receive every `Outcome` as it happens |
-| `WithMigrationName(name)` | the migration name, when `Apply` is not called from a file bun registered |
+| `WithMigrationName(name)` | the migration name, when `Apply` is called by hand from outside the file bun registered |
 | `WithDryRun()` | for a caller that rolls back: sequences are reported, not moved |
 
 `Apply` takes a `bun.IDB`. Given a `*bun.DB` it opens its own transaction; given a `bun.Tx` it runs

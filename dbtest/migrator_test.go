@@ -193,6 +193,43 @@ func TestAFailedMigrationIsNotLeftRecorded(t *testing.T) {
 	}
 }
 
+// A file an earlier version generated registers functions that call Apply
+// and Revert themselves, and Apply finds the migration's name on the call
+// stack. It still takes back bun's record when it fails.
+func TestAFailedMigrationOfAnEarlierVersionIsNotLeftRecorded(t *testing.T) {
+	db := connect(t)
+	dir := filepath.Join("..", "testdata", "generated", "41ffb5c-example")
+	src, err := os.ReadFile(filepath.Join(dir, "20260930165255_fixture_plan_prices.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(src), "fixtureapply.Apply(ctx, db, ") {
+		t.Fatal("this is about the registration of earlier versions")
+	}
+	bin := buildMigrator(t, "20260930165255", "plan prices", src)
+	setup, err := os.ReadFile(filepath.Join(dir, "setup.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range strings.Split(string(setup), ";\n") {
+		if strings.TrimSpace(stmt) != "" {
+			run(t, db, stmt)
+		}
+	}
+	run(t, db, "UPDATE plans SET name = 'team (old)' WHERE name = 'team'")
+	ok, out := runMigrator(t, bin, false)
+	if ok || !strings.Contains(out, "no row of plans has name=team") || !strings.Contains(out, "that record was removed") {
+		t.Fatalf("expected the failure and the record taken back:\n%s", out)
+	}
+	if got := scan[int64](t, db, "SELECT count(*) FROM bun_migrations"); got != 0 {
+		t.Fatalf("%d records left", got)
+	}
+	run(t, db, "UPDATE plans SET name = 'team' WHERE name = 'team (old)'")
+	if ok, out := runMigrator(t, bin, false); !ok {
+		t.Fatalf("the second run should succeed:\n%s", out)
+	}
+}
+
 // What a failing Apply takes back is bounded: the newest record of the table,
 // carrying this migration's name, written within the hour, and only through
 // the migrator's own *bun.DB. Anything else stays, because anything else is

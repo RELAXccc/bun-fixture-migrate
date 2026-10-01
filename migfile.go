@@ -151,6 +151,14 @@ func ReadMigrations(dir string) (*Migrations, error) {
 // So it understands what Render writes and what a person editing that by hand
 // is likely to write -- dropping a change, fixing a value -- and says so,
 // naming the position, about anything else.
+//
+// It also reads how the file registers the set, in either shape a version of
+// this tool has written: fixtureapply.Up(set) and fixtureapply.Down(set), or
+// functions that call fixtureapply.Apply and fixtureapply.Revert with it. A
+// file that hands them another variable than the set it declares -- a copy of
+// another migration with only the set renamed -- runs that other set under
+// this file's name, while status and plan would describe this one; that is
+// an error. A registration in any other shape is left alone.
 func ReadChangeSet(src []byte) (fixturechange.Set, bool, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "", src, parser.SkipObjectResolution)
@@ -188,7 +196,72 @@ func ReadChangeSet(src []byte) (fixturechange.Set, bool, error) {
 		return fixturechange.Set{}, true, fmt.Errorf("%d change sets in one file", len(found))
 	}
 	set, err := r.set(found[0])
-	return set, true, err
+	if err != nil {
+		return set, true, err
+	}
+	return set, true, r.registers(file, found[0])
+}
+
+// registers checks that every fixtureapply.Up, Down, Apply and Revert in the
+// file is handed the variable the change set is declared as.
+func (r *setReader) registers(file *ast.File, lit *ast.CompositeLit) error {
+	declared := ""
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs := spec.(*ast.ValueSpec)
+			for i, v := range vs.Values {
+				if v == ast.Expr(lit) && i < len(vs.Names) {
+					declared = vs.Names[i].Name
+				}
+			}
+		}
+	}
+	apply := ""
+	for _, imp := range file.Imports {
+		if path, _ := strconv.Unquote(imp.Path.Value); path == "github.com/RELAXccc/bun-fixture-migrate/fixtureapply" {
+			apply = "fixtureapply"
+			if imp.Name != nil {
+				apply = imp.Name.Name
+			}
+		}
+	}
+	if declared == "" || apply == "" {
+		return nil
+	}
+	var err error
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || err != nil {
+			return err == nil
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != apply {
+			return true
+		}
+		arg := -1
+		switch sel.Sel.Name {
+		case "Up", "Down":
+			arg = 0
+		case "Apply", "Revert":
+			arg = 2
+		}
+		if arg < 0 || arg >= len(call.Args) {
+			return true
+		}
+		if id, ok := call.Args[arg].(*ast.Ident); ok && id.Name != declared {
+			err = r.errorf(call, "fixtureapply.%s is handed %s, and the change set this file declares is %s: bun "+
+				"would run %s under this file's name", sel.Sel.Name, id.Name, declared, id.Name)
+		}
+		return true
+	})
+	return err
 }
 
 type setReader struct {

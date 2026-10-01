@@ -121,6 +121,45 @@ var set = fc.Set{
 	}
 }
 
+// A file registers its set in one of the two shapes generate has written, and
+// has to register the set it declares: a copy of another migration with only
+// the set renamed would run the other set under this file's name, while status
+// and plan describe this one.
+func TestReadChangeSetReadsTheRegistration(t *testing.T) {
+	const set = `
+var mine = fixturechange.Set{Name: "x", Tables: fixturechange.Tables{"Plan": {Name: "plans", ID: "id"}}}
+`
+	for name, tc := range map[string]struct{ init, want string }{
+		"Up and Down": {`func init() { Migrations.MustRegister(fixtureapply.Up(mine), fixtureapply.Down(mine)) }`, ""},
+		"Apply and Revert": {`func init() {
+	Migrations.MustRegister(func(ctx context.Context, db *bun.DB) error {
+		return fixtureapply.Apply(ctx, db, mine)
+	}, func(ctx context.Context, db *bun.DB) error {
+		return fixtureapply.Revert(ctx, db, mine)
+	})
+}`, ""},
+		"options": {`func init() {
+	Migrations.MustRegister(fixtureapply.Up(mine, fixtureapply.WithLogger(nil)), fixtureapply.Down(mine))
+}`, ""},
+		"another set handed to Up": {`func init() { Migrations.MustRegister(fixtureapply.Up(theirs), fixtureapply.Down(mine)) }`,
+			"fixtureapply.Up is handed theirs, and the change set this file declares is mine"},
+		"another set handed to Revert": {`func init() {
+	Migrations.MustRegister(func(ctx context.Context, db *bun.DB) error {
+		return fixtureapply.Apply(ctx, db, mine)
+	}, func(ctx context.Context, db *bun.DB) error {
+		return fixtureapply.Revert(ctx, db, theirs)
+	})
+}`, "fixtureapply.Revert is handed theirs"},
+	} {
+		src := "package migrations\n\nimport (\n\t\"github.com/RELAXccc/bun-fixture-migrate/fixtureapply\"\n" +
+			"\t\"github.com/RELAXccc/bun-fixture-migrate/fixturechange\"\n)\n\n" + tc.init + "\n" + set
+		_, isFixture, err := ReadChangeSet([]byte(src))
+		if !isFixture || (tc.want == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), tc.want)) {
+			t.Errorf("%s: %v %v, want %q", name, isFixture, err, tc.want)
+		}
+	}
+}
+
 func TestReadChangeSetSaysWhereItStopped(t *testing.T) {
 	for name, tc := range map[string]struct{ src, want string }{
 		"computed value": {`package m

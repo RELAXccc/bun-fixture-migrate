@@ -435,3 +435,17 @@ func TestValidateKnowsItsFormats(t *testing.T) {
 		}
 	}
 }
+
+// standInForUp calls registeringMigration from where Up does.
+func standInForUp() string { return registeringMigration() }
+
+// Up reads the migration's name from the file that calls it, the file bun's
+// Register reads it from, so a failure never has to find it on the stack.
+func TestUpReadsTheNameOfTheFileThatRegisters(t *testing.T) {
+	if got := fromAMigrationFile(); got != "20260921120000" {
+		t.Fatalf("from a migration's file: %q", got)
+	}
+	if got := standInForUp(); got != "" {
+		t.Fatalf("from a file not named like a migration: %q", got)
+	}
+}

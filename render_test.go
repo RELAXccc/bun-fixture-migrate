@@ -34,9 +34,8 @@ func TestRenderIsValidGoAndGofmtClean(t *testing.T) {
 	text := strings.Join(strings.Fields(string(src)), " ")
 	for _, want := range []string{
 		"package migrations",
-		"Migrations.MustRegister",
-		"fixtureapply.Apply(ctx, db, fixtureChanges20260921120000PlanPrices)",
-		"fixtureapply.Revert(ctx, db, fixtureChanges20260921120000PlanPrices)",
+		"Migrations.MustRegister( fixtureapply.Up(fixtureChanges20260921120000PlanPrices), " +
+			"fixtureapply.Down(fixtureChanges20260921120000PlanPrices), )",
 		`SeedGuardTable: "plans"`,
 		`MigrationsTable: "bun_migrations"`,
 		`"Plan": {Name: "plans", ID: "id"}`,

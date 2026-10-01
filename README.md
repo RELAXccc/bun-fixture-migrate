@@ -45,7 +45,7 @@ go install github.com/RELAXccc/bun-fixture-migrate/cmd/bun-fixture-migrate@lates
 ```
 
 Build it with a supported Go release. Use the same version of the command as of the
-`fixtureapply` package your migrations import, which needs bun and `gopkg.in/yaml.v3` and nothing
+`fixtureapply` package your migrations import, which needs bun and nothing
 else.
 
 ## In five minutes
@@ -83,6 +83,13 @@ reports drift. [`examples/basic`](examples/basic) is the whole loop in a runnabl
 It is a plain Go file meant to be read:
 
 ```go
+func init() {
+	Migrations.MustRegister(
+		fixtureapply.Up(fixtureChanges20260921120000PlanPrices),
+		fixtureapply.Down(fixtureChanges20260921120000PlanPrices),
+	)
+}
+
 var fixtureChanges20260921120000PlanPrices = fixturechange.Set{
 	Name:            "20260921120000_fixture_plan_prices",
 	SeedGuardTable:  "plans",
@@ -91,7 +98,9 @@ var fixtureChanges20260921120000PlanPrices = fixturechange.Set{
 		"Currency": {Name: "currencies", ID: "id", Key: "code"},
 		"Plan":     {Name: "plans", ID: "id", Key: "name", Serial: true},
 	},
-	Policy: fixturechange.Policy{MissingRow: "error", ChangedRow: "warn", IDDrift: "error"},
+	Policy: fixturechange.Policy{
+		MissingRow: "error", ChangedRow: "warn", IDDrift: "error", DuplicateKey: "error",
+	},
 	Changes: []fixturechange.Change{
 		{Model: "Plan", Kind: fixturechange.Insert,
 			Key: fixturechange.Values{"name": fixturechange.Lit("pro")},
@@ -232,8 +241,10 @@ does unless built WithMarkAppliedOnSuccess(true); that record was removed, so th
 once this is fixed
 ```
 
-It reads the name off the call stack exactly as bun's `Register` does, from the migration's file
-name, so renaming the file keeps working. With `WithMarkAppliedOnSuccess(true)` there is no such
+The file registers `fixtureapply.Up(set)` and `fixtureapply.Down(set)`, and `Up` reads the name from
+the file that registers it exactly as bun's `Register` does, from the migration's file name, so
+renaming the file keeps working. Files written by earlier versions, which register functions calling
+`Apply` and `Revert`, keep working: `Apply` finds the name on the call stack. With `WithMarkAppliedOnSuccess(true)` there is no such
 record and nothing is deleted. Set `migrations_table` if your migrator uses `WithTableName`.
 
 ### Why a generated migration fails at all
