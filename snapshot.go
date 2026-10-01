@@ -46,6 +46,11 @@ type Entry struct {
 	// readings: the ref column of the row a reference names, or the field a
 	// template copies. Any other column decides for itself.
 	from map[string]source
+	// unsure holds, for a fixture row, the columns whose value means one
+	// thing to one Go field type and another to another (Cell.Unsure), with
+	// the reason. No column type settles them, so a change carrying one is
+	// always refused.
+	unsure map[string]string
 }
 
 // Full is every column an insert writes or a delete guards on: the compared
@@ -107,6 +112,12 @@ func (s *Snapshot) clone() *Snapshot {
 					c.from[col] = src
 				}
 			}
+			if e.unsure != nil {
+				c.unsure = make(map[string]string, len(e.unsure))
+				for col, reason := range e.unsure {
+					c.unsure[col] = reason
+				}
+			}
 			copied = append(copied, &c)
 		}
 		out.Entries[model] = copied
@@ -152,6 +163,10 @@ const (
 	// FindingUnknownColumn is a column in the fixture file that the table does
 	// not have.
 	FindingUnknownColumn FindingKind = "unknown column"
+	// FindingAmbiguousValue is a value whose meaning depends on the Go type
+	// of the model's field, which this tool cannot see and no column type
+	// settles: a sequence holding a null.
+	FindingAmbiguousValue FindingKind = "ambiguous value"
 	// FindingDuplicateID is two rows of a fixture file sharing one id, which
 	// two branches each adding the next id leave behind after a merge:
 	// dbfixture cannot load such a file, and no migration can insert both.

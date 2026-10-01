@@ -251,7 +251,8 @@ alike there, a NULL and the text `NULL` for instance; the tool never compares ro
 still two rows.
 
 Finding kinds: `duplicate key`, `duplicate id` (two rows of the file sharing one id), `zero against a default`, `null against a default`,
-`invalid value` (a value the column's type cannot hold), `unknown column`.
+`invalid value` (a value the column's type cannot hold), `ambiguous value` (a value only the Go
+field's type could settle, such as a null inside a sequence), `unknown column`.
 
 ### status output
 

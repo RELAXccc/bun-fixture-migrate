@@ -139,6 +139,8 @@ type reading struct {
 	// dbfixture hands on what that field holds, so its type, not this
 	// column's, decides which of the two readings the database holds.
 	from *source
+	// unsure is Cell.Unsure.
+	unsure string
 }
 
 // source names a column of a model.
@@ -158,7 +160,7 @@ func (ix *index) value(model, col string, row Row) (reading, bool, error) {
 			return reading{}, false, fmt.Errorf(
 				"%s.%s is a reference and holds a mapping or a sequence", model, col)
 		}
-		return reading{Value: fixturechange.Lit(cell.Text), written: cell.StringText}, true, nil
+		return reading{Value: fixturechange.Lit(cell.Text), written: cell.StringText, unsure: cell.Unsure}, true, nil
 	}
 	if cell.IsNull {
 		return reading{Value: fixturechange.Null()}, true, nil
@@ -344,6 +346,12 @@ func FixtureSnapshot(cfg *Config, doc Doc, source string) (*Snapshot, error) {
 		snap.Columns[model] = unionColumns(snap.Entries[model])
 		snap.reportDuplicates(model)
 		snap.reportDuplicateIDs(cfg, model)
+		for _, e := range snap.Entries[model] {
+			for _, col := range sortedKeysOf(e.unsure) {
+				snap.Findings = append(snap.Findings, Finding{Kind: FindingAmbiguousValue, Model: model,
+					Row: e.label(model), Detail: col + ": " + e.unsure[col]})
+			}
+		}
 	}
 	return snap, nil
 }
@@ -400,6 +408,12 @@ func (ix *index) entry(model string, m *Model, row Row) (*Entry, error) {
 // gets when that is something else, and the column whose type decides which
 // of the two the database holds when that is not the entry's own.
 func (e *Entry) record(col string, r reading) {
+	if r.unsure != "" {
+		if e.unsure == nil {
+			e.unsure = map[string]string{}
+		}
+		e.unsure[col] = r.unsure
+	}
 	if r.written == "" {
 		return
 	}

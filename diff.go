@@ -197,12 +197,23 @@ func undecidedColumns(m *Model, prev, cur *Entry, keep func(col, prevResolved, c
 // write one of two values, and could write the wrong one. label names the
 // row in the refusal.
 func undecided(label string, m *Model, c fixturechange.Change, prev, cur *Entry) (Refusal, bool) {
-	cols := undecidedColumns(m, prev, cur, func(col, _, _ string) bool {
+	carried := func(col string) bool {
 		_, inKey := c.Key[col]
 		_, inOld := c.Old[col]
 		_, inNew := c.New[col]
 		return inKey || inOld || inNew
-	})
+	}
+	for _, e := range []*Entry{prev, cur} {
+		if e == nil {
+			continue
+		}
+		for _, col := range sortedKeysOf(e.unsure) {
+			if carried(col) {
+				return Refusal{c.Model, label, col + ": " + e.unsure[col]}, true
+			}
+		}
+	}
+	cols := undecidedColumns(m, prev, cur, func(col, _, _ string) bool { return carried(col) })
 	if len(cols) == 0 {
 		return Refusal{}, false
 	}

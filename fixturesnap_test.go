@@ -246,3 +246,35 @@ func TestARespelledKeyIsNeitherARenameNorNothing(t *testing.T) {
 		t.Fatalf("expected one refusal about the spelling, got %+v / %+v", res.Changes, res.Refusals)
 	}
 }
+
+// An alias is the value it names, scalar or not, null included.
+func TestAnAliasReadsAsTheValueItNames(t *testing.T) {
+	d := doc(t, `- model: Plan
+  rows:
+    - {name: a, note: &n "shared", seats: &z ~, tags: &t [x, *n, 017]}
+    - {name: b, note: *n, seats: *z, tags: *t}
+`)
+	got := d[0].Rows[1]
+	if c := got["note"]; c.Structured || c.IsNull || c.Text != "shared" || c.Tag != "!!str" {
+		t.Fatalf("note: %+v", c)
+	}
+	if c := got["seats"]; !c.IsNull {
+		t.Fatalf("seats: %+v", c)
+	}
+	if c := got["tags"]; !c.Structured || c.Text != `["x","shared",15]` || c.StringText != `["x","shared","017"]` {
+		t.Fatalf("tags: %+v", c)
+	}
+}
+
+// dbfixture evaluates a template only in a scalar tagged !!str, and an alias
+// has no tag: it would store the template's text. That is refused.
+func TestAnAliasOfATemplateIsRefused(t *testing.T) {
+	_, err := ParseDoc([]byte(`- model: Plan
+  rows:
+    - {name: a, currency_id: &c '{{ $.Currency.eur.ID }}'}
+    - {name: b, currency_id: *c}
+`))
+	if err == nil || !strings.Contains(err.Error(), "Plan.currency_id: line 4: *c stands for {{ $.Currency.eur.ID }}") {
+		t.Fatalf("expected the alias to be refused, got %v", err)
+	}
+}

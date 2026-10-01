@@ -38,6 +38,11 @@ type Cell struct {
 	// which is what a []string field gets. Which one the database holds
 	// depends on the column's type.
 	StringText string
+	// Unsure says why the value is one thing to one Go field type and
+	// another to another, which no column type settles and this tool cannot
+	// see: a sequence holding a null, which yaml.v3 drops for a []string or
+	// []int64 field and keeps for a []*string. "" for any other value.
+	Unsure string
 }
 
 // Row is one fixture row.
@@ -84,6 +89,23 @@ func ParseDoc(data []byte) (Doc, error) {
 }
 
 func cellOf(node yaml.Node) (Cell, error) {
+	// An alias (*name) is the node it names, to yaml.v3 and so to dbfixture,
+	// with one difference: dbfixture evaluates a template only in a scalar
+	// tagged !!str, and an alias has no tag. The text of a template reached
+	// through an alias is stored as it is, which no other value of the file
+	// does, so it is refused rather than read either way.
+	if node.Kind == yaml.AliasNode {
+		target := resolveAlias(&node)
+		if target == nil {
+			return Cell{}, fmt.Errorf("line %d: an alias of nothing", node.Line)
+		}
+		if target.Kind == yaml.ScalarNode && anyTemplate.MatchString(target.Value) {
+			return Cell{}, fmt.Errorf("line %d: *%s stands for %s, which dbfixture stores as that text instead of "+
+				"evaluating it, because it does not evaluate a template reached through an alias: write the "+
+				"template itself here", node.Line, node.Value, target.Value)
+		}
+		return cellOf(*target)
+	}
 	switch {
 	case node.Tag == "!!null":
 		return Cell{IsNull: true}, nil
@@ -100,8 +122,31 @@ func cellOf(node yaml.Node) (Cell, error) {
 		if err != nil {
 			return Cell{}, err
 		}
-		return Cell{Text: text, Structured: true, StringText: sequenceAsWritten(&node)}, nil
+		c := Cell{Text: text, Structured: true, StringText: sequenceAsWritten(&node)}
+		if node.Kind == yaml.SequenceNode {
+			for _, e := range node.Content {
+				if e := resolveAlias(e); e != nil && e.ShortTag() == "!!null" {
+					c.Unsure = "it is a sequence holding a null, which yaml.v3 leaves out of a []string or []int64 " +
+						"field and keeps in a []*string one, and only the model says which it has: leave the null " +
+						"out, which every field reads the same way"
+					break
+				}
+			}
+		}
+		return c, nil
 	}
+}
+
+// resolveAlias is the node an alias names, through any number of aliases,
+// and any other node itself; nil for an alias of nothing.
+func resolveAlias(n *yaml.Node) *yaml.Node {
+	for i := 0; n != nil && n.Kind == yaml.AliasNode; i++ {
+		if i > 100 {
+			return nil
+		}
+		n = n.Alias
+	}
+	return n
 }
 
 // sequenceAsWritten is a sequence of scalars as a []string field gets it, as a
@@ -115,7 +160,7 @@ func sequenceAsWritten(n *yaml.Node) string {
 	texts := make([]string, 0, len(n.Content))
 	differs := false
 	for _, e := range n.Content {
-		if e.Kind != yaml.ScalarNode || e.ShortTag() == "!!null" {
+		if e = resolveAlias(e); e == nil || e.Kind != yaml.ScalarNode || e.ShortTag() == "!!null" {
 			return ""
 		}
 		if scalarText(Cell{Text: e.Value, Tag: e.ShortTag()}) != e.Value {

@@ -55,6 +55,12 @@ as written, and any other field the value it resolves to:
 | `2026-03-04` | `2026-03-04` | a date |
 | `~`, `null` | NULL (and see `null_default`) | NULL |
 | a mapping `{sso: true}` or a sequence | | in `json` or `jsonb` the JSON document; in an array column the array |
+| an alias `*name` | the value it names | the value it names |
+
+A null inside a sequence, `[a, ~, b]`, is left out by a `[]string` or `[]int64` field and kept by a
+`[]*string` one, and no column type says which the model has: it is an `ambiguous value` finding,
+and a change carrying it is refused. An alias of a template is refused too: `dbfixture` evaluates a
+template only where it is written, and would store the text of one reached through an alias.
 
 The tool keeps both readings of such a value and lets the column decide: a column of a string type,
 a domain over one, an enum, or an array of any of them takes the value as written, everything else
