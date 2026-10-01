@@ -273,6 +273,16 @@ whatever driver it uses: it is tested under bun's `pgdriver` and under `pgx/v5/s
 `pgdialect`. It sets `TimeZone`, `DateStyle` and `IntervalStyle` for its own transaction and restores
 them, so values compare the same whatever the connection's settings.
 
+What else runs in that transaction sees them too: `TimeZone` is `UTC`, `DateStyle` `ISO, YMD` and
+`IntervalStyle` `postgres` for every trigger a change fires and every column default an insert
+fills. `now()` is the same instant either way, but `current_date`, `localtimestamp`, `localtime`,
+`now()::date`, `date_trunc('day', now())` and `to_char(now(), ...)` are UTC's: an insert into a
+table whose `created_on date DEFAULT current_date` the fixture leaves out gets the date in UTC, and a
+trigger stamping the local date writes UTC's. A trigger turning a date or an interval into text
+gets the ISO and `postgres` spellings. The setting is not avoidable by binding the values
+differently: a change set written by an earlier version, or by hand, may hold a timestamp without
+an offset, which is a UTC time, and only the session's `TimeZone` reads it as one.
+
 The DSN is a URL (`postgres://user:password@host:5432/db?sslmode=require`). The command refuses a
 keyword DSN (`host=... user=...`) with a sentence, never repeats a password in a message, and sets
 `application_name=bun-fixture-migrate` unless the DSN sets one.
