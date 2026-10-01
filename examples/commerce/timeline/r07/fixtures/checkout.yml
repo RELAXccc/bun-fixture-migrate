@@ -1,0 +1,92 @@
+# Checkout: how a customer pays, where the shop ships to and at what price,
+# and the loyalty programme's tiers.
+
+# The providers every shop has. Ops add local ones in the back office; the
+# file never numbers them.
+- model: PaymentProvider
+  rows:
+    - _id: stripe
+      code: stripe
+      kind: card
+      display_name: {en: Credit card, de: Kreditkarte, fr: Carte bancaire}
+      supported_currencies: [EUR, USD, GBP, CHF, SEK, PLN]
+      fee_percent: 1.40
+      active: true
+    - _id: paypal
+      code: paypal
+      kind: wallet
+      display_name: {en: PayPal, de: PayPal}
+      supported_currencies: [EUR, USD, GBP, CHF]
+      fee_percent: 2.49
+      active: true
+    - _id: sepa
+      code: sepa
+      kind: bank_transfer
+      display_name: {en: Bank transfer, de: Überweisung}
+      supported_currencies: [EUR]
+      fee_percent: 0.35
+      active: true
+    - _id: klarna
+      code: klarna
+      kind: bnpl
+      display_name: {en: Pay later with Klarna, de: Später bezahlen mit Klarna}
+      supported_currencies: [EUR, SEK, GBP]
+      fee_percent: 2.99
+      active: true
+
+# Seeded once: logistics edits zones in the back office afterwards.
+- model: ShippingZone
+  rows:
+    - _id: domestic
+      id: 1
+      code: domestic
+      name: Germany
+      countries: [DE]
+      free_shipping_over: 39.00
+    - _id: eu
+      id: 2
+      code: eu
+      name: European Union
+      countries: [AT, FR, NL, SE]
+      free_shipping_over: 100.00
+    - _id: ch
+      id: 3
+      code: ch
+      name: Switzerland
+      countries: [CH]
+      free_shipping_over: 150.00
+    - _id: uk
+      id: 4
+      code: uk
+      name: United Kingdom
+      countries: [GB]
+      free_shipping_over: ~
+    - _id: world
+      id: 5
+      code: world
+      name: Rest of the world
+      countries: [US]
+      free_shipping_over: ~
+    - _id: pl
+      id: 6
+      code: pl
+      name: Poland
+      countries: [PL]
+      free_shipping_over: 199.00
+
+- model: ShippingMethod
+  rows:
+    - {id: 1, code: dhl-standard, zone_id: '{{ $.ShippingZone.domestic.ID }}', carrier: DHL, name: {en: Standard, de: Standard}, base_price: 5.49, currency_code: '{{ $.Currency.eur.Code }}', min_days: 1, max_days: 3, is_default: true}
+    - {id: 2, code: dhl-express, zone_id: '{{ $.ShippingZone.domestic.ID }}', carrier: DHL, name: {en: Express, de: Express}, base_price: 12.90, currency_code: '{{ $.Currency.eur.Code }}', min_days: 1, max_days: 1, is_default: false}
+    - {id: 3, code: dpd-eu, zone_id: '{{ $.ShippingZone.eu.ID }}', carrier: DPD, name: {en: Standard EU, de: Standard EU}, base_price: 9.90, currency_code: '{{ $.Currency.eur.Code }}', min_days: 3, max_days: 6, is_default: true}
+    - {id: 4, code: post-ch, zone_id: '{{ $.ShippingZone.ch.ID }}', carrier: Swiss Post, name: {en: PostPac Priority, de: PostPac Priority}, base_price: 19.00, currency_code: '{{ $.Currency.chf.Code }}', min_days: 2, max_days: 4, is_default: true}
+    - {id: 5, code: royal-mail, zone_id: '{{ $.ShippingZone.uk.ID }}', carrier: Royal Mail, name: {en: International Tracked}, base_price: 14.50, currency_code: '{{ $.Currency.gbp.Code }}', min_days: 3, max_days: 6, is_default: true}
+    - {id: 6, code: ups-world, zone_id: '{{ $.ShippingZone.world.ID }}', carrier: UPS, name: {en: Worldwide Saver}, base_price: 39.00, currency_code: '{{ $.Currency.usd.Code }}', min_days: 3, max_days: 8, is_default: true}
+    - {id: 7, code: inpost-pl, zone_id: '{{ $.ShippingZone.pl.ID }}', carrier: InPost, name: {en: Parcel locker, pl: Paczkomat}, base_price: 12.99, currency_code: '{{ $.Currency.pln.Code }}', min_days: 1, max_days: 2, is_default: true}
+
+- model: LoyaltyTier
+  rows:
+    - {id: 1, code: bronze, name: {en: Bronze, de: Bronze}, min_points: 0, discount_percent: 0.0}
+    - {id: 2, code: silver, name: {en: Silver, de: Silber}, min_points: 1000, discount_percent: 2.5}
+    - {id: 3, code: gold, name: {en: Gold, de: Gold}, min_points: 5000, discount_percent: 5.0}
+    - {id: 4, code: platinum, name: {en: Platinum, de: Platin}, min_points: 20000, discount_percent: 7.5}

@@ -1,0 +1,61 @@
+description: |
+  Production was edited by hand. Between releases an admin renamed the kids
+  category in the back office, marketing renamed the newsletter's sender, and
+  somebody pointed the footer's returns link at a page that is going away.
+  check reports all three as drift; status, which compares the files with the
+  migrations, does not. The runbook's two directions: for the names, the
+  database is right, so the developer exports production into the fixture
+  files and generates the migration that brings every other database to them,
+  which production finds made already; for the link, the file is right, so
+  generate -from-db against production writes the migration that puts it
+  back there, which every other database finds made. The export rewrites the
+  five files in its own layout and drops their comments; the developer puts
+  the layout and the comments back by hand, which changes no row.
+steps:
+  - cli: [check]
+    env: prod
+    exit: 3
+    output:
+      - "Category slug=kids"
+      - "MenuItem menu=footer,slug=returns"
+      - "url: database /returns, file /help/returns"
+      - "SenderIdentity code=newsletter"
+      - "display_name: database Shop news, file Shop newsletter"
+  - cli: [status]
+    env: prod
+    output: ["not migrated nothing"]
+  - cli: [export]
+    env: prod
+    output: ["wrote fixtures/reference.yml", "wrote fixtures/catalog.yml", "wrote fixtures/access.yml"]
+  # The export holds what the files held, with the database's values: the
+  # three edits and nothing else. No id the files leave to the database, no
+  # row of ops' or of the merchant's, no value of a column production owns.
+  - cli: [generate, -dry-run, -name, admin edits]
+    env: prod
+    output: ["Category: 1 update", "MenuItem: 1 update", "SenderIdentity: 1 update"]
+    absent: ["Currency:", "Country:", "TaxRate:", "CategorySEO:", "PaymentProvider:", "Shipping", "AdminRole", "AdminPermission", "LoyaltyTier", "refused"]
+  # The link is the file's.
+  - edit:
+      file: fixtures/storefront.yml
+      old: 'url: "/returns"'
+      new: 'url: "/help/returns"'
+  - generate: {name: admin edits, at: "20270906100000"}
+    output: ["Category: 1 update", "SenderIdentity: 1 update"]
+    absent: ["MenuItem"]
+  # The layout and the comments back, by hand.
+  - overlay: tidy
+  - generate: {name: tidy, at: "20270906100100"}
+    output: ["nothing changed"]
+  - generate: {name: returns link as in the file, at: "20270906100200", flags: [-from-db]}
+    env: prod
+    output: ["MenuItem: 1 update"]
+  - cli: [status, -offline]
+    output: ["not migrated nothing"]
+deploy: [prod]
+expect:
+  migrate:
+    prod:
+      output:
+        - "Category slug=kids update: the row already holds these values, nothing to do"
+        - "SenderIdentity code=newsletter update: the row already holds these values, nothing to do"
+        - "MenuItem menu=footer,slug=returns update: applied (1 row)"

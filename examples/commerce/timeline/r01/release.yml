@@ -1,0 +1,14 @@
+description: |
+  The shop goes live: the schema in three schemas (billing, catalog, public),
+  the master data in five fixture files, and baseline, which records that
+  every database about to be created holds the fixture files as they are.
+  Production and the outlet store, which runs the same software on a database
+  of its own and is deployed once a quarter, go live with it.
+steps:
+  - overlay: .
+  - cli: [baseline]
+    output: ["wrote migrations/fixture_state.yml"]
+  - cli: [status, -offline]
+    output: ["not migrated nothing"]
+create: [prod, outlet]
+deploy: [prod, outlet]

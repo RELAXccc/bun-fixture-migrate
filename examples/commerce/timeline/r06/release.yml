@@ -1,0 +1,67 @@
+description: |
+  The audit table is turned on, before anybody needs to roll back. Every
+  fixture migration generated from now on carries audit_table and records
+  each run in the transaction that made its changes; the five generated
+  before it record nothing. The release itself writes the support address in
+  lower case (an address is unique whatever its case, under an expression
+  index on lower(email)), adds a marketplace sender and a platinum loyalty
+  tier, and gives new shops a free-shipping threshold for Switzerland, which
+  the existing zones, the databases' own, do not take. The outlet store,
+  deployed last at r01, catches up five releases in one migrate; staging two.
+steps:
+  - overlay: .
+  - generate: {name: audit and senders, at: "20270607100000"}
+    output:
+      - "SenderIdentity: 1 insert, 2 updates"
+      - "LoyaltyTier: 1 insert"
+      - "note: ShippingZone: 1 row with other values in the state after 20270503100000_fixture_klarna_and_finance_role, which mode insert never updates"
+  - file: migrations/20270607100000_fixture_audit_and_senders.go
+    output: ['AuditTable: "fixture_audit",']
+  - file: migrations/20270503100000_fixture_klarna_and_finance_role.go
+    absent: ["AuditTable"]
+deploy: [prod, staging, outlet]
+plan:
+  - cli: [plan, -strict]
+    env: outlet
+    output:
+      - "20270201100000_fixture_german_vat_and_poland: would succeed"
+      - "20270301100000_fixture_category_tree: would succeed"
+      - "20270405100000_fixture_park_sale_and_express: would succeed"
+      - "20270405100100_fixture_header_order: would succeed"
+      - "20270503100000_fixture_klarna_and_finance_role: would succeed"
+      - "20270607100000_fixture_audit_and_senders: would succeed"
+  - cli: [status]
+    env: prod
+    output: ["fixture_audit does not exist yet"]
+after:
+  # What the release's migration did in production, long after the deploy
+  # log is gone. The migrations before it ran without the table.
+  - cli: [status]
+    env: prod
+    output:
+      - "what the fixture migrations did here, according to fixture_audit"
+      - "20270607100000_fixture_audit_and_senders: applied"
+      - "4 applied, 0 unchanged, 0 skipped"
+expect:
+  check:
+    outlet:
+      output: ["ShippingZone: 2 rows with other values in the database, which mode insert never updates"]
+probes:
+  # The newsletter and the order mail trade addresses. The addresses are
+  # unique under an expression index, lower(email), which generate does not
+  # read: it writes both updates in one migration, as it would not under a
+  # plain unique index (the menu of r04), and the migration fails when it
+  # runs.
+  - name: two senders trade addresses
+    clone: prod
+    known: F3
+    steps:
+      - overlay: probe-swap
+      - generate: {name: trade addresses, at: "20270608100000"}
+        output: ["SenderIdentity: 2 updates"]
+        absent: ["refused"]
+      - cli: [plan]
+        env: clone
+        exit: 3
+        output:
+          - 'update [error]: ERROR: duplicate key value violates unique constraint "sender_identities_email"'

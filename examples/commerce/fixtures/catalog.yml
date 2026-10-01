@@ -1,0 +1,135 @@
+# The category tree the storefront navigates, and each category's texts for
+# search engines.
+
+- model: Category
+  rows:
+    - _id: apparel
+      id: 1
+      slug: apparel
+      parent_id: ~
+      position: 1
+      name: {en: Apparel, de: Bekleidung, fr: Vêtements}
+      tags: [fashion]
+    - _id: womens
+      id: 2
+      slug: womens
+      parent_id: '{{ $.Category.apparel.ID }}'
+      position: 1
+      name: {en: Women, de: Damen, fr: Femme}
+      tags: [fashion, women]
+    - _id: mens
+      id: 3
+      slug: mens
+      parent_id: '{{ $.Category.apparel.ID }}'
+      position: 3
+      name: {en: Men, de: Herren, fr: Homme}
+      tags: [fashion, men]
+    - _id: kids
+      id: 4
+      slug: kids
+      parent_id: '{{ $.Category.apparel.ID }}'
+      position: 4
+      name: {en: Kids & teens, de: Kinder & Jugendliche, fr: Enfant}
+      tags: [fashion, kids]
+    - _id: home
+      id: 5
+      slug: home
+      parent_id: ~
+      position: 2
+      name: {en: Home & living, de: Wohnen, fr: Maison}
+      tags: []
+    - _id: kitchen
+      id: 6
+      slug: kitchen
+      parent_id: '{{ $.Category.home.ID }}'
+      position: 1
+      name: {en: Kitchen, de: Küche, fr: Cuisine}
+      tags: [home]
+    - _id: living
+      id: 7
+      slug: living
+      parent_id: '{{ $.Category.home.ID }}'
+      position: 2
+      name: {en: Living room, de: Wohnzimmer, fr: Salon}
+      tags: [home]
+    - _id: electronics
+      id: 9
+      slug: electronics
+      parent_id: ~
+      position: 3
+      name: {en: Electronics, de: Elektronik, fr: Électronique}
+      tags: []
+    - _id: cameras
+      id: 12
+      slug: cameras
+      parent_id: '{{ $.Category.electronics.ID }}'
+      position: 1
+      name: {en: Cameras, de: Kameras, fr: Appareils photo}
+      tags: [photo]
+    - _id: phones
+      id: 10
+      slug: phones
+      parent_id: '{{ $.Category.electronics.ID }}'
+      position: 2
+      name: {en: Phones, de: Handys, fr: Téléphones}
+      tags: [mobile]
+    - _id: tv_audio
+      id: 11
+      slug: TV-Audio
+      parent_id: '{{ $.Category.electronics.ID }}'
+      position: 3
+      name: {en: TV & audio, de: TV & Audio, fr: TV & audio}
+      tags: [home-cinema]
+    # New: shoes between women and men, and an outdoor root that garden
+    # moves under.
+    - _id: shoes
+      id: 13
+      slug: shoes
+      parent_id: '{{ $.Category.apparel.ID }}'
+      position: 2
+      name: {en: Shoes, de: Schuhe, fr: Chaussures}
+      tags: [fashion, shoes]
+    - _id: outdoor
+      id: 14
+      slug: outdoor
+      parent_id: ~
+      position: 4
+      name: {en: Outdoor, de: Draußen, fr: Plein air}
+      tags: [seasonal, autumn]
+    - _id: garden
+      id: 8
+      slug: garden
+      parent_id: '{{ $.Category.outdoor.ID }}'
+      position: 1
+      name: {en: Garden, de: Garten, fr: Jardin}
+      tags: [outdoor, seasonal]
+
+- model: CategorySEO
+  rows:
+    - category_id: '{{ $.Category.apparel.ID }}'
+      meta_title: {en: Apparel for everyone, de: Bekleidung für alle, fr: Des vêtements pour tous}
+      meta_description: {en: "Clothes for women, men and kids."}
+      noindex: false
+    - category_id: '{{ $.Category.womens.ID }}'
+      meta_title: {en: Women's fashion, de: Damenmode}
+      meta_description: {en: "Dresses, tops and more."}
+      noindex: false
+    - category_id: '{{ $.Category.mens.ID }}'
+      meta_title: {en: Men's fashion, de: Herrenmode}
+      meta_description: {en: "Shirts, trousers and more."}
+      noindex: false
+    - category_id: '{{ $.Category.home.ID }}'
+      meta_title: {en: Home & living, de: Wohnen & Leben}
+      meta_description: {en: Everything for your home.}
+      noindex: false
+    - category_id: '{{ $.Category.electronics.ID }}'
+      meta_title: {en: Electronics, de: Elektronik}
+      meta_description: {en: "Phones, audio and cameras."}
+      noindex: false
+    - category_id: '{{ $.Category.shoes.ID }}'
+      meta_title: {en: Shoes, de: Schuhe}
+      meta_description: {en: "Sneakers, boots and sandals."}
+      noindex: false
+    - category_id: '{{ $.Category.outdoor.ID }}'
+      meta_title: {en: Outdoor living, de: Draußen leben}
+      noindex: true

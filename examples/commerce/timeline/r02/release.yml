@@ -1,0 +1,40 @@
+description: |
+  Germany's standard VAT rises on 1 July 2027, and the shop starts selling to
+  Poland. The 19% rate is closed the day the 20% rate opens, in one release:
+  a partial unique index lets each country and class have one open rate, and
+  the migration closes the old rate before it opens the new one. Poland
+  brings its currency (keyed by ISO code), its rates, a shipping zone of its
+  own and a parcel-locker method; the card provider takes zloty. Staging is
+  created, and from now on deployed every other release.
+steps:
+  - overlay: .
+  - cli: [status, -offline]
+    exit: 3
+    output: ["the fixture file has changes no migration makes"]
+  - generate: {name: german vat and poland, at: "20270201100000"}
+    output:
+      - "Currency: 1 insert"
+      - "Country: 1 insert"
+      - "TaxRate: 3 inserts, 1 update"
+      - "PaymentProvider: 1 update"
+      - "ShippingZone: 1 insert"
+      - "ShippingMethod: 1 insert"
+      - "wrote migrations/20270201100000_fixture_german_vat_and_poland.go"
+  - cli: [status, -offline]
+    output: ["not migrated nothing"]
+create: [staging]
+deploy: [prod, staging]
+plan:
+  - cli: [plan, -strict]
+    env: prod
+    output:
+      - "20270201100000_fixture_german_vat_and_poland: would succeed"
+      - "applied TaxRate country_id=Country(DE),tax_class=standard,valid_from=2007-01-01 update (1 row)"
+      - "applied TaxRate country_id=Country(DE),tax_class=standard,valid_from=2027-07-01 insert (1 row)"
+after:
+  # The order placed at the old rate keeps it.
+  - sql: >-
+      SELECT string_agg(r.rate::text || coalesce('-' || r.valid_to, ''), ',' ORDER BY r.valid_from)
+      FROM billing.tax_rates r JOIN countries c ON c.id = r.country_id WHERE c.iso2 = 'DE' AND r.tax_class = 'standard'
+    env: prod
+    want: "0.1900-2027-07-01,0.2000"
