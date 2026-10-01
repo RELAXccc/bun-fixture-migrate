@@ -220,13 +220,15 @@ func parseFlags(o streams, fs *flag.FlagSet, args []string) error {
 
 // quoteArg is a command-line argument fit to repeat in a message. A DSN left
 // behind by a mistyped flag is repeated with its password masked, and one
-// that cannot be read as a URL is not repeated at all.
+// that cannot be read as a URL, such as user:password@host without a scheme,
+// is not repeated at all.
 func quoteArg(arg string) string {
 	u, err := url.Parse(arg)
 	switch {
 	case err == nil && u.Scheme != "" && u.Host != "":
 		return strconv.Quote(redact(u))
-	case strings.Contains(arg, "://") || strings.Contains(strings.ToLower(arg), "password"):
+	case strings.Contains(arg, "://") || strings.Contains(arg, "@") ||
+		strings.Contains(strings.ToLower(arg), "password"):
 		return "that looks like a DSN (not repeated here)"
 	}
 	return strconv.Quote(arg)
@@ -248,6 +250,11 @@ func common(o streams, fs *flag.FlagSet, args []string) (*setup, error) {
 	}
 	cfg, err := fixturemigrate.LoadConfig(*configPath)
 	if err != nil {
+		set := false
+		fs.Visit(func(f *flag.Flag) { set = set || f.Name == "config" })
+		if !set && os.Getenv(configEnv) != "" {
+			return nil, fmt.Errorf("%w (the configuration $%s names)", err, configEnv)
+		}
 		return nil, err
 	}
 	// Everything that asks whether a database is configured, and connect,

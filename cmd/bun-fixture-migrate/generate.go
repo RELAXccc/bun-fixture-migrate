@@ -109,7 +109,8 @@ func generate(o streams, args []string) error {
 		if s.cfg.Database != "" && !*noLint {
 			db, err := s.connect(o.ctx)
 			if err != nil {
-				return err
+				return fmt.Errorf("%w; generate connects to check the fixture file against the columns and to "+
+					"respell its values as they hold them, and -no-lint generates without the database", err)
 			}
 			defer db.Close()
 			// Both sides are respelled by the database, so a value written two

@@ -385,6 +385,26 @@ func plan(o streams, args []string) error {
 	if err != nil {
 		return err
 	}
+	// The files named, read before anything connects.
+	var fileTargets []planTarget
+	for _, path := range files {
+		if !strings.HasSuffix(path, ".go") {
+			return fmt.Errorf("plan -file takes a fixture migration generate wrote, a .go file, and %s is not "+
+				"one; a pending SQL migration is planned with the others under -with-sql", path)
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		set, isFixture, err := fixturemigrate.ReadChangeSet(src)
+		if err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		if !isFixture {
+			return fmt.Errorf("%s holds no fixture change set: plan -file takes a fixture migration generate wrote", path)
+		}
+		fileTargets = append(fileTargets, planTarget{id: strings.TrimSuffix(filepath.Base(path), ".go"), set: set})
+	}
 	db, err := s.connect(o.ctx)
 	if err != nil {
 		return err
@@ -405,20 +425,7 @@ func plan(o streams, args []string) error {
 	report := &planReport{Migrations: []plannedMigration{}, NotSimulated: []string{}, Notes: []string{},
 		Problems: []string{}}
 	if len(files) > 0 {
-		for _, path := range files {
-			src, err := os.ReadFile(path)
-			if err != nil {
-				return err
-			}
-			set, isFixture, err := fixturemigrate.ReadChangeSet(src)
-			if err != nil {
-				return fmt.Errorf("%s: %w", path, err)
-			}
-			if !isFixture {
-				return fmt.Errorf("%s holds no fixture change set", path)
-			}
-			targets = append(targets, planTarget{id: strings.TrimSuffix(filepath.Base(path), ".go"), set: set})
-		}
+		targets = fileTargets
 	} else {
 		if s.outDir == "" {
 			return fmt.Errorf("no out directory in the configuration; name the files with -file")

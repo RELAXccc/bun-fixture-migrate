@@ -22,6 +22,10 @@ import (
 // password stays out of the repository and out of the command line.
 func resolveDSN(dsn string) (string, error) {
 	if name, ok := strings.CutPrefix(dsn, "env:"); ok {
+		if name == "" {
+			return "", fmt.Errorf("the database DSN is \"env:\" with no variable after it; write env:NAME, " +
+				"such as env:DATABASE_URL")
+		}
 		dsn = os.Getenv(name)
 		if dsn == "" {
 			return "", fmt.Errorf("the database DSN is to be read from the environment variable %s, which is not set", name)

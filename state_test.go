@@ -396,3 +396,21 @@ func TestTheMigrationAStateCovers(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+// The comment on top is nobody's to read, and a blank line in it changes
+// nothing; a file without a format line says so, not that a marker of an
+// older release is missing.
+func TestABlankLineInTheStateFilesComment(t *testing.T) {
+	data := string(State{Files: []FixtureFile{{Data: []byte(base)}}, Migration: "baseline"}.Encode())
+	edited := strings.Replace(data, "#\n", "\n", 1)
+	if edited == data {
+		t.Fatal("no blank comment line to replace")
+	}
+	if _, err := DecodeState([]byte(edited)); err != nil {
+		t.Fatalf("got %v", err)
+	}
+	if _, err := DecodeState([]byte("# a comment\n\n- model: Plan\n")); err == nil ||
+		!strings.Contains(err.Error(), `no "# format:" line`) {
+		t.Fatalf("got %v", err)
+	}
+}

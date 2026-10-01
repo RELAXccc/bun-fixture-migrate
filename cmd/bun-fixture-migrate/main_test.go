@@ -366,7 +366,8 @@ func TestABadFlagIsOneError(t *testing.T) {
 // DSN with a password in it.
 func TestAStrayArgumentDoesNotRepeatAPassword(t *testing.T) {
 	cfg, _ := project(t, oldFixture, oldFixture)
-	for _, arg := range []string{"postgres://app:s3cret@db/x", "host=db password=s3cret", "postgres://app:s3cret@[::1/x"} {
+	for _, arg := range []string{"postgres://app:s3cret@db/x", "host=db password=s3cret", "postgres://app:s3cret@[::1/x",
+		"app:s3cret@db:5432/x"} {
 		code, _, stderr := call(t, "check", "-config", cfg, arg)
 		if code != 1 || !strings.Contains(stderr, "unexpected argument") || strings.Contains(stderr, "s3cret") {
 			t.Errorf("%s: exit %d\n%s", arg, code, stderr)
@@ -510,5 +511,39 @@ func TestAnErrorIsOneLine(t *testing.T) {
 	code, _, stderr = call(t, "status", "-config", cfg, "-offline")
 	if code != 1 || !strings.Contains(stderr, "invalid object name 'HEAD'. So nothing says") {
 		t.Fatalf("exit %d\n%s", code, stderr)
+	}
+}
+
+// Small things a message gets right: the flag that would have helped, the
+// file plan -file takes, where a configuration nobody named on the command
+// line came from.
+func TestMessagesSayWhatToDo(t *testing.T) {
+	cfg, base := projectWith(t, config+"database: env:BFM_TEST_UNSET_DATABASE_URL\n", newFixture, oldFixture)
+	code, _, stderr := call(t, "generate", "-config", cfg, "-old", base, "-name", "x")
+	if code != 1 || !strings.Contains(stderr, "BFM_TEST_UNSET_DATABASE_URL, which is not set") ||
+		!strings.Contains(stderr, "-no-lint generates without the database") {
+		t.Errorf("exit %d\n%s", code, stderr)
+	}
+	if code, _, stderr := call(t, "generate", "-config", cfg, "-old", base, "-name", "x", "-no-lint"); code != 0 {
+		t.Errorf("exit %d\n%s", code, stderr)
+	}
+
+	sql := filepath.Join(filepath.Dir(cfg), "migrations", "20260101000000_schema.up.sql")
+	if err := os.WriteFile(sql, []byte("CREATE TABLE x (id int);\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, _, stderr = call(t, "plan", "-config", cfg, "-file", sql)
+	if code != 1 || !strings.Contains(stderr, "plan -file takes a fixture migration generate wrote, a .go file") {
+		t.Errorf("exit %d\n%s", code, stderr)
+	}
+
+	t.Setenv("BUN_FIXTURE_MIGRATE_CONFIG", filepath.Join(t.TempDir(), "nowhere.yml"))
+	code, _, stderr = call(t, "status", "-offline")
+	if code != 1 || !strings.Contains(stderr, "nowhere.yml") || !strings.Contains(stderr, "$BUN_FIXTURE_MIGRATE_CONFIG") {
+		t.Errorf("exit %d\n%s", code, stderr)
+	}
+	// Named with -config, it is not the variable's.
+	if _, _, stderr := call(t, "status", "-offline", "-config", filepath.Join(t.TempDir(), "x.yml")); strings.Contains(stderr, "$BUN_") {
+		t.Errorf("%s", stderr)
 	}
 }

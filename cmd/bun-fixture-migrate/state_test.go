@@ -706,11 +706,11 @@ func TestAStateThatDoesNotReadIsNeverReplacedUnread(t *testing.T) {
 	}{
 		{conflicted, []string{"baseline", "-force"}, 2, "even with -force: take one side first, git checkout --ours -- "},
 		{conflicted, []string{"baseline"}, 2, "take one side first"},
-		{"garbage\n", []string{"baseline"}, 2, "the marker line is missing; pass -force to replace it"},
+		{"garbage\n", []string{"baseline"}, 2, "nor the marker line of an older release; pass -force to replace it"},
 		{conflicted, []string{"generate", "-name", "x", "-old", base}, 1, "conflict markers"},
 		{conflicted, []string{"generate", "-name", "x", "-base", "HEAD"}, 1, "conflict markers"},
 		{conflicted, []string{"generate", "-name", "x", "-from-db"}, 1, "conflict markers"},
-		{"garbage\n", []string{"generate", "-name", "x", "-old", base}, 1, "the marker line is missing"},
+		{"garbage\n", []string{"generate", "-name", "x", "-old", base}, 1, "is not a state file"},
 	} {
 		if err := os.WriteFile(statePath, []byte(c.state), 0o644); err != nil {
 			t.Fatal(err)

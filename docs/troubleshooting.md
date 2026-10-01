@@ -50,6 +50,8 @@ the configuration, usually `env:DATABASE_URL`, or pass `-dsn`.
 
 **`the database DSN is to be read from the environment variable DATABASE_URL, which is not set`.**
 `database: env:DATABASE_URL`, or `-dsn env:DATABASE_URL`, names an environment variable; set it.
+`generate` connects only to check the fixture file against the columns and respell its values;
+`generate -no-lint` writes the migration without it.
 
 **`the database DSN is not a URL pgdriver can read`.** Write it as
 `postgres://user:password@host:5432/dbname?sslmode=disable`. A keyword DSN (`host=... user=...`) is
@@ -138,8 +140,9 @@ why.
 **`the state file does not match its own checksum, so it was edited by hand`.** Or merged line by
 line. See [the runbook](production.md#the-state-file-was-edited-or-lost).
 
-**`this is not a state file bun-fixture-migrate wrote: the marker line is missing`.** `state:` points
-at a fixture file, or the file was replaced. Check the path.
+**`this is not a state file bun-fixture-migrate wrote: no "# format:" line follows the comment on top`.**
+`state:` points at a fixture file, or the file was replaced. Check the path. A blank line in the
+comment on top is not the cause: nothing reads the comment.
 
 **`the state file holds git's conflict markers`.** Two branches each generated a migration, and the
 merge stopped in the state file, as it is meant to. See

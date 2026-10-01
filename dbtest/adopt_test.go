@@ -216,6 +216,9 @@ func TestTheConfigurationAgainstTheCatalog(t *testing.T) {
 		t.Fatal(out)
 	}
 	a.run(2, "generate", "-name", "colour")
+	if out := a.run(2, "sync"); !strings.Contains(out, "sync refused: 1 problem in the fixture files; nothing was changed") {
+		t.Fatal(out)
+	}
 
 	// A zero against a default: status says what generate refuses.
 	a.write("fixture-migrate.yml", strings.Replace(cfg, `price_cents: "0"`, `price_cents: "1"`, 1))

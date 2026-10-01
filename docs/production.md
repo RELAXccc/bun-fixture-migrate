@@ -195,7 +195,8 @@ every migration it has no record of. `status` against such a database marks it `
 
 ## The state file was edited or lost
 
-**Symptom.** A command refuses the state file: its checksum does not match, or its marker is gone.
+**Symptom.** A command refuses the state file: its checksum does not match, or it is not a state
+file at all.
 (For conflict markers, see [above](#the-state-file-conflicts-in-a-merge).)
 
 **What happened.** It was edited by hand or merged line by line. Line-ending conversion by git is not

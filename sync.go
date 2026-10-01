@@ -91,7 +91,7 @@ func Sync(ctx context.Context, db *bun.DB, cfg *Config, files []FixtureFile, opt
 	mode, findings := cfg.Worst(head.Findings)
 	res := &SyncResult{Findings: findings}
 	if mode == ModeError {
-		return res, fmt.Errorf("%w: %d problems in the fixture files", ErrSyncRefused, len(findings))
+		return res, fmt.Errorf("%w: %s in the fixture files", ErrSyncRefused, plural(len(findings), "problem"))
 	}
 	database, err := DatabaseSnapshot(ctx, tx, cfg, tables, SnapshotOptions{Columns: head.Columns, Order: head.Order})
 	if err != nil {
@@ -102,8 +102,12 @@ func Sync(ctx context.Context, db *bun.DB, cfg *Config, files []FixtureFile, opt
 		return res, err
 	}
 	res.Diff = diff
-	if len(diff.Refusals) > 0 {
-		return res, fmt.Errorf("%w: %d differences need a hand-written change", ErrSyncRefused, len(diff.Refusals))
+	if n := len(diff.Refusals); n > 0 {
+		verb := "need"
+		if n == 1 {
+			verb = "needs"
+		}
+		return res, fmt.Errorf("%w: %s %s a hand-written change", ErrSyncRefused, plural(n, "difference"), verb)
 	}
 	if len(diff.Changes) == 0 {
 		return res, nil

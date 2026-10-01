@@ -196,6 +196,8 @@ func decodeAnyState(data []byte) (State, error) {
 			return decodeState(data[offset:])
 		case line == stateMarker || strings.HasPrefix(line, fileMarkerStart):
 			return decodeStateFormat1(data)
+		case strings.TrimSpace(line) == "":
+			// A blank line in the comment, which nothing reads.
 		case !strings.HasPrefix(line, "#"):
 			// The comment on top is over, and no field was in it.
 			return State{}, errNotState
@@ -205,7 +207,8 @@ func decodeAnyState(data []byte) (State, error) {
 	return State{}, errNotState
 }
 
-var errNotState = errors.New("this is not a state file bun-fixture-migrate wrote: the marker line is missing")
+var errNotState = errors.New("this is not a state file bun-fixture-migrate wrote: no \"# format:\" line follows " +
+	"the comment on top, nor the marker line of an older release")
 
 // ErrStateConflict is what DecodeState and ReadState return, wrapped, for a
 // merge that stopped in the state file, which it does on purpose when two

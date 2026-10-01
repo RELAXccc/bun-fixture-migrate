@@ -96,6 +96,10 @@ func TestResolveDSN(t *testing.T) {
 	if _, err := resolveDSN(""); err == nil {
 		t.Fatal("no DSN is an error")
 	}
+	if _, err := resolveDSN("env:"); err == nil || !strings.Contains(err.Error(), "write env:NAME") ||
+		strings.Contains(err.Error(), "variable ,") {
+		t.Fatalf("env: names no variable: %v", err)
+	}
 	if dsn, _ := resolveDSN("postgres://y"); dsn != "postgres://y" {
 		t.Fatal(dsn)
 	}
