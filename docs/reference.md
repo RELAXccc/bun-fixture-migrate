@@ -239,7 +239,7 @@ Exit 2 when a finding the policy makes an error, or a difference `generate` woul
 | 0 | done; for `check`, `status` and `plan`: nothing found. A finding the policy makes a warning is reported and is not a failure |
 | 1 | the command could not do its job: a bad flag, no connection, an unreadable file, output that could not be written, a plan that could not finish, nothing for `status` to compare the fixture files with |
 | 2 | refused: a difference that needs a hand-written migration, a finding the policy makes an error, a state `baseline` will not replace, a fixture migration the state file does not include (`generate`, `baseline`), a file `export` will not write |
-| 3 | found something: drift (`check`), a change no migration makes, a change left out, a migration not applied or out of order, a leftover lock (`status`), a migration that would fail or skip (`plan`), a problem in the migrations directory (`status`, `plan`) |
+| 3 | found something: drift (`check`), a change no migration makes, a change left out, a state file that does not read, a migration not applied or out of order, a leftover lock (`status`), a migration that would fail or skip (`plan`), a problem in the migrations directory or the state file's history of it (`status`, `plan`) |
 
 A pipeline can tell "the database drifted" (3) from "the check could not run" (1). Whatever the
 code, unless it is 0, the last line on standard error says why, starting with `bun-fixture-migrate:`.
@@ -400,7 +400,9 @@ ran. `after` names pending migrations that were not simulated and run before thi
 migration's `notes`, when there are any, say what its `result` and `error` do not: why the plan
 could not tell, or where the deploy can differ from the plan. The top-level `notes` say why a
 migration `-with-sql` would have run is in `not_simulated`. `problems` are those `status` reports in
-the migrations directory, each of which fails the plan. `rows_locked` is how many rows the fixture
+the migrations directory, each of which fails the plan: two migrations under one name, a generated
+file that does not read, a fixture migration the state file's history does not include, and the
+one it includes last gone from the directory. `rows_locked` is how many rows the fixture
 migrations wrote and held locked until the rollback, and `locked_seconds` how long the plan's
 transaction was open.
 

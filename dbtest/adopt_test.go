@@ -300,3 +300,41 @@ func TestPlanAsARoleThatCannotWrite(t *testing.T) {
 	a.run(3, "check", "-dsn", dsn("bfm_plan_readonly"))
 	a.run(0, "status", "-dsn", dsn("bfm_plan_reader"))
 }
+
+// plan fails on the problems status reports in the migrations directory,
+// the state file's history among them: a deploy of migrations that were not
+// generated one after another is no deploy to pass, however well each of
+// them plans.
+func TestPlanFailsOnWhatTheStateFileSaysOfTheDirectory(t *testing.T) {
+	a := newAdoption(t)
+	a.run(0, "scaffold", "-o", "fixture-migrate.yml", "-tables", "currencies,plans")
+	exported := func() string { a.run(0, "export"); return a.read("fixtures/fixture.yml") }()
+	a.run(0, "baseline")
+	a.write("fixtures/fixture.yml", strings.Replace(exported, "price_cents: 2500", "price_cents: 2600", 1))
+	a.run(0, "generate", "-name", "plan prices", "-at", "20261001100000")
+	a.run(0, "plan")
+	gen := filepath.Join(a.dir, "internal", "migrations", "20261001100000_fixture_plan_prices.go")
+	src := a.read("internal/migrations/20261001100000_fixture_plan_prices.go")
+
+	// Generated on another branch, against the same state.
+	other := filepath.Join(a.dir, "internal", "migrations", "20261001090000_fixture_other.go")
+	if err := os.WriteFile(other, []byte(strings.ReplaceAll(src, "20261001100000", "20261001090000")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := a.run(3, "plan")
+	if !strings.Contains(out, "20261001090000_fixture_other is a generated fixture migration whose changes the state file does not include") {
+		t.Fatal(out)
+	}
+	if err := os.Remove(other); err != nil {
+		t.Fatal(err)
+	}
+
+	// The migration the state includes last, deleted.
+	if err := os.Remove(gen); err != nil {
+		t.Fatal(err)
+	}
+	out = a.run(3, "plan", "-json")
+	if !strings.Contains(out, "the state file includes the changes of 20261001100000_fixture_plan_prices, which is not in") {
+		t.Fatal(out)
+	}
+}
