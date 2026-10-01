@@ -411,6 +411,46 @@ func TestTheAuditTableNeedsTheRightToCreateIt(t *testing.T) {
 	}
 }
 
+// A row-level security policy on the audit table that shows each role its own
+// rows: the deploy ran the Apply as one role, and the rollback runs as
+// another, which saw no Apply and reverted every change, including those the
+// Apply had found made. The audit table is checked with the set's tables.
+func TestRowLevelSecurityOnTheAuditTableStopsTheRun(t *testing.T) {
+	db := auditDB(t)
+	ctx := context.Background()
+	run(t, db,
+		`DO $$BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'bfm_auditor') THEN CREATE ROLE bfm_auditor; END IF; END$$`,
+		"GRANT USAGE ON SCHEMA public TO bfm_auditor",
+		"GRANT SELECT, INSERT, UPDATE, DELETE ON au_plans, au_translations TO bfm_auditor",
+		"GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO bfm_auditor",
+		"UPDATE au_plans SET price = 6 WHERE name = 'solo'")
+	set := auditedSet()
+	if err := fixtureapply.Apply(ctx, db, set, quiet()); err != nil {
+		t.Fatal(err)
+	}
+	run(t, db, "GRANT SELECT, INSERT ON bfm_audit_test TO bfm_auditor",
+		"ALTER TABLE bfm_audit_test ENABLE ROW LEVEL SECURITY",
+		"CREATE POLICY own_runs ON bfm_audit_test USING (applied_by = current_user) WITH CHECK (true)")
+	before := plans(t, db)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	run(t, tx, "SET LOCAL ROLE bfm_auditor")
+	err = fixtureapply.Revert(ctx, tx, set, quiet())
+	if err == nil || !strings.Contains(err.Error(), "row-level security is active on bfm_audit_test") ||
+		!strings.Contains(err.Error(), "would hide the runs a Revert follows") {
+		t.Fatalf("a policy on the audit table: %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if got := plans(t, db); got != before {
+		t.Fatalf("the Revert changed the database: %s -> %s", before, got)
+	}
+}
+
 // Translations at changed_row warn, prices at error: one model's edit is
 // kept, the other's fails the migration.
 func TestEachModelRunsUnderItsOwnPolicy(t *testing.T) {

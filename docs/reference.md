@@ -746,7 +746,9 @@ With `audit_table` set, a generated migration carries it as `fixturechange.Set.A
 made its changes and under the advisory lock the set holds. A run that fails rolls back and writes
 nothing. The table is created the first time, with comments saying what it is; that takes `CREATE`
 on its schema, and a role without it gets a sentence saying so, and nothing is changed. A table
-created by another role needs `SELECT` and `INSERT` granted to the role that migrates.
+created by another role needs `SELECT` and `INSERT` granted to the role that migrates. A row-level
+security policy that applies to that role on the audit table stops the run before it changes
+anything, as one on the set's tables does: hiding rows there would hide the runs a `Revert` follows.
 
 | Column | Type | |
 | --- | --- | --- |

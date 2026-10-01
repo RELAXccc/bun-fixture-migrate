@@ -455,11 +455,13 @@ func session(ctx context.Context, tx bun.IDB) (restore func(context.Context) err
 // that bun records as applied; a child table whose rows it hides lets a delete
 // cascade into rows nobody counted.
 //
-// It looks at the tables the set reads and writes, the seed guard table, and
-// the tables whose foreign keys point at a table the set deletes from. A table
-// that only a trigger writes into is not among them: the policy applies to the
-// trigger's rows as to any other write, which is what the trigger's author
-// meant. Turning row_security off would have made those writes fail instead.
+// It looks at the tables the set reads and writes, the seed guard table, the
+// tables whose foreign keys point at a table the set deletes from, and the
+// audit table once it exists: a policy hiding other roles' rows there would
+// have Revert find no Apply and revert every change. A table that only a
+// trigger writes into is not among them: the policy applies to the trigger's
+// rows as to any other write, which is what the trigger's author meant.
+// Turning row_security off would have made those writes fail instead.
 func rowSecurity(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool) error {
 	deletes := map[string]bool{}
 	for _, c := range set.Changes {
@@ -484,6 +486,9 @@ func rowSecurity(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert 
 	if set.SeedGuardTable != "" {
 		add(set.SeedGuardTable, false)
 	}
+	if set.AuditTable != "" {
+		add(set.AuditTable, false)
+	}
 	if len(rows) == 0 {
 		return nil
 	}
@@ -502,10 +507,23 @@ SELECT DISTINCT rel::text FROM (
 	if len(active) == 0 {
 		return nil
 	}
+	audit := ""
+	if set.AuditTable != "" {
+		q, _ := quoteIdent(set.AuditTable)
+		var on bool
+		if err := tx.QueryRowContext(ctx, "SELECT coalesce(row_security_active(to_regclass(?)), false)", q).
+			Scan(&on); err != nil {
+			return fmt.Errorf("look for row-level security on the audit table %s: %w", set.AuditTable, err)
+		}
+		if on {
+			audit = fmt.Sprintf(" On the audit table %s, a policy that hides rows would hide the runs a Revert "+
+				"follows, and the Revert would undo every change.", set.AuditTable)
+		}
+	}
 	return fmt.Errorf("%s: row-level security is active on %s for the role running the migration: a row-level "+
 		"security policy applies to it, which would hide rows from the change set or stop its changes, so nothing "+
-		"was changed. Run migrations as the tables' owner while they are not FORCE ROW LEVEL SECURITY, or as a "+
-		"role with BYPASSRLS", set.Name, strings.Join(active, ", "))
+		"was changed.%s Run migrations as the tables' owner while they are not FORCE ROW LEVEL SECURITY, or as a "+
+		"role with BYPASSRLS", set.Name, strings.Join(active, ", "), audit)
 }
 
 // privilege adds what to do to an error PostgreSQL raised because the role may
