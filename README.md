@@ -29,7 +29,7 @@ model lives in which table and which column is a reference. That is enough for a
 
 | | |
 | --- | --- |
-| [Using it with bun](docs/usage.md) | the deploy step, migrator settings, SQL migrations, several fixture files, admin UIs, tests, drivers, model idioms |
+| [Using it with bun](docs/usage.md) | the deploy step, migrator settings, SQL migrations, several fixture files, admin UIs, tests, use from Go, drivers, model idioms |
 | [Production runbook](docs/production.md) | the pipeline, and what to do when a migration fails, a change is skipped, drift is found, a state file conflicts |
 | [CI](docs/ci.md) | the GitHub Action and the GitLab CI templates |
 | [Fixture files](docs/fixture-files.md) | how a file is read, what each value means, what is refused, limits |

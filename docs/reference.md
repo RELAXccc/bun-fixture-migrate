@@ -352,7 +352,7 @@ With `-json`, standard output is the report and nothing else. A command that ref
 finds something (exit 3) prints its report all the same, then says why on standard error. One that
 could not do its job (exit 1) prints none, unless it got far enough to have one: a plan that could
 not finish, a sync that failed halfway. Each report is the encoding of what the
-[Go API](#the-go-packages) returns for the same call, so a program reading the command and one calling
+[Go API](#the-project) returns for the same call, so a program reading the command and one calling
 the library see the same thing.
 
 ### check output
@@ -569,7 +569,7 @@ transaction was open.
 | --- | --- |
 | `fixtureapply` | the run time generated migrations call, in the application's process |
 | `fixturechange` | the change-set types a generated migration is written in |
-| `fixturemigrate` (the module root) | everything the command does, as a library: configuration, snapshots, diff, render, `Sync` |
+| `fixturemigrate` (the module root) | everything the command does, as a library: a [project](#the-project) with a method per command, and the configuration, snapshots, diff and render under it |
 | `dbschema` | the catalog reader |
 
 `fixtureapply` needs bun and nothing else; it works under any `database/sql` PostgreSQL driver bun
@@ -599,10 +599,59 @@ in a savepoint inside it, which is how a migration that also does other work kee
 transaction. Only on the migrator's `*bun.DB` does a failure take back bun's record of the
 migration.
 
-`fixturemigrate.Compute(cfg, old, next)` diffs two snapshots into a `*Result`: `Changes` in the order
-they apply, `Refusals` that need a hand-written migration, and `Warnings` the policy lets a migration
-carry on past (a renumbered row under `id_drift: warn`). Only refusals stop a migration from being
-written.
+### The project
+
+`fixturemigrate.LoadProject(path)` reads a configuration and the fixture files it names, the paths in
+it relative to it, as every command does; `NewProject(cfg, dir)` takes a configuration built in code.
+A `*Project` has a method per command, which does what the command does, with the same checks and
+the same refusals, and returns a result that, encoded as JSON, is what the command prints with
+`-json`. [Use from Go](usage.md#use-from-go) shows them at work.
+
+| Method | Returns |
+| --- | --- |
+| `Check(ctx, db)` | `*CheckReport`: `Agree`, the `Diff` with the database on the left, the `Findings`; `Lines()` is the report as `check` prints it |
+| `Export(ctx, db, ExportOptions{AllColumns})` | `*Exported`: the `Files` export would write, the `Findings`, the comment lines each drops; `Write()` writes them over the fixture files |
+| `Generate(ctx, db, GenerateOptions{...})` | `*Generated`: the `Diff`, the migration's `ID`, `Path` and `Source`, the `State` that goes with it, the findings, the warnings, the state's history; `Write()` writes the migration and the state file |
+| `Baseline(ctx, db, BaselineOptions{From, Old, Force})` | `*Baselined`: the `State` to record, and why it is refused when it is; `Write()` writes it |
+| `Status(ctx, db, StatusOptions{RequireApplied, StrictOrder})` | `*StatusReport`, plain data; `Failures` is its verdict |
+| `Sync(ctx, db, SyncOptions{DryRun, Logf})` | `*SyncReport`: `Sync` below, on the project's files |
+
+`GenerateOptions` has a field for each flag of `generate`: `Name`, `At`, `Base`, `Old`, `FromDB`,
+`Out`, `AllowPartial`, `NoLint`, `DryRun`. `Files()`, `FixturePaths()`, `OutDir()` and
+`StatePath()` say what the project read and where it writes; `ReadFiles()` reads the fixture files
+again.
+
+The library connects to nothing on its own: `db` is the `bun.IDB` the program hands it. `nil` is
+offline where the command can be: `Generate` without the lint, `Baseline` without asking about
+spelling, `Status` without what was applied. Given a `*bun.DB` or a `bun.Conn`, a method reads in a
+`REPEATABLE READ, READ ONLY` transaction of its own, as the command does; given a `bun.Tx`, in that
+transaction, under a savepoint it rolls back, which leaves the transaction and its settings as they
+were. `fixturemigrate.ReadOnly(ctx, db, fn)` is that read, for a program that builds its own
+pipeline from the functions below.
+
+A refusal, what the command exits 2 on, is a `*fixturemigrate.RefusedError`: its `Message` says
+what to do, and its `Refusals`, `Findings` and `Problems` what was refused. The method returns its
+result with it, which says what was refused; with any other error the result is what was found
+before it, or nil.
+
+| `errors.Is(err, …)` | |
+| --- | --- |
+| `ErrRefused` | every refusal |
+| `ErrFindings` | a finding the policy makes an error |
+| `ErrLineage` | a fixture migration the state file's history does not include, or the one it includes last gone from the directory |
+| `ErrUnmigrated` | `Baseline` without `Force`: changes no migration makes |
+| `ErrSyncRefused` | a refusal of `Sync`, the package function's too |
+| `ErrStateConflict` | a state file holding git's conflict markers |
+| `ErrNameRequired` | `Generate` with a migration to write and no `Name`; not a refusal |
+
+Under the project, `fixturemigrate.Compute(cfg, old, next)` diffs two snapshots into a `*Result`:
+`Changes` in the order they apply, `Refusals` that need a hand-written migration, and `Warnings` the
+policy lets a migration carry on past (a renumbered row under `id_drift: warn`). Only refusals stop
+a migration from being written.
+
+`fixturemigrate.Sync(ctx, db, cfg, files, SyncOptions{DryRun, Logf})` is the `sync` command on
+files the program read, returning a `*SyncResult` with the diff, the findings and the outcomes;
+`ErrSyncRefused` wraps a refusal. See [tests and development servers](usage.md#tests-and-development-servers).
 
 ### Generated files over time
 
@@ -621,7 +670,3 @@ format: a file that uses one does not compile against an older `fixtureapply`, w
 enough. Only a change to what an existing field means raises it, and then an older `fixtureapply`
 refuses the file, and an older `status` or `plan` cannot read it, with a sentence saying to upgrade
 `github.com/RELAXccc/bun-fixture-migrate`.
-
-`fixturemigrate.Sync(ctx, db, cfg, files, SyncOptions{DryRun, Logf})` is the `sync` command,
-returning a `*SyncResult` with the diff, the findings and the outcomes; `ErrSyncRefused` wraps a
-refusal. See [tests and development servers](usage.md#tests-and-development-servers).

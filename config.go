@@ -15,6 +15,9 @@
 //
 // What it will not do is guess. Anything ambiguous comes back as a refusal with
 // the model, the row and a reason, and you write that one migration yourself.
+//
+// LoadProject is where a program starts: a Project runs every command of
+// bun-fixture-migrate from Go, with the command's checks and refusals.
 package fixturemigrate
 
 import (
