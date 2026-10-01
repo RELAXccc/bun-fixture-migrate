@@ -3,15 +3,13 @@ package main
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
-	"regexp"
 	"strings"
-
-	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
-	"github.com/RELAXccc/bun-fixture-migrate/internal/pgerr"
+	"sync"
 
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
@@ -37,27 +35,11 @@ func resolveDSN(dsn string) (string, error) {
 	return dsn, nil
 }
 
-// openDB connects to PostgreSQL.
-//
-// pgdriver.WithDSN panics on a DSN it cannot read, with the DSN in the panic,
-// and url.Parse puts the whole DSN, password and all, into its error. So the
-// DSN is checked here first, a panic's text is never shown, and every message
-// this function returns has the password masked, wherever the DSN put it: a
-// typo in DATABASE_URL must end up as a sentence in a deploy log, not as a
-// stack trace or a leaked password.
+// openDB connects to PostgreSQL, and fails at once when it cannot.
 func openDB(ctx context.Context, dsn string) (*bun.DB, error) {
-	u, err := url.Parse(dsn)
-	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql" && u.Scheme != "unix") {
-		return nil, errors.New("the database DSN is not a URL pgdriver can read; write it as " +
-			"postgres://user:password@host:5432/dbname?sslmode=verify-full (a libpq \"host=... dbname=...\" " +
-			"string is not supported)")
-	}
-	if u.Scheme == "unix" && u.Path == "" {
-		return nil, fmt.Errorf("the database DSN %s is a unix socket DSN without the socket's path", redact(u))
-	}
-	connector, err := newConnector(dsn)
+	u, connector, err := connectorFor(dsn)
 	if err != nil {
-		return nil, fmt.Errorf("pgdriver cannot use the database DSN %s", redact(u))
+		return nil, err
 	}
 	db := bun.NewDB(sql.OpenDB(connector), pgdialect.New())
 	if err := db.PingContext(ctx); err != nil {
@@ -66,6 +48,76 @@ func openDB(ctx context.Context, dsn string) (*bun.DB, error) {
 	}
 	return db, nil
 }
+
+// connectorFor is the connector of a DSN.
+//
+// pgdriver.WithDSN panics on a DSN it cannot read, with the DSN in the panic,
+// and url.Parse puts the whole DSN, password and all, into its error. So the
+// DSN is checked here first, a panic's text is never shown, and every message
+// this function returns has the password masked, wherever the DSN put it: a
+// typo in DATABASE_URL must end up as a sentence in a deploy log, not as a
+// stack trace or a leaked password.
+func connectorFor(dsn string) (*url.URL, *pgdriver.Connector, error) {
+	u, err := url.Parse(dsn)
+	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql" && u.Scheme != "unix") {
+		return nil, nil, errors.New("the database DSN is not a URL pgdriver can read; write it as " +
+			"postgres://user:password@host:5432/dbname?sslmode=verify-full (a libpq \"host=... dbname=...\" " +
+			"string is not supported)")
+	}
+	if u.Scheme == "unix" && u.Path == "" {
+		return nil, nil, fmt.Errorf("the database DSN %s is a unix socket DSN without the socket's path", redact(u))
+	}
+	connector, err := newConnector(dsn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("pgdriver cannot use the database DSN %s", redact(u))
+	}
+	return u, connector, nil
+}
+
+// lazyDB is the configured database, connected the first time a query needs
+// it. A command hands it to the library, which reads the fixture files and
+// the state before it asks the database anything, so what is wrong with them
+// is said before a database that cannot be reached; and baseline, which asks
+// the database only about a difference in spelling, does not connect without
+// one. Whatever stops the connection, an unset variable or an unreachable
+// host, is the error of that first query, as a connectError.
+func lazyDB(dsn string) *bun.DB {
+	return bun.NewDB(sql.OpenDB(&lazyConnector{dsn: dsn}), pgdialect.New())
+}
+
+// connectError is a database the command could not connect to.
+type connectError struct{ err error }
+
+func (e connectError) Error() string { return e.err.Error() }
+func (e connectError) Unwrap() error { return e.err }
+
+type lazyConnector struct {
+	dsn       string
+	once      sync.Once
+	u         *url.URL
+	connector *pgdriver.Connector
+	err       error
+}
+
+func (c *lazyConnector) Connect(ctx context.Context) (driver.Conn, error) {
+	c.once.Do(func() {
+		dsn, err := resolveDSN(c.dsn)
+		if err == nil {
+			c.u, c.connector, err = connectorFor(dsn)
+		}
+		c.err = err
+	})
+	if c.err != nil {
+		return nil, connectError{c.err}
+	}
+	conn, err := c.connector.Connect(ctx)
+	if err != nil {
+		return nil, connectError{fmt.Errorf("connect to %s: %s", redact(c.u), scrub(err.Error(), c.u))}
+	}
+	return conn, nil
+}
+
+func (c *lazyConnector) Driver() driver.Driver { return pgdriver.NewDriver() }
 
 func newConnector(dsn string) (c *pgdriver.Connector, err error) {
 	defer func() {
@@ -127,59 +179,4 @@ func scrub(msg string, u *url.URL) string {
 		}
 	}
 	return msg
-}
-
-// readOnly runs fn inside one REPEATABLE READ, READ ONLY transaction, and
-// rolls it back.
-//
-// READ ONLY is PostgreSQL's promise, not this tool's: export, check, status
-// and scaffold write nothing even when a model's where clause calls a function
-// that would. REPEATABLE READ makes every query in fn see the same snapshot,
-// so a row inserted between reading two tables cannot turn up as a reference
-// to a row that is not there.
-//
-// row_security is off, so a role a row-level security policy limits gets an
-// error rather than the rows the policy lets through. Read through such a
-// policy, master data is missing rows nothing says are missing: an export
-// writes a file without them, and a migration generated from it deletes them
-// everywhere else.
-func readOnly(ctx context.Context, db *bun.DB, fn func(tx bun.Tx) error) error {
-	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	var readOnly string
-	if err := tx.QueryRowContext(ctx, "SHOW transaction_read_only").Scan(&readOnly); err != nil {
-		return err
-	}
-	if readOnly != "on" {
-		return errors.New("the database did not start a read-only transaction; refusing to go on")
-	}
-	if err := fixturemigrate.PrepareSession(ctx, tx); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, "SELECT set_config('row_security', 'off', true)"); err != nil {
-		return err
-	}
-	return rowSecurity(fn(tx))
-}
-
-// rlsTable is the table PostgreSQL names when row_security is off and a
-// policy would filter a query.
-var rlsTable = regexp.MustCompile(`row-level security policy for table "(.*)"`)
-
-// rowSecurity turns PostgreSQL's refusal to read past a row-level security
-// policy into what to do about it.
-func rowSecurity(err error) error {
-	if pgerr.State(err) != pgerr.InsufficientPrivilege {
-		return err
-	}
-	m := rlsTable.FindStringSubmatch(pgerr.Message(err))
-	if m == nil {
-		return err
-	}
-	return fmt.Errorf("row-level security hides rows of %s from this role, so what it reads is not all the "+
-		"master data; connect as a role that bypasses row-level security (BYPASSRLS) or owns the table "+
-		"without FORCE ROW LEVEL SECURITY", m[1])
 }

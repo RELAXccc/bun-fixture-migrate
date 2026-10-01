@@ -156,7 +156,7 @@ func TestStatusFailsOnAChangeNoMigrationMakes(t *testing.T) {
 	}
 
 	code, out, _ = call(t, "status", "-config", cfg, "-offline", "-json")
-	var report statusReport
+	var report fixturemigrate.StatusReport
 	if err := json.Unmarshal([]byte(out), &report); err != nil || code != 0 {
 		t.Fatalf("exit %d, %v:\n%s", code, err, out)
 	}
@@ -293,7 +293,7 @@ func TestWhatAPartialGenerateLeftOutStaysVisible(t *testing.T) {
 		t.Fatalf("a refused change has to stay visible: exit %d\n%s%s", code, out, errs)
 	}
 	_, out, _ = call(t, "status", "-config", cfg, "-offline", "-json")
-	var report statusReport
+	var report fixturemigrate.StatusReport
 	if err := json.Unmarshal([]byte(out), &report); err != nil || len(report.LeftOut) != 1 ||
 		!strings.Contains(report.LeftOut[0], "renamed from") {
 		t.Fatalf("%v\n%s", err, out)
@@ -417,7 +417,7 @@ func TestTwoBranchesGeneratingFromOneState(t *testing.T) {
 		"--ours": "20261001100000_fixture_older"} {
 		gitIn(t, dir, false, "checkout", side, "--", state)
 		code, out, errs := call(t, "status", "-config", cfg, "-offline", "-json")
-		var report statusReport
+		var report fixturemigrate.StatusReport
 		if err := json.Unmarshal([]byte(out), &report); err != nil || code != 3 ||
 			strings.Join(report.NotInState, ",") != missing {
 			t.Fatalf("%s: exit %d, %v\n%s%s", side, code, err, out, errs)
@@ -467,22 +467,25 @@ func TestTwoBranchesGeneratingFromOneState(t *testing.T) {
 	}
 }
 
-// A pending migration named before one the database applied is marked, and
-// so is the lock a migrator that died left behind.
-func TestStatusMarksOrderAndLock(t *testing.T) {
+// A pending migration named before one the database applied is shown as out
+// of order, and so is the lock a migrator that died left behind. (The
+// library's tests mark them.)
+func TestStatusPrintsOrderAndLock(t *testing.T) {
 	at := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
-	r := &statusReport{Directory: "migrations", Database: &databaseInfo{Table: "bun_migrations", LocksTable: "bun_migration_locks", Locked: true},
-		Migrations: []migrationInfo{{ID: "1_a", Name: "1"}, {ID: "2_b", Name: "2"}, {ID: "3_c", Name: "3"}, {ID: "4_d", Name: "4"}}}
-	markApplied(r, map[string]fixturemigrate.Applied{"1": {Name: "1", GroupID: 1, MigratedAt: at},
-		"3": {Name: "3", GroupID: 2, MigratedAt: at}, "9": {Name: "9", GroupID: 2, MigratedAt: at}})
-	if r.Database.NewestApplied != "3" || !r.Migrations[1].OutOfOrder || r.Migrations[3].OutOfOrder ||
-		r.Migrations[0].OutOfOrder || strings.Join(r.Database.NotInDirectory, ",") != "9" {
-		t.Fatalf("%+v %+v", r.Database, r.Migrations)
-	}
+	r := &fixturemigrate.StatusReport{Directory: "migrations", Database: &fixturemigrate.StatusDatabase{
+		Table: "bun_migrations", LocksTable: "bun_migration_locks", Locked: true, NewestApplied: "3",
+		NotInDirectory: []string{"9"}},
+		Migrations: []fixturemigrate.StatusMigration{
+			{ID: "1_a", Name: "1", Applied: &fixturemigrate.StatusApplied{Group: 1, At: at}},
+			{ID: "2_b", Name: "2", OutOfOrder: true},
+			{ID: "3_c", Name: "3", Applied: &fixturemigrate.StatusApplied{Group: 2, At: at}},
+			{ID: "4_d", Name: "4"}},
+		Notes: []string{"2_b is pending and sorts before 3, which this database applied"}}
 	var out strings.Builder
 	printStatus(streams{stdout: &out}, r)
 	text := strings.Join(strings.Fields(out.String()), " ")
 	for _, want := range []string{"pending 2_b out of order: runs after 3", "2_b is pending and sorts before 3",
+		"applied 1_a group 1, 2026-10-01 00:00:00", "recorded in bun_migrations, not in this directory: 9",
 		"locked: bun_migration_locks holds bun's lock on bun_migrations", "DELETE FROM bun_migration_locks WHERE table_name = 'bun_migrations'"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q in\n%s", want, out.String())
@@ -541,58 +544,6 @@ func TestStatusAndBaselineStopOnAFinding(t *testing.T) {
 	}
 }
 
-// Without a database, every row that writes a value only the column's type can
-// settle is refused; status says so once per model and column rather than
-// once per row, and leaves every other refusal as it is.
-func TestStatusGroupsValuesOnlyTheDatabaseCanSettle(t *testing.T) {
-	cfg, _ := project(t, oldFixture, oldFixture)
-	conf, err := fixturemigrate.LoadConfig(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	snap := func(text string) *fixturemigrate.Snapshot {
-		doc, err := fixturemigrate.ParseDoc([]byte(text))
-		if err != nil {
-			t.Fatal(err)
-		}
-		s, err := fixturemigrate.FixtureSnapshot(conf, doc, "f")
-		if err != nil {
-			t.Fatal(err)
-		}
-		return s
-	}
-	head := strings.Replace(oldFixture, "name: team", "name: crew", 1)
-	for _, name := range []string{"a", "b", "c"} {
-		head += "    - name: " + name + "\n      currency_id: '{{ $.Currency.eur.ID }}'\n      price_cents: 29.00\n"
-	}
-	res, err := fixturemigrate.Compute(conf, snap(oldFixture), snap(head))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(res.Refusals) != 4 {
-		t.Fatalf("expected a rename and three undecided values, got %v", res.Refusals)
-	}
-	got := groupUndecided(res.Refusals)
-	if len(got) != 2 || !strings.Contains(got[0], "renamed") ||
-		!strings.HasPrefix(got[1], "Plan.price_cents is written like 29.00 in 3 rows, Plan/name=a the first of them, which ") ||
-		!strings.Contains(got[1], "with the database configured") {
-		t.Fatalf("got %q", got)
-	}
-	// One row reads as it did.
-	if one := groupUndecided(res.Refusals[:1]); len(one) != 1 {
-		t.Fatalf("got %q", one)
-	}
-	var single []fixturemigrate.Refusal
-	for _, r := range res.Refusals {
-		if strings.Contains(r.Key, "name=b") {
-			single = append(single, r)
-		}
-	}
-	if one := groupUndecided(single); len(one) != 1 || one[0] != single[0].String() {
-		t.Fatalf("got %q, want %q", one, single[0].String())
-	}
-}
-
 // Deleting the migration the state file includes last loses its changes: the
 // state, which generate diffs against, says they are made, and nothing makes
 // them. Every command built on the state says so, instead of "nothing
@@ -626,7 +577,7 @@ func TestADeletedMigrationTheStateIncludesIsFound(t *testing.T) {
 		t.Fatalf("generate -dry-run warns: exit %d\n%s%s", code, out, errs)
 	}
 	code, out, errs = call(t, "status", "-config", cfg, "-offline", "-json")
-	var report statusReport
+	var report fixturemigrate.StatusReport
 	if err := json.Unmarshal([]byte(out), &report); err != nil || code != 3 ||
 		!strings.Contains(strings.Join(report.Problems, "\n"), want) {
 		t.Fatalf("status: exit %d, %v\n%s%s", code, err, out, errs)
@@ -807,7 +758,7 @@ func TestStatusSaysAStateFileDoesNotRead(t *testing.T) {
 			t.Errorf("%s: exit %d\n%s%s", name, code, out, errs)
 		}
 		_, out, _ = call(t, "status", "-config", cfg, "-offline", "-json")
-		var report statusReport
+		var report fixturemigrate.StatusReport
 		if err := json.Unmarshal([]byte(out), &report); err != nil || report.State == nil || !report.State.Exists ||
 			report.State.Error == "" || strings.HasPrefix(report.State.Error, statePath) {
 			t.Errorf("%s: %v\n%s", name, err, out)

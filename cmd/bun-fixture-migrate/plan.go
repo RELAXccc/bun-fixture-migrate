@@ -439,18 +439,9 @@ func plan(o streams, args []string) error {
 		// not include, or the one it includes last gone from the directory.
 		// Each is a deploy whose migrations were not generated one after
 		// another, however well each of them plans.
-		if s.statePath != "" {
-			if state, err := fixturemigrate.ReadState(s.statePath); err == nil {
-				for _, m := range unaccounted(&state, ms.Fixtures()) {
-					report.Problems = append(report.Problems, lineageProblem(&state, m))
-				}
-				if gone := coveredGone(&state, ms.List, s.outDir, s.statePath); gone != "" {
-					report.Problems = append(report.Problems, gone)
-				}
-			}
-		}
+		report.Problems = append(report.Problems, s.p.LineageProblems(ms)...)
 		var applied map[string]fixturemigrate.Applied
-		err = readOnly(o.ctx, db, func(tx bun.Tx) error {
+		err = fixturemigrate.ReadOnly(o.ctx, db, func(tx bun.Tx) error {
 			applied, _, err = fixturemigrate.ReadApplied(o.ctx, tx, s.cfg.MigrationsTable)
 			return err
 		})

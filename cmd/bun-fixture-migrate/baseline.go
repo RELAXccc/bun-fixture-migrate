@@ -1,14 +1,11 @@
 package main
 
 import (
-	"bytes"
 	"errors"
 	"flag"
 	"fmt"
-	"os"
 
 	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
-	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
 
 	"github.com/uptrace/bun"
 )
@@ -39,214 +36,60 @@ func baseline(o streams, args []string) error {
 	if *rev != "" && *oldPath != "" {
 		return fmt.Errorf("-from and -old name two different files; pass one of them")
 	}
-	var files []fixturemigrate.FixtureFile
-	source := s.cfg.FixtureLabel()
+	// The database is asked only about a difference the files alone cannot
+	// settle, and connected to only then.
+	var db bun.IDB
+	if !*offline && s.cfg.Database != "" {
+		conn := s.database()
+		defer conn.Close()
+		db = conn
+	}
+	b, err := s.p.Baseline(o.ctx, db, fixturemigrate.BaselineOptions{From: *rev, Old: *oldPath, Force: *force})
+	if b == nil {
+		return err
+	}
+	var refusal *fixturemigrate.RefusedError
+	refused := errors.As(err, &refusal)
 	switch {
-	case *rev != "":
-		files, err = s.gitFiles(*rev)
-		source = *rev + ":" + source
-	case *oldPath != "":
-		// The file stands in for the fixture file, and the state records it
-		// under the fixture file's path: the path of a copy in /tmp means
-		// nothing to the next generate.
-		if len(s.cfg.Fixtures) != 1 {
-			return fmt.Errorf("-old records one file, and the configuration has %d fixture files: export them in "+
-				"place, run baseline, then take them back with git checkout -- <the fixture files>",
-				len(s.cfg.Fixtures))
+	case !refused:
+	case len(refusal.Problems) > 0:
+		// Fixture migrations generated against another state.
+		for _, p := range refusal.Problems {
+			fmt.Fprintln(o.stderr, "refused:", p)
 		}
-		var data []byte
-		data, err = os.ReadFile(*oldPath)
-		files = []fixturemigrate.FixtureFile{{Path: s.cfg.Fixtures[0], Data: data}}
-		source = *oldPath
-	default:
-		files, _, err = s.readFixture()
+	case errors.Is(err, fixturemigrate.ErrLineage):
+		for _, id := range b.NotInState {
+			fmt.Fprintln(o.stdout, "not in the state:", id)
+		}
+	case errors.Is(err, fixturemigrate.ErrUnmigrated) && b.Diff == nil:
+		for _, line := range b.LeftOut {
+			fmt.Fprintln(o.stdout, "left out:", line)
+		}
+	}
+	if b.Diff != nil {
+		for _, line := range b.Diff.Summary() {
+			fmt.Fprintln(o.stdout, line)
+		}
+		for _, r := range b.Diff.Refusals {
+			fmt.Fprintln(o.stdout, r.String())
+		}
+		if b.Respelled {
+			fmt.Fprintf(o.stdout, "%s differs from the state only in how values are written\n", b.Recorded)
+		}
+	}
+	if errors.Is(err, fixturemigrate.ErrFindings) {
+		printFindings(o, refusal.Findings)
 	}
 	if err != nil {
 		return err
 	}
-	// A revision before the fixture files existed holds nothing, and a state
-	// of nothing says the databases hold no master data: every row would be
-	// an insert to the next generate.
-	if *rev != "" {
-		empty := true
-		for _, f := range files {
-			empty = empty && len(bytes.TrimSpace(f.Data)) == 0
-		}
-		if empty {
-			return exitError{2, fmt.Sprintf("%s is missing or empty as of %s, so there is nothing to record; name "+
-				"the revision whose fixture files the migrations leave a database holding", s.cfg.FixtureLabel(), *rev)}
-		}
-	}
-	next, err := s.snapshotOf(files, source)
-	if err != nil {
-		return err
-	}
-	ms, err := s.migrations()
-	if err != nil {
-		return err
-	}
-	fixtures := ms.Fixtures()
-
-	// A conflicted state file is two histories, and replacing it with -force
-	// would drop one of them without a word, the lineage check with it: one
-	// side is taken first, and then baseline sees what that side says.
-	var prev *fixturemigrate.State
-	current, err := fixturemigrate.ReadState(s.statePath)
-	switch {
-	case errors.Is(err, fixturemigrate.ErrNoState):
-	case errors.Is(err, fixturemigrate.ErrStateConflict):
-		return exitError{2, fmt.Sprintf("%v; baseline does not replace a conflicted state file, even with -force: "+
-			"take one side first, git checkout --ours -- %s or git checkout --theirs -- %s",
-			err, s.statePath, s.statePath)}
-	case err != nil:
-		if !*force {
-			return exitError{2, fmt.Sprintf("%v; pass -force to replace it", err)}
-		}
-	default:
-		prev = &current
-	}
-	// The migration the state says it includes last is gone, so what the
-	// state says is made, nothing makes; a baseline would make that final.
-	if prev != nil && s.outDir != "" {
-		if gone := coveredGone(prev, ms.List, s.outDir, s.statePath); gone != "" {
-			return exitError{2, gone + "; nothing written"}
-		}
-	}
-
-	// The history. A fixture migration generated on another branch cannot be
-	// recorded as included: its guards expect rows as they were before the
-	// migrations of this branch, so it has to be generated again. One written
-	// by hand is the reason -force exists.
-	covers, base := lineageOf(prev, fixtures)
-	if prev != nil {
-		var byHand []string
-		generated := 0
-		for _, m := range unaccounted(prev, fixtures) {
-			if generatedFile(m) {
-				fmt.Fprintln(o.stderr, "refused:", lineageProblem(prev, m))
-				generated++
-				continue
-			}
-			byHand = append(byHand, m.ID())
-		}
-		if generated > 0 {
-			return exitError{2, fmt.Sprintf("%s generated against another state, nothing written; "+
-				"baseline cannot make up for that, generating again does", plural(generated, "fixture migration"))}
-		}
-		if len(byHand) > 0 {
-			if !*force {
-				for _, id := range byHand {
-					fmt.Fprintln(o.stdout, "not in the state:", id)
-				}
-				return exitError{2, fmt.Sprintf("%s the state file does not include; pass -force if you wrote "+
-					"them by hand and the fixture file holds what they do", plural(len(byHand), "fixture migration"))}
-			}
-			covers, base = newestFixture(fixtures), newestFixture(fixtures)
-		}
-		if len(prev.LeftOut) > 0 && !*force {
-			for _, line := range prev.LeftOut {
-				fmt.Fprintln(o.stdout, "left out:", line)
-			}
-			return exitError{2, fmt.Sprintf("the state records %s generate left out, which no migration makes yet. "+
-				"Write their migration by hand, then pass -force", plural(len(prev.LeftOut), "change"))}
-		}
-	}
-
-	switch {
-	case prev == nil:
-	case fixturemigrate.SameFiles(prev.Files, files) && len(prev.LeftOut) == 0 && covers == prev.Covers:
-		if err := s.refuseFindings(o, next); err != nil {
-			return err
-		}
-		fmt.Fprintf(o.stdout, "%s already records %s\n", s.statePath, source)
+	if b.Unchanged {
+		fmt.Fprintf(o.stdout, "%s already records %s\n", b.StatePath, b.Recorded)
 		return nil
-	case *force:
-	default:
-		before, err := s.snapshotOf(prev.Files, "the state file")
-		if err != nil {
-			return err
-		}
-		n, respelled, err := s.baselineDiff(o, before, next, *offline)
-		if err != nil {
-			return err
-		}
-		if n > 0 {
-			return exitError{2, fmt.Sprintf(
-				"baseline would record %s as migrated with no migration to make them. Generate one for them, "+
-					"or pass -force if a migration you wrote by hand covers them", plural(n, "change"))}
-		}
-		if respelled {
-			fmt.Fprintf(o.stdout, "%s differs from the state only in how values are written\n", source)
-		}
 	}
-	if err := s.refuseFindings(o, next); err != nil {
+	if _, err := b.Write(); err != nil {
 		return err
 	}
-	state := fixturemigrate.State{Files: files, Migration: "baseline", Covers: covers, Base: base}
-	if err := fixturemigrate.WriteState(s.statePath, state); err != nil {
-		return err
-	}
-	fmt.Fprintf(o.stdout, "wrote %s: generate now diffs against %s\n", s.statePath, source)
+	fmt.Fprintf(o.stdout, "wrote %s: generate now diffs against %s\n", b.StatePath, b.Recorded)
 	return nil
-}
-
-// baselineDiff counts the changes from the state to the files baseline is
-// asked to record, and prints them. A difference the files alone cannot
-// settle, such as 1.10 against 1.1, is asked of the database's column types
-// when one is configured, the way generate asks: as a number it is no
-// change, and refusing it would leave the state behind for good. respelled
-// is true when the database settled every difference that way.
-func (s *setup) baselineDiff(o streams, before, next *fixturemigrate.Snapshot, offline bool) (n int, respelled bool, err error) {
-	res, err := fixturemigrate.Compute(s.cfg, before, next)
-	if err != nil {
-		return 0, false, err
-	}
-	if len(res.Changes)+len(res.Refusals) > 0 && !offline && s.cfg.Database != "" {
-		db, err := s.connect(o.ctx)
-		if err != nil {
-			return 0, false, err
-		}
-		defer db.Close()
-		err = readOnly(o.ctx, db, func(tx bun.Tx) error {
-			tables, err := dbschema.Load(o.ctx, tx, s.cfg.Schemas()...)
-			if err != nil {
-				return err
-			}
-			if err := canonical(o, tx, s.cfg, tables, next, before); err != nil {
-				return err
-			}
-			res, err = fixturemigrate.Compute(s.cfg, before, next)
-			return err
-		})
-		if err != nil {
-			return 0, false, err
-		}
-		respelled = len(res.Changes)+len(res.Refusals) == 0
-	}
-	for _, line := range res.Summary() {
-		fmt.Fprintln(o.stdout, line)
-	}
-	for _, r := range res.Refusals {
-		fmt.Fprintln(o.stdout, r.String())
-	}
-	return len(res.Changes) + len(res.Refusals), respelled, nil
-}
-
-// refuseFindings stops a baseline of files with a finding the policy makes an
-// error, such as two rows sharing a key: generate refuses to migrate them, and
-// a state that records them only moves the refusal to the next change.
-func (s *setup) refuseFindings(o streams, snap *fixturemigrate.Snapshot) error {
-	mode, findings := s.cfg.Worst(snap.Findings)
-	if mode != fixturemigrate.ModeError {
-		return nil
-	}
-	n := 0
-	for _, f := range findings {
-		fmt.Fprintln(o.stderr, string(f.Kind)+":", f.String())
-		if s.cfg.FindingMode(f.Kind) == fixturemigrate.ModeError {
-			n++
-		}
-	}
-	return exitError{2, fmt.Sprintf("%s in the fixture file that the policy makes errors, nothing written. "+
-		"Fix them, or set the policy to warn", plural(n, "finding"))}
 }
