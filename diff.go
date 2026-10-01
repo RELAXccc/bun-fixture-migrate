@@ -1148,7 +1148,12 @@ func tablesFor(cfg *Config, changes []fixturechange.Change) fixturechange.Tables
 	out := fixturechange.Tables{}
 	add := func(model string, referenced bool) {
 		m := cfg.Models[model]
-		t := fixturechange.Table{Name: m.Table, ID: m.ID, Serial: m.Serial, Cascade: m.Deletes == DeleteCascade}
+		t := fixturechange.Table{
+			Name:    cfg.RunTimeTable(m.Table),
+			ID:      m.ID,
+			Serial:  m.Serial,
+			Cascade: m.Deletes == DeleteCascade,
+		}
 		if referenced {
 			t.Key = m.Ref
 		} else if have, ok := out[model]; ok {

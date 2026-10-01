@@ -453,6 +453,37 @@ func (c *Config) QualifiedTable(m *Model) string {
 	return c.Schema + "." + m.Table
 }
 
+// RunTimeTable is how a change set names a table: as the configuration
+// writes it when the default schema is public, and qualified with the
+// default schema otherwise. A migration runs on the application's own
+// connection, whose search_path nothing here can vouch for: a table of schema
+// app named "roles" there is not found, or a public.roles is found instead.
+// Keeping public tables unqualified keeps the migrations generated before
+// this the same.
+func (c *Config) RunTimeTable(table string) string {
+	if strings.Contains(table, ".") || c.Schema == "" || c.Schema == "public" {
+		return table
+	}
+	return c.Schema + "." + table
+}
+
+// Schemas lists every schema the configuration names: the default one first,
+// then, in name order, any other a model's table is qualified with. A command
+// reading the catalog reads all of them; reading the default one alone finds
+// no table for a model kept elsewhere.
+func (c *Config) Schemas() []string {
+	seen := map[string]bool{c.Schema: true}
+	var others []string
+	for _, name := range c.ModelNames() {
+		if i := strings.IndexByte(c.Models[name].Table, '.'); i > 0 && !seen[c.Models[name].Table[:i]] {
+			seen[c.Models[name].Table[:i]] = true
+			others = append(others, c.Models[name].Table[:i])
+		}
+	}
+	sort.Strings(others)
+	return append([]string{c.Schema}, others...)
+}
+
 // DependencyOrder sorts the models so a model comes after everything it points
 // at, which is the order a fixture file has to be written in for dbfixture to
 // resolve its references. A cycle is reported rather than broken: only you can

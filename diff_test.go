@@ -1007,3 +1007,26 @@ func TestTwoRowsSharingAnIDAreReportedAndNotTakenForARename(t *testing.T) {
 		}
 	}
 }
+
+// A change set names a table qualified with the configured schema, unless
+// that is public: the application's connection may not look anywhere else.
+func TestAChangeSetNamesItsTablesInTheConfiguredSchema(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Schema = "app"
+	cfg.Models["Currency"].Table = "money.currencies"
+	res := computeWith(t, cfg, base, replace(t, base, "      price_cents: 2000\n", "      price_cents: 2500\n"))
+	if got := res.Tables["Plan"].Name; got != "app.plans" {
+		t.Fatalf("Plan is in %q", got)
+	}
+	if got := cfg.RunTimeTable(cfg.Models["Currency"].Table); got != "money.currencies" {
+		t.Fatalf("Currency is in %q", got)
+	}
+	if got := strings.Join(cfg.Schemas(), ","); got != "app,money" {
+		t.Fatalf("schemas %s", got)
+	}
+	public := testConfig(t)
+	res = computeWith(t, public, base, replace(t, base, "      price_cents: 2000\n", "      price_cents: 2500\n"))
+	if got := res.Tables["Plan"].Name; got != "plans" {
+		t.Fatalf("a public table stays as written, got %q", got)
+	}
+}

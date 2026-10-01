@@ -181,7 +181,7 @@ what changing it does. Unknown keys are an error.
 | `state` | `<out>/fixture_state.yml` | the state file |
 | `seed_guard_table` | | a table never empty in a seeded database; while it is empty a fixture migration does nothing |
 | `database` | | a DSN, or `env:NAME` to read one from the environment |
-| `schema` | `public` | the schema of tables named without one |
+| `schema` | `public` | the schema of tables named without one. A generated migration names such a table with this schema unless it is `public`, because the application's `search_path` may not include it |
 | `policy` | | see below |
 | `models` | | see below; required |
 

@@ -561,6 +561,31 @@ models:
 	}.run(t)
 }
 
+// A table named without a schema in a configuration whose schema is not
+// public. The migration runs on a connection whose search_path does not
+// look there, so the change set has to name the schema.
+type VRole struct {
+	bun.BaseModel `bun:"table:v_app.roles"`
+	ID            int64  `bun:"id,pk"`
+	Code          string `bun:"code,notnull,unique"`
+	Name          string `bun:"name,notnull"`
+}
+
+func TestVariantATableInTheConfiguredSchema(t *testing.T) {
+	variant{
+		ddl: []string{"DROP SCHEMA IF EXISTS v_app CASCADE", "CREATE SCHEMA v_app",
+			"CREATE TABLE v_app.roles (id bigint PRIMARY KEY, code text UNIQUE NOT NULL, name text NOT NULL)"},
+		models: []any{(*VRole)(nil)},
+		config: `schema: v_app
+models:
+  VRole: {table: roles, ref: code, key: [code]}
+`,
+		old:  "- model: VRole\n  rows:\n    - {id: 1, code: admin, name: Admin}\n    - {id: 2, code: viewer, name: Viewer}\n",
+		next: "- model: VRole\n  rows:\n    - {id: 1, code: admin, name: Admin}\n    - {id: 2, code: viewer, name: Read-only}\n",
+		dump: []string{"v_app.roles"},
+	}.run(t)
+}
+
 // Strings built to break quoting, bun's placeholders among them, and an enum.
 type VLabel struct {
 	bun.BaseModel `bun:"table:v_labels"`
