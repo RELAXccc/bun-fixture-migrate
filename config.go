@@ -56,6 +56,12 @@ type Config struct {
 	// migration deletes the record bun made of it before running it, and the
 	// status and plan commands read which migrations were applied from here.
 	MigrationsTable string `yaml:"migrations_table"`
+	// MigrationLocksTable is the table bun's Migrator.Lock inserts a row
+	// into while it migrates. Default "bun_migration_locks", bun's own; set
+	// it if the migrator is built with migrate.WithLocksTableName. status
+	// reports a row a crashed migrator left there, after which every migrate
+	// fails until somebody deletes it.
+	MigrationLocksTable string `yaml:"migration_locks_table"`
 	// State is the state file: the fixture file as the generated migrations
 	// leave a database. generate diffs against it and rewrites it, relative to
 	// the configuration file. Default "<out>/fixture_state.yml".
@@ -314,6 +320,12 @@ func (c *Config) Prepare() error {
 	}
 	if _, err := quoteQualified(c.MigrationsTable); err != nil {
 		return fmt.Errorf("migrations_table: %w", err)
+	}
+	if c.MigrationLocksTable == "" {
+		c.MigrationLocksTable = "bun_migration_locks"
+	}
+	if _, err := quoteQualified(c.MigrationLocksTable); err != nil {
+		return fmt.Errorf("migration_locks_table: %w", err)
 	}
 	if c.State == "" && c.Out != "" {
 		c.State = filepath.Join(c.Out, "fixture_state.yml")

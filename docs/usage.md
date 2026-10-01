@@ -49,8 +49,8 @@ deploy step is both, in this order:
 ```go
 migrator := migrate.NewMigrator(db, migrations.Migrations, migrate.WithMarkAppliedOnSuccess(true))
 if err := migrator.Init(ctx); err != nil { ... }
-if err := migrator.Lock(ctx); err != nil { ... }
-defer migrator.Unlock(ctx)
+if err := lock(ctx, migrator, time.Minute); err != nil { ... }
+defer migrator.Unlock(context.WithoutCancel(ctx))
 
 if _, err := migrator.Migrate(ctx); err != nil { ... }
 
@@ -70,7 +70,33 @@ err := db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 })
 ```
 
-Three details matter:
+Four details matter:
+
+- **The lock.** bun's `Migrator.Lock` does not wait: it inserts a row into `bun_migration_locks` and
+  fails at once, `migrations table is already locked`, while another process's row is there. Retry
+  it for a bounded time:
+
+  ```go
+  func lock(ctx context.Context, m *migrate.Migrator, wait time.Duration) error {
+  	deadline := time.Now().Add(wait)
+  	for {
+  		err := m.Lock(ctx)
+  		if err == nil || !strings.Contains(err.Error(), "already locked") || time.Now().After(deadline) {
+  			return err
+  		}
+  		select {
+  		case <-ctx.Done():
+  			return ctx.Err()
+  		case <-time.After(250 * time.Millisecond):
+  		}
+  	}
+  }
+  ```
+
+  A process that dies between `Lock` and `Unlock` leaves its row, and no wait ends that: every later
+  deploy fails until somebody deletes it. `status` reports such a row, and
+  [the runbook](production.md#every-migrate-fails-the-migrations-table-is-already-locked) says how to
+  remove it.
 
 - **The seed guard.** `seed_guard_table` names a table that is empty exactly when the database was
   never seeded. While it is, a fixture migration logs `plans is empty, nothing to do` and succeeds.
@@ -90,7 +116,7 @@ Three details matter:
 | `migrate.NewMigrator(db, m)` | works. bun records a migration *before* running it and keeps the record when it fails; a failing fixture migration deletes that record itself, so it runs again once the database is fixed |
 | `WithMarkAppliedOnSuccess(true)` | works, and has no window between the record and its removal. Prefer it |
 | `WithTableName("schema_migrations")` | set `migrations_table` to the same name; `status`, `plan` and the record removal read it |
-| `WithLocksTableName` | nothing to do |
+| `WithLocksTableName` | set `migration_locks_table` to the same name; `status` reads it to report a lock left behind |
 | `WithUpsert(true)` and `RunMigration` | re-running an applied fixture migration finds its changes made and reports them `unchanged` |
 | `BeforeMigration` / `AfterMigration` | run around the migration as usual |
 | `Rollback` | runs the generated down function, which reverts the change set with the same guards |
@@ -108,10 +134,13 @@ is removed, and a failure leaves bun's record in place.
 shape. Run `plan -strict` against a copy of production before it and `status -require-applied`
 after. The `examples/basic` binary is such a step.
 
-**At application start, from every replica.** bun's `Lock` serialises the migrator, and every
-change set additionally takes a transaction-scoped advisory lock, so two processes applying the
-same set cannot both insert a row. The second one finds every change made and reports `unchanged`.
-The seed step needs the same protection: hold the migrator's lock around it, as above.
+**At application start, from every replica.** bun's `Lock` does not make the others wait: of
+replicas starting together, all but the one that took it fail their `Lock` at once. Retry it for a
+bounded time, as above, so they go through one after another; the ones after the first find nothing
+to run. Every change set also takes a transaction-scoped advisory lock of its own, so two processes
+applying the same set, one of them outside the migrator's lock, cannot both insert a row: the second
+finds every change made and reports `unchanged`. The seed step needs the migrator's lock too: hold
+it around the seed, as above.
 
 **By hand, in an emergency.** Every generated migration is a plain Go value; `plan -file` shows
 what one does against any database, applied or not, and `Apply` runs it from a small program. Do

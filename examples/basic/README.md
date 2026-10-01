@@ -41,6 +41,11 @@ The migrator is built `WithMarkAppliedOnSuccess(true)`: a migration that fails i
 and the next deploy runs it again. Without the option bun records it before running it; a fixture
 migration that fails then takes the record back itself.
 
+bun's `Migrator.Lock` does not wait for another deploy: it inserts a row into `bun_migration_locks`
+and fails at once while one is there. So `main.go` retries it for `LOCK_WAIT` (a minute by default)
+before giving up, and the error then says how to remove a lock a deploy that died left behind;
+`bun-fixture-migrate status` reports such a lock too.
+
 ## How the fixture migration was made
 
 The fixture file started with two plans. The databases held it, so it was recorded as migrated:

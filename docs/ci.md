@@ -5,13 +5,18 @@ The checks worth running, and ready-made jobs for GitHub Actions and GitLab CI. 
 
 | Job | Needs a database | Fails when |
 | --- | --- | --- |
-| `status -offline` | no | a fixture edit came without its migration; two migrations share a name |
+| `status -offline` | no | a fixture edit came without its migration; a change `generate -allow-partial` left out is not migrated; a fixture migration from another branch is not in the state file; two migrations share a name |
 | `plan -strict` | a copy of production, or production | a pending fixture migration would fail or skip a change |
-| `status -require-applied` | the deployed database | a migration in the directory is not applied |
+| `status -require-applied` | the deployed database | a migration in the directory is not applied; a deploy that died left bun's lock behind. Add `-strict-order` to fail on a pending migration named before one already applied |
 | `check` | the deployed database | the database and the fixture file disagree (exit 3) |
 
 Exit code 3 always means "found something" and 1 "could not run", so a job can treat drift as a
-warning and a broken connection as a failure. Every command takes `-json` for a report to archive
+warning and a broken connection as a failure.
+
+`status -offline` compares the fixture files with the state file. Until a project has one, it
+compares them with their last commit, which needs git in the job's image and a checkout; with
+neither it exits 1 rather than pass a change it cannot see. Run `baseline` once and commit the
+state file to make the job need nothing but the checkout. Every command takes `-json` for a report to archive
 or alert on; see the [reference](reference.md#json-output).
 
 Pin the tool to one version, the same as the `fixtureapply` your migrations import through

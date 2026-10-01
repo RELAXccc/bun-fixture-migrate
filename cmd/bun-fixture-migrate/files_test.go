@@ -64,8 +64,8 @@ func TestAReferenceAcrossFilesAndAStateOfBoth(t *testing.T) {
 		t.Fatalf("exit %d\n%s%s", code, out, errs)
 	}
 	state := readFile(t, filepath.Join(filepath.Dir(cfg), "migrations", "fixture_state.yml"))
-	if !strings.Contains(state, "# ----- fixture file: fixtures/currencies.yml -----") ||
-		!strings.Contains(state, "# ----- fixture file: fixtures/plans.yml -----") {
+	if !strings.Contains(state, " lines of fixtures/currencies.yml -----") ||
+		!strings.Contains(state, " lines of fixtures/plans.yml -----") {
 		t.Fatalf("the state holds both files:\n%s", state)
 	}
 	plans := filepath.Join(filepath.Dir(cfg), "fixtures", "plans.yml")

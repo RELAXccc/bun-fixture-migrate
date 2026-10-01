@@ -7,6 +7,9 @@
 //	go run . rollback   # roll the last group back
 //	go run . status     # list the migrations and whether each ran
 //
+// LOCK_WAIT, default 1m, is how long it waits for another deploy to release
+// the migrator's lock.
+//
 // Fixture migrations change a database that holds the fixture data already,
 // and leave one that does not alone: plans is their seed guard table. A new
 // database gets the fixture file as it is now instead, which already holds
@@ -22,7 +25,9 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/RELAXccc/bun-fixture-migrate/fixtureapply"
 
@@ -67,7 +72,7 @@ func run(ctx context.Context, args []string) error {
 	if err := migrator.Init(ctx); err != nil {
 		return err
 	}
-	if err := migrator.Lock(ctx); err != nil {
+	if err := lock(ctx, migrator); err != nil {
 		return err
 	}
 	defer func() {
@@ -115,6 +120,46 @@ func run(ctx context.Context, args []string) error {
 		return nil
 	}
 	return fmt.Errorf("unknown command %q: migrate, rollback or status", args[0])
+}
+
+// lock takes the migrator's lock, waiting for a while if another deploy holds
+// it. bun's Migrator.Lock does not wait: it inserts a row into
+// bun_migration_locks and fails at once while another process's row is
+// there, so of replicas starting together all but one would fail. A deploy
+// that died holding the lock left its row behind, which no wait ends; the
+// error says how to remove it.
+func lock(ctx context.Context, migrator *migrate.Migrator) error {
+	wait := time.Minute
+	if v := os.Getenv("LOCK_WAIT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("LOCK_WAIT: %w", err)
+		}
+		wait = d
+	}
+	start := time.Now()
+	for {
+		err := migrator.Lock(ctx)
+		if err == nil {
+			if waited := time.Since(start); waited > time.Second {
+				fmt.Printf("waited %s for another deploy to release the migrator lock\n", waited.Round(time.Second))
+			}
+			return nil
+		}
+		if !strings.Contains(err.Error(), "already locked") {
+			return err
+		}
+		if time.Since(start) > wait {
+			return fmt.Errorf("%w, still after %s: another deploy is running, or one died holding the lock. "+
+				"If none is running, remove it: DELETE FROM bun_migration_locks WHERE table_name = 'bun_migrations'",
+				err, wait)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
 }
 
 // seed loads the fixture file into a database whose plans table is empty, in

@@ -2,6 +2,8 @@ package fixturemigrate
 
 import (
 	"math/big"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -17,7 +19,18 @@ func FuzzDecodeState(f *testing.F) {
 	f.Add(State{Files: []FixtureFile{{Data: []byte(base)}}, Migration: "baseline"}.Encode())
 	f.Add(State{Files: []FixtureFile{{Path: "a.yml", Data: []byte("[]")}, {Path: "b.yml", Data: []byte("- model: X\n")}},
 		Migration: "20260101000000_fixture_x"}.Encode())
+	f.Add(State{Files: []FixtureFile{{Path: "a.yml", Data: []byte("# ----- 1 line of b.yml -----\n")}},
+		Migration: "20260101000000_fixture_x", Covers: "20260101000000_fixture_x", Base: "20250101000000_fixture_w",
+		LeftOut: []string{"X a: b", "\"c\n"}}.Encode())
+	f.Add(State{Migration: "baseline"}.Encode())
 	f.Add([]byte(stateMarker + "\n"))
+	for _, golden := range []string{"state-format1-one-file.yml", "state-format1-several-files.yml"} {
+		data, err := os.ReadFile(filepath.Join("testdata", golden))
+		if err != nil {
+			f.Fatal(err)
+		}
+		f.Add(data)
+	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		s, err := DecodeState(data)
 		if err != nil {
@@ -27,8 +40,15 @@ func FuzzDecodeState(f *testing.F) {
 		if err != nil {
 			t.Fatalf("a decoded state does not decode once encoded: %v", err)
 		}
-		if !SameFiles(again.Files, s.Files) || again.Migration != s.Migration {
+		if !SameFiles(again.Files, s.Files) || again.Migration != s.Migration || again.Covers != s.Covers ||
+			again.Base != s.Base ||
+			strings.Join(again.LeftOut, "\x00") != strings.Join(s.LeftOut, "\x00") || len(again.LeftOut) != len(s.LeftOut) {
 			t.Fatalf("%+v became %+v", s, again)
+		}
+		for i := range s.Files {
+			if len(s.Files) > 1 && again.Files[i].Path != s.Files[i].Path {
+				t.Fatalf("%q became %q", s.Files[i].Path, again.Files[i].Path)
+			}
 		}
 	})
 }

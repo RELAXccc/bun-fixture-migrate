@@ -11,6 +11,7 @@ see the [production runbook](production.md); this page is about the tool itself.
 - [The state file](#the-state-file)
 - [Generating](#generating)
 - [Planning](#planning)
+- [Status](#status)
 - [At run time](#at-run-time)
 
 ## Configuration
@@ -114,17 +115,56 @@ line. See [the runbook](production.md#the-state-file-was-edited-or-lost).
 **`this is not a state file bun-fixture-migrate wrote: the marker line is missing`.** `state:` points
 at a fixture file, or the file was replaced. Check the path.
 
+**`the state file holds git's conflict markers`.** Two branches each generated a migration, and the
+merge stopped in the state file, as it is meant to. See
+[the runbook](production.md#the-state-file-conflicts-in-a-merge).
+
+**`the state file is format 3, written by a newer bun-fixture-migrate than this one`.** Somebody
+generated with a newer release. Use the release the project pins. A state file written before the
+format was numbered still reads, and is rewritten in the current format the next time `generate` or
+`baseline` writes it.
+
 **`no state file at ... yet, so this diffs against git HEAD`.** Not an error: until `baseline` or the
 first `generate` writes one, the base is the committed fixture file.
 
+**`there is no state file at ..., and git cannot say what ... was at HEAD`** (`status`, exit 1).
+Without a state file the base is git's `HEAD`, and git is not installed, or the project is not a
+repository, or the fixture file was never committed. Nothing then says what the fixture file
+changes, so status does not pass it. Run `baseline` once the databases hold the fixture file, or
+run `status` in a checkout with git.
+
 **`baseline would record N changes as migrated with no migration to make them`.** The fixture file
 differs from the state, and no migration covers it. Run `generate`. Pass `-force` only when you
-wrote the migration yourself.
+wrote the migration yourself. A value written another way, `1.10` for `1.1` in a numeric column, is
+not counted when a database is configured: `baseline` asks it, unless `-offline`.
+
+**`left out`** (`status`, exit 3) **/ `the state records N changes generate left out`** (`baseline`,
+exit 2). `generate -allow-partial` wrote the rest of a change and recorded these in the state file.
+Write their migration by hand, then `baseline -force`.
+
+**`... is a generated fixture migration whose changes the state file does not include`** (`status`,
+exit 3; `generate` and `baseline`, exit 2). Two branches each generated a migration from one state,
+and the merge kept the state file of one of them. `baseline -force` cannot fix that: see
+[the runbook](production.md#the-state-file-conflicts-in-a-merge).
+
+**`... is a fixture migration whose changes the state file does not include. If you wrote it by
+hand ...`.** A migration holding a `fixturechange.Set` that `generate` did not write. Once the
+fixture file holds what it does, record it with `baseline -force`.
+
+**`the fixture file differs from the state file only in how values are written`** (`status` note).
+A value is spelled differently, `1.10` for `1.1` in a numeric column, which only the database can
+tell from a change; `status -offline` fails on it until the state file has the new spelling. Run
+`generate`: it writes no migration and records the new spelling.
 
 ## Generating
 
 **`nothing changed in fixtures/fixture.yml since the state after ...`.** The file and the state agree.
-If you expected a change, check the file was saved, and that `status -offline` agrees.
+If you expected a change, check the file was saved, and that `status -offline` agrees. When the file
+differs from the state only in comments or in how values are written, `generate` says it wrote the
+state file with the new text.
+
+**`N fixture migrations the state file does not include, nothing written`.** See the state file
+section above.
 
 **`warning: migration 3_backfill sorts after 20260930165255, so bun runs it after this one`.** bun
 orders migrations by name as strings. A migration named with a short number sorts after every
@@ -136,8 +176,9 @@ file would not compile there. Fix `package:` in the configuration.
 **`warning: no file in migrations declares the variable Migrations ...`.** The generated file
 registers with the variable named by `migrator:`. Declare it, or fix the name.
 
-**`the migration is written, the state file is not`.** The file system refused the second write. The
-migration is fine; run `baseline -force` once the cause is fixed, before generating again.
+**`the migration is written, the state file is not`.** The file system refused the second write.
+Delete the migration it names and generate again once the cause is fixed: recording it with
+`baseline` instead is refused, because the state file's history does not include it.
 
 ## Planning
 
@@ -149,6 +190,31 @@ again, or raise `-lock-timeout`.
 changes, run before this one in the deploy but not in the plan. If they change the tables the
 fixture migration touches, run `plan -with-sql` so SQL migrations run too, or plan against a copy
 that already has them.
+
+## Status
+
+**`out of order: runs after 20261001110000`.** The migration is pending and sorts before one this
+database applied. bun runs it on the next migrate all the same, after migrations it was not written
+to follow: usually a branch merged after a later one was deployed. `plan` against a copy of the
+database shows what it does there; `status -strict-order` fails on it.
+
+**`locked: bun_migration_locks holds bun's lock on bun_migrations`** (exit 3). A migrator is running,
+or one died between `Lock` and `Unlock`, and every migrate fails with
+`migrations table is already locked` until the row is gone. See
+[the runbook](production.md#every-migrate-fails-the-migrations-table-is-already-locked).
+
+**`Plan.price_cents is written like 29.00 in 12 rows, ...`** (`status -offline`). Without a
+database, a value whose meaning depends on the column's type is refused, once per model and column.
+Configure `database` and run `status` without `-offline`, or write the value the way the column
+reads it back (`29`, or `"29.00"` for a text column).
+
+**`N findings in the fixture file that the policy makes errors`** (`status`, exit 3; `generate` and
+`baseline`, exit 2). The fixture files turned up something the policy makes an error, such as two
+rows sharing a natural key. Fix it, or set the policy to `warn`.
+
+**Starting the history over.** When every database applied every migration in the directory and the
+state file's history no longer matters, delete the state file and run `baseline`: a new state file
+includes every fixture migration there is.
 
 ## At run time
 

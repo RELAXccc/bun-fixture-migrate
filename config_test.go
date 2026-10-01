@@ -177,3 +177,16 @@ func TestADefaultCanBeNull(t *testing.T) {
 		t.Fatalf("an omitted color is NULL, got %+v", v)
 	}
 }
+
+// bun's locks table has a default, and a name that is not a plain identifier
+// is refused like the migrations table's.
+func TestTheLocksTable(t *testing.T) {
+	cfg := &Config{Fixture: "f.yml", Models: map[string]*Model{"Plan": {Table: "plans"}}}
+	if err := cfg.Prepare(); err != nil || cfg.MigrationLocksTable != "bun_migration_locks" {
+		t.Fatalf("%v %q", err, cfg.MigrationLocksTable)
+	}
+	cfg = &Config{Fixture: "f.yml", MigrationLocksTable: "locks; drop", Models: map[string]*Model{"Plan": {Table: "plans"}}}
+	if err := cfg.Prepare(); err == nil || !strings.Contains(err.Error(), "migration_locks_table") {
+		t.Fatalf("got %v", err)
+	}
+}

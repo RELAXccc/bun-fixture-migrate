@@ -21,7 +21,7 @@ paths in it are relative to it. Every command takes `-h`.
 | `export` | reads | the fixture files |
 | `check` | reads | nothing |
 | `generate` | reads with `-from-db`, and to lint when one is configured | a migration, the state file |
-| `baseline` | none | the state file |
+| `baseline` | reads, unless `-offline`, when one is configured and the files differ from the state | the state file |
 | `status` | reads unless `-offline` or none is configured | nothing |
 | `plan` | writes, and rolls back | nothing |
 | `sync` | writes with `-yes` | the database |
@@ -84,29 +84,66 @@ state file on. The base is the state file; while there is none, git's `HEAD`.
 The migration is named one second after the newest migration in the directory, never earlier than
 now and never the name of another one. A migration whose name sorts after it is warned about.
 
+With a database configured, both sides are respelled by it first, so a value written two ways (`1.10`
+and `1.1` in a numeric column) is no change. When the fixture files differ from the state file but
+change no value, nothing is generated and the state file takes the new text, so `status -offline`
+agrees.
+
+With `-allow-partial`, the refused changes are recorded in the state file as left out: the next
+`generate` does not see them again, and `status` fails on them until `baseline -force`.
+
+Refused (exit 2), whatever else it finds: a finding in the fixture files that the policy makes an
+error, such as two rows sharing a natural key, as `sync` refuses one; and a fixture migration in the
+directory that the state file's history does not include, which is one generated on another branch
+against an older state, or one written by hand and not recorded with `baseline -force`. See
+[the runbook](production.md#the-state-file-conflicts-in-a-merge).
+
 ### baseline
 
 Records the fixture files, as they are, as what the migrations leave a database holding. A state
 that differs in content is only replaced with `-force` (exit 2 otherwise), because recording a change
-nobody migrated is how a change gets lost.
+nobody migrated is how a change gets lost. A difference only the column types can settle, such as
+`1.10` against `1.1`, is asked of the database when one is configured, as `generate` asks it: when it
+is no change, the state is replaced without `-force`.
+
+Also refused without `-force`: a state that records changes `generate -allow-partial` left out, and a
+fixture migration in the directory that is not in the state's history and was written by hand.
+Refused even with `-force`: a fixture migration generated against another state, on another branch,
+which has to be generated again (see [the runbook](production.md#the-state-file-conflicts-in-a-merge)),
+and a finding in the fixture files that the policy makes an error.
 
 | Flag | |
 | --- | --- |
 | `-from <rev>` | record the fixture files as of a git revision |
 | `-old <file>` | record this file |
-| `-force` | replace a differing state: a migration you wrote covers the difference |
+| `-force` | replace a differing state, and clear what was left out: a migration you wrote covers the difference |
+| `-offline` | do not ask the database whether a difference is only in how values are written |
 
 ### status
 
 Lists the fixture files, the state file and what the fixture files change that no migration makes,
-then the migrations directory with, when a database is asked, what it applied. Exit 3 when something
-is not migrated, when the directory holds two migrations bun would record under one name, and with
-`-require-applied` when a migration is not applied.
+then the migrations directory with, when a database is asked, what it applied. With a database, both
+sides are respelled by it first, as `generate` does; a difference that is only spelling is a note.
+
+Exit 3 when:
+
+- the fixture files change something no migration makes, or the state file records a change
+  `generate -allow-partial` left out;
+- the fixture files have a finding the policy makes an error;
+- the directory holds two migrations bun would record under one name, or a fixture migration the state
+  file's history does not include;
+- with a database, bun's locks table holds the lock on the migrations table;
+- with `-require-applied`, a migration is not applied;
+- with `-strict-order`, a pending migration sorts before one the database applied.
+
+Exit 1 when there is no state file and git cannot read the fixture files as of `HEAD` (it is not
+installed, or this is not a repository): nothing then says what the files change.
 
 | Flag | |
 | --- | --- |
 | `-offline` | do not connect, even with a database configured |
 | `-require-applied` | fail unless the database applied every migration in the directory |
+| `-strict-order` | fail when a pending migration sorts before one the database applied, which bun runs after it all the same |
 | `-json` | the report as JSON, see [status](#status-output) |
 
 ### plan
@@ -145,9 +182,9 @@ Exit 2 when a finding the policy makes an error, or a difference `generate` woul
 | Code | Meaning |
 | --- | --- |
 | 0 | done; for `check`, `status` and `plan`: nothing found |
-| 1 | the command could not do its job: a bad flag, no connection, an unreadable file, a plan that could not finish |
-| 2 | refused: a difference that needs a hand-written migration, a finding the policy makes an error, a state `baseline` will not replace, a file `export` will not write |
-| 3 | found something: drift (`check`), a change no migration makes or a migration not applied (`status`), a migration that would fail or skip (`plan`) |
+| 1 | the command could not do its job: a bad flag, no connection, an unreadable file, a plan that could not finish, nothing for `status` to compare the fixture files with |
+| 2 | refused: a difference that needs a hand-written migration, a finding the policy makes an error, a state `baseline` will not replace, a fixture migration the state file does not include (`generate`, `baseline`), a file `export` will not write |
+| 3 | found something: drift (`check`), a change no migration makes, a change left out, a migration not applied or out of order, a leftover lock (`status`), a migration that would fail or skip (`plan`) |
 
 A pipeline can tell "the database drifted" (3) from "the check could not run" (1).
 
@@ -166,6 +203,7 @@ what changing it does. Unknown keys are an error.
 | `package` | `migrations` | its Go package |
 | `migrator` | `Migrations` | the `*migrate.Migrations` variable generated files register with |
 | `migrations_table` | `bun_migrations` | the migrator's table, when it is built `WithTableName`; may be schema-qualified |
+| `migration_locks_table` | `bun_migration_locks` | the migrator's locks table, when it is built `WithLocksTableName`; `status` reports a lock left in it |
 | `state` | `<out>/fixture_state.yml` | the state file |
 | `seed_guard_table` | | a table never empty in a seeded database; while it is empty a fixture migration does nothing |
 | `database` | | a DSN, or `env:NAME` to read one from the environment |
@@ -241,23 +279,36 @@ Finding kinds: `duplicate key`, `zero against a default`, `null against a defaul
 ```json
 {
   "fixture": "fixtures/fixture.yml",
-  "state": {"path": "migrations/fixture_state.yml", "exists": true, "migration": "20260930165255_fixture_plan_prices"},
-  "base": "the state after 20260930165255_fixture_plan_prices",
+  "state": {"path": "migrations/fixture_state.yml", "exists": true, "migration": "20260930165255_fixture_plan_prices",
+            "format": 2, "covers": "20260930165255_fixture_plan_prices", "base": "20260921120000_fixture_seats"},
+  "base": "the state file",
   "uncovered": [],
   "refused": [],
+  "left_out": [],
+  "findings": [],
   "directory": "migrations",
   "migrations": [
     {"id": "20260930165255_fixture_plan_prices", "name": "20260930165255", "fixture": true, "changes": 3,
-     "applied": {"group": 2, "at": "2026-09-30T17:00:00Z"}}
+     "applied": {"group": 2, "at": "2026-09-30T17:00:00Z"}, "out_of_order": false}
   ],
-  "database": {"table": "bun_migrations", "table_exists": true, "not_in_directory": []},
+  "not_in_state": [],
+  "database": {"table": "bun_migrations", "table_exists": true, "not_in_directory": [],
+               "newest_applied": "20260930165255", "locks_table": "bun_migration_locks", "locked": false},
   "problems": [],
   "notes": []
 }
 ```
 
-`applied` is `null` for a pending migration and for all of them without a database; `database` is
-`null` when none was asked.
+| Field | |
+| --- | --- |
+| `state` | `null` when no state file is configured. `format` is 1 for a file written before the format was numbered. `covers` is the newest fixture migration whose changes the state includes, `base` what that one was generated against |
+| `base` | what `uncovered` was worked out against: `the state file`, or `HEAD` while there is none |
+| `uncovered`, `refused` | what the fixture files change that no migration makes, one line per model, and what of it `generate` would refuse |
+| `left_out` | changes `generate -allow-partial` refused and recorded in the state file, until `baseline -force` |
+| `findings` | as in [check](#check-output), the ones the policy does not ignore |
+| `migrations` | `applied` is `null` for a pending migration and for all of them without a database; `out_of_order` is a pending one that sorts before `newest_applied` |
+| `not_in_state` | fixture migrations of the directory the state's history does not include; `problems` says why |
+| `database` | `null` when none was asked. `locked` is a row in `locks_table` naming `table`: a migrator running now, or one that died and left it |
 
 ### plan output
 

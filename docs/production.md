@@ -12,6 +12,7 @@ against production itself: it runs in a transaction PostgreSQL holds to `READ ON
 - [generate refused a change](#generate-refused-a-change)
 - [The state file conflicts in a merge](#the-state-file-conflicts-in-a-merge)
 - [The state file was edited or lost](#the-state-file-was-edited-or-lost)
+- [Every migrate fails: the migrations table is already locked](#every-migrate-fails-the-migrations-table-is-already-locked)
 - [Rolling back](#rolling-back)
 - [Running a migration by hand](#running-a-migration-by-hand)
 - [Adopting the tool on an existing project](#adopting-the-tool-on-an-existing-project)
@@ -21,10 +22,10 @@ against production itself: it runs in a transaction PostgreSQL holds to `READ ON
 
 | When | Command | Fails on |
 | --- | --- | --- |
-| every change | `status -offline` | a fixture edit without its migration; two migrations bun would record under one name |
+| every change | `status -offline` | a fixture edit without its migration; a change `generate -allow-partial` left out and nobody migrated; a fixture migration from another branch the state file does not include; two migrations bun would record under one name |
 | before a deploy | `plan -strict` against a recent copy of production | a migration that would fail or skip a change |
 | the deploy | your migrator, then the seed of an empty database | a fixture migration that cannot do what it says |
-| after it | `status -require-applied` | a migration the database did not apply |
+| after it | `status -require-applied` | a migration the database did not apply; the lock of a migrator that died, which fails the next deploy |
 | after it, and on a schedule | `check` | drift between the database and the fixture file |
 
 [CI](ci.md) has ready-made jobs for all of them. `plan` against production itself is safe too:
@@ -71,8 +72,12 @@ as applied, whichever way the migrator is built, so the next deploy runs it agai
    migrations and which ones cannot be made, without changing anything.
 2. Decide per problem:
    - **missing row**: the row the change updates or deletes is not there. Somebody deleted or
-     renamed it. Put it back, or, if its absence is right, remove that change from the migration
-     file (it is a plain Go literal) and run `plan` again.
+     renamed it. Put it back, and deploy again. If its absence is right in this database only, set
+     `MissingRow: "warn"` in the `Policy` of that one migration file: here the change is then
+     skipped and the migration recorded, every other database still gets it, and `check` here
+     reports the row the file has and this database does not, which is what you decided. Do not
+     remove the change from the migration: the databases that have not run it yet would never get
+     it, and `status -offline` cannot see that, because the fixture file still has it.
    - **id drift**: the row is there under another id than the file says, or the file's id belongs
      to another row. Something outside the database may name these ids; find out before touching
      them.
@@ -132,36 +137,57 @@ a natural key two rows share, a column one side sets and the other leaves out wi
 
 1. Often the configuration can say it: `renames: update`, a `defaults` entry, `deletes: cascade` on
    the model. Then generate again.
-2. Otherwise write that one migration by hand, in the same package, dated after the last one, and
-   `generate -allow-partial` for the rest if there is any.
-3. Record that your migration covers it: `bun-fixture-migrate baseline -force`.
-4. `plan` against a copy of production, as always.
+2. Otherwise `generate -allow-partial` writes the rest, and records what it refused in the state
+   file as left out. The next `generate` does not see those changes again; `status` lists them and
+   fails until step 4.
+3. Write the migration for what was left out by hand, in the same package, dated after the last one.
+4. Record that your migration covers it: `bun-fixture-migrate baseline -force`.
+5. `plan` against a copy of production, as always.
 
 ## The state file conflicts in a merge
 
 **Symptom.** Two branches each generated a fixture migration; merging them conflicts in
-`fixture_state.yml`, on its `migration:` and `sha256:` lines.
+`fixture_state.yml`. Or, when the conflict was resolved by taking one side, `status -offline` fails
+with `... is a generated fixture migration whose changes the state file does not include`, and
+`generate` and `baseline -force` refuse to go on.
 
-**What happened.** On purpose: each state file records the fixture file after its own branch's
-migration, and neither is right for the merge.
+**What happened.** Both migrations were generated against the same state, and each one's guards
+expect the rows as that state has them. Whichever runs second finds the rows the other changed. When
+both change one row, a database that applied the newer migration before the older one arrived skips
+the older one's change as somebody's edit, and a database that runs both from the start ends with the
+other value: production and a new environment disagree, and neither says so. Keeping both migrations
+and recording the merge with `baseline -force` therefore does not work, and is refused.
 
-**Steps.**
+**Steps.** One of the two migrations is generated again, on top of the other:
 
-1. Keep both migrations. Resolve the conflict in the fixture file itself as for any file.
-2. Check that the two migrations do not change the same rows: `plan` against a copy of production
-   runs both in bun's order.
-3. Take either side of the state file, then record the merged fixture file:
-   `bun-fixture-migrate baseline -force`. `-force` is right here because both migrations exist.
-4. `status -offline` must now report nothing not migrated. If it does, the merge changed something
-   neither migration makes; `generate` it.
+1. Resolve the fixture files as for any file: they say what the master data is after the merge.
+2. Keep the migration a database already applied, usually the one merged first. Delete the other
+   branch's migration file; it must not have run anywhere that matters (`status` against a database
+   lists what it applied).
+3. Take the state file as the kept migration left it: when merging the other branch into yours,
+   `git checkout --ours -- internal/migrations/fixture_state.yml`.
+4. `bun-fixture-migrate generate -name "..."`. It writes the deleted migration's changes, and anything
+   the merge resolved differently, as a migration from what the kept one leaves, named after it.
+5. Check the result where it can go wrong. `status -offline` must report nothing. Then
+   `plan -strict` against a copy of a database that applied the kept migration, usually production:
+   it must succeed, every change of the new migration `applied` and none `skipped`. When both
+   branches added rows, check before step 4 that they do not share an explicit id, and give one of
+   them another id in the fixture file if they do.
 
-The two migrations run in name order, which is not necessarily the order they were written in. When
-both touch the same row, the later name's guards expect the values the state file of its own branch
-had; `plan` says whether that holds.
+If a database did apply the deleted migration, it is listed as recorded but not in the directory,
+and the new migration finds its changes made there (`unchanged`). If both migrations were deployed
+to different databases before the merge, those databases have already diverged: after the next
+deploy, run `check` against each and bring it to the fixture file with `generate -from-db`, or with
+`sync` where nothing deploys to it.
+
+A migration merged after a later-named one was deployed runs after it, whatever its name: bun runs
+every migration it has no record of. `status` against such a database marks it `out of order`;
+`status -strict-order` fails on it.
 
 ## The state file was edited or lost
 
 **Symptom.** A command refuses the state file: its checksum does not match, or its marker is gone.
+(For conflict markers, see [above](#the-state-file-conflicts-in-a-merge).)
 
 **What happened.** It was edited by hand or merged line by line. Line-ending conversion by git is not
 an edit and is accepted. A state nobody can vouch for would let `generate` write a migration against
@@ -171,6 +197,25 @@ the wrong base, so it is refused.
 the state file also added that migration, it is the fixture file at that commit:
 `bun-fixture-migrate baseline -from <commit> -force`. If you cannot tell, `export` from a database
 that applied every migration (`status -require-applied`) and baseline that.
+
+## Every migrate fails: the migrations table is already locked
+
+**Symptom.** The migrator returns `migrate: migrations table is already locked`, on every deploy.
+`status` against the database says `locked: bun_migration_locks holds bun's lock on bun_migrations`
+and exits 3.
+
+**What happened.** bun's `Migrator.Lock` inserts a row into its locks table and `Unlock` deletes it. A
+deploy that died in between, killed or out of memory, left the row, and every `Lock` after it fails.
+
+**Steps.** Make sure no migration is running: no deploy in progress, no replica starting. Then delete
+the row, as `status` prints it:
+
+```
+DELETE FROM bun_migration_locks WHERE table_name = 'bun_migrations';
+```
+
+Then run `status -require-applied`: a migration the dead deploy did not finish is pending, and the
+next deploy runs it. Set `migration_locks_table` if the migrator is built `WithLocksTableName`.
 
 ## Rolling back
 
