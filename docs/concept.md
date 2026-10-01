@@ -75,6 +75,8 @@ These decide every trade-off further down.
 | self-referencing model (`parent_id`) | order inside one model | parents inserted first, children deleted first, exported parents first; read whatever the id order | done |
 | enum types, domains, `citext` | text in, typed out; a domain's own name hides its base type; `Go` and `GO` are one `citext` | PostgreSQL compares; a domain is its base type, its default and `NOT NULL` the column's; keys equal under their type are a duplicate | done |
 | `soft_delete` | a delete is an UPDATE of `deleted_at` | soft-delete aware snapshot and delete | later |
+| a table the application or tenants insert into too, from one sequence | a fixture file's next id is somebody's row; the rows they add are drift | `mode: upsert` keeps their rows, `ids: database` leaves every id to the sequence | done |
+| a column an admin UI or an operator edits, a price or a flag | every edit is drift, and the file's next change of that column is skipped as a changed row | `insert_only`, or `mode: insert` for a whole table | done |
 | schema-qualified table, mixed-case or reserved-word names | quoting | quoted everywhere | done |
 
 ### 2.4 Drivers and topologies
@@ -200,6 +202,16 @@ Each was reproduced before it went into this table.
   it is refused.
 - **Seeding.** `fixtureapply.SyncSequences` moves sequences past the ids a `dbfixture` seed wrote,
   and `examples/basic` is a runnable bun project that migrates, then seeds a new database.
+- **Who owns what.** A model's `mode` says which of its rows the files own, as Atlas's seed modes,
+  Liquibase's `loadData` and `loadUpdateData` and seed-fu's `seed` and `seed_once` do: `sync` all of
+  them, `upsert` the rows they hold without ever deleting one, `insert` only the rows a database
+  lacks. `insert_only` columns are written by the insert and the database's afterwards, an
+  operator's feature flag; `ids: database` leaves every id to the table's sequence, for a table the
+  application inserts into too. What the configuration gives to the database is no drift, no change
+  and not exported, through every command alike, and `check` counts it; the generated sets only hold
+  fewer changes, so the run time is untouched.
+- **Drift that explains itself.** Where the database holds a column's default and the file a null or
+  a zero, `check` says that bun wrote `DEFAULT` there, on an insert and, since v1.2.17, on an update.
 
 ### Later
 

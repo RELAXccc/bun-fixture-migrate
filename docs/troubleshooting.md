@@ -55,6 +55,17 @@ fixture file fills. **`warning: seed_guard_table X is the table of no model`**: 
 not fill it, so a seeded database may hold it empty, and there every fixture migration does nothing
 and is recorded as applied. Name the table of a model.
 
+**`model "X": deletes is "cascade", but mode is upsert, under which no row is ever deleted`.**
+`deletes` only applies under `mode: sync`; a model under `upsert` or `insert` deletes nothing. Take
+`deletes` off the model, or its `mode`. A `deletes` the model inherits from the policy block is fine.
+
+**`model "X": insert_only column "code" is part of the natural key`** (or the `ref` column, the id,
+or a column in `ignore` or `derived`). An `insert_only` column is one the database owns once the row
+exists, and every row is found by its key and named by its `ref` column, which have to be the
+files'. **`model "X": ids is database, so its id differs from one database to the next`**: under
+`ids: database` the key and the `ref` column cannot be the id; key and name the rows by columns the
+files own.
+
 **`the models A, B reference each other in a circle`.** The `references:` form a cycle, so there is
 no order to insert them in. A self-reference is fine; a cycle across models needs one of the columns
 left out of `references` (and set by hand).
@@ -145,6 +156,8 @@ A refusal is a difference `generate` will not write as it stands (exit 2).
 | `its id, 4, is the id of Plan/name=max too` | two rows of the file share an id, usually after merging two branches that each added the next one |
 | `it leaves out note, which other rows of Plan write` | an inserted row leaves out a column with no `defaults` entry; write it, or add one |
 | `tags: it is a sequence holding a null` | a null inside a YAML sequence, which a `[]string` field drops and a `[]*string` keeps |
+| `renamed from code=a to code=b, and mode insert never changes a row a database holds` | under `mode: insert` a rename would update a row the database owns: put the key back, or give the new row an id of its own to add it beside the old one |
+| `points at Country "Deutschland", whose name was "Germany", and mode insert never updates a row a database holds` | the row a change points at is under `mode: insert`, and the files changed its `ref` value, which a database holding the row never takes: put it back, or hand-write the change |
 
 For the last one, configure `database` so `generate` can read the column types (and leave out
 `-no-lint`), or write the value unambiguously: quoted for a text column, resolved for any other

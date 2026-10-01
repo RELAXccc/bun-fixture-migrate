@@ -136,6 +136,12 @@ or `generate -from-db`. Read the findings too: `invalid value` is a file value t
 cannot hold, `duplicate key` two rows no guard can tell apart; both need fixing before any
 migration of that model can be trusted.
 
+When the same drift comes back after every deploy because the database owns it, a price finance
+edits, a flag operators toggle, roles tenants add, say so instead of folding it into the file each
+time: `insert_only`, `mode: insert` or `mode: upsert` on the model, and check no longer reports it
+([who owns what](reference.md#who-owns-what)). A difference with a `hint:` line is a null or a zero
+in the file where bun wrote the column's default: write the default's value in the file.
+
 `check -json` is the form to alert on. `agree` is the one field to test; `changes` has the rows.
 
 ## generate refused a change

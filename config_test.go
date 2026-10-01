@@ -147,8 +147,12 @@ func TestTheExampleConfigurationLoads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the shipped example has to load: %v", err)
 	}
-	if len(cfg.Models) != 5 {
+	if len(cfg.Models) != 6 {
 		t.Fatalf("unexpected models: %v", cfg.ModelNames())
+	}
+	if role := cfg.Models["Role"]; role.Mode != OwnUpsert || role.IDs != IDsDatabase || cfg.Models["Plan"].Mode != OwnSync ||
+		!cfg.Models["Feature"].insertOnly["enabled"] {
+		t.Fatal("the example shows a mode, ids and insert_only")
 	}
 	if cfg.Models["Plan"].Deletes != DeleteRefuse || cfg.Models["Feature"].Deletes != DeleteAllow {
 		t.Fatal("a model's deletes overrides the policy's")
