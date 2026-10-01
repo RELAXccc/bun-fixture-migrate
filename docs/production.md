@@ -21,7 +21,7 @@ against production itself: it runs in a transaction PostgreSQL holds to `READ ON
 
 | When | Command | Fails on |
 | --- | --- | --- |
-| every change | `status -offline` | a fixture edit without its migration; a change `generate -allow-partial` left out and nobody migrated; two migrations bun would record under one name |
+| every change | `status -offline` | a fixture edit without its migration; a change `generate -allow-partial` left out and nobody migrated; a fixture migration from another branch the state file does not include; two migrations bun would record under one name |
 | before a deploy | `plan -strict` against a recent copy of production | a migration that would fail or skip a change |
 | the deploy | your migrator, then the seed of an empty database | a fixture migration that cannot do what it says |
 | after it | `status -require-applied` | a migration the database did not apply |
@@ -142,28 +142,43 @@ a natural key two rows share, a column one side sets and the other leaves out wi
 ## The state file conflicts in a merge
 
 **Symptom.** Two branches each generated a fixture migration; merging them conflicts in
-`fixture_state.yml`, on its `migration:` and `sha256:` lines.
+`fixture_state.yml`. Or, when the conflict was resolved by taking one side, `status -offline` fails
+with `... is a generated fixture migration whose changes the state file does not include`, and
+`generate` and `baseline -force` refuse to go on.
 
-**What happened.** On purpose: each state file records the fixture file after its own branch's
-migration, and neither is right for the merge.
+**What happened.** Both migrations were generated against the same state, and each one's guards
+expect the rows as that state has them. Whichever runs second finds the rows the other changed. When
+both change one row, a database that applied the newer migration before the older one arrived skips
+the older one's change as somebody's edit, and a database that runs both from the start ends with the
+other value: production and a new environment disagree, and neither says so. Keeping both migrations
+and recording the merge with `baseline -force` therefore does not work, and is refused.
 
-**Steps.**
+**Steps.** One of the two migrations is generated again, on top of the other:
 
-1. Keep both migrations. Resolve the conflict in the fixture file itself as for any file.
-2. Check that the two migrations do not change the same rows: `plan` against a copy of production
-   runs both in bun's order.
-3. Take either side of the state file, then record the merged fixture file:
-   `bun-fixture-migrate baseline -force`. `-force` is right here because both migrations exist.
-4. `status -offline` must now report nothing not migrated. If it does, the merge changed something
-   neither migration makes; `generate` it.
+1. Resolve the fixture files as for any file: they say what the master data is after the merge.
+2. Keep the migration a database already applied, usually the one merged first. Delete the other
+   branch's migration file; it must not have run anywhere that matters (`status` against a database
+   lists what it applied).
+3. Take the state file as the kept migration left it: when merging the other branch into yours,
+   `git checkout --ours -- internal/migrations/fixture_state.yml`.
+4. `bun-fixture-migrate generate -name "..."`. It writes the deleted migration's changes, and anything
+   the merge resolved differently, as a migration from what the kept one leaves, named after it.
+5. Check the result where it can go wrong. `status -offline` must report nothing. Then
+   `plan -strict` against a copy of a database that applied the kept migration, usually production:
+   it must succeed, every change of the new migration `applied` and none `skipped`. When both
+   branches added rows, check before step 4 that they do not share an explicit id, and give one of
+   them another id in the fixture file if they do.
 
-The two migrations run in name order, which is not necessarily the order they were written in. When
-both touch the same row, the later name's guards expect the values the state file of its own branch
-had; `plan` says whether that holds.
+If a database did apply the deleted migration, it is listed as recorded but not in the directory,
+and the new migration finds its changes made there (`unchanged`). If both migrations were deployed
+to different databases before the merge, those databases have already diverged: after the next
+deploy, run `check` against each and bring it to the fixture file with `generate -from-db`, or with
+`sync` where nothing deploys to it.
 
 ## The state file was edited or lost
 
 **Symptom.** A command refuses the state file: its checksum does not match, or its marker is gone.
+(For conflict markers, see [above](#the-state-file-conflicts-in-a-merge).)
 
 **What happened.** It was edited by hand or merged line by line. Line-ending conversion by git is not
 an edit and is accepted. A state nobody can vouch for would let `generate` write a migration against

@@ -48,7 +48,7 @@ func generate(o streams, args []string) error {
 		return err
 	}
 	// The state file is read whatever the base: the changes it records as
-	// left out go on into the next one.
+	// left out and its history go on into the next one.
 	var prev *fixturemigrate.State
 	if s.statePath != "" {
 		state, err := fixturemigrate.ReadState(s.statePath)
@@ -133,6 +133,42 @@ func generate(o streams, args []string) error {
 	for _, r := range res.Refusals {
 		fmt.Fprintln(o.stderr, "refused:", r.String())
 	}
+
+	dir := *out
+	if dir == "" {
+		dir = s.outDir
+	}
+	var existing []string
+	var fixtures []fixturemigrate.MigrationFile
+	var dirErr error
+	if dir != "" {
+		var ms *fixturemigrate.Migrations
+		if ms, dirErr = fixturemigrate.ReadMigrations(dir); dirErr == nil {
+			for _, m := range ms.List {
+				existing = append(existing, m.Name)
+			}
+			fixtures = ms.Fixtures()
+		}
+	}
+	// A fixture migration the state does not include was generated on another
+	// branch, or written by hand and not recorded. A migration generated now
+	// would expect rows as that one did not leave them, and the state would
+	// go on without it, so the history is put right first.
+	if prev != nil {
+		if missing := unaccounted(prev, fixtures); len(missing) > 0 {
+			for _, m := range missing {
+				if *dryRun {
+					fmt.Fprintln(o.stderr, "warning:", lineageProblem(prev, m))
+				} else {
+					fmt.Fprintln(o.stderr, "refused:", lineageProblem(prev, m))
+				}
+			}
+			if !*dryRun {
+				return exitError{2, fmt.Sprintf("%s the state file does not include, nothing written",
+					plural(len(missing), "fixture migration"))}
+			}
+		}
+	}
 	if len(res.Changes) == 0 {
 		if len(res.Refusals) > 0 {
 			return refused(len(res.Refusals))
@@ -143,8 +179,12 @@ func generate(o streams, args []string) error {
 		// takes the new text, or status -offline, which cannot tell such a
 		// spelling from a change, would fail on it until the next migration.
 		if fromState && !*dryRun && !fixturemigrate.SameFiles(prev.Files, headData) {
+			if dirErr != nil && !errors.Is(dirErr, os.ErrNotExist) {
+				return fmt.Errorf("the migrations directory: %w", dirErr)
+			}
 			next := *prev
 			next.Files = headData
+			next.Covers, next.Base = lineageOf(prev, fixtures)
 			if err := fixturemigrate.WriteState(s.statePath, next); err != nil {
 				return err
 			}
@@ -167,19 +207,8 @@ func generate(o streams, args []string) error {
 		}
 	}
 
-	dir := *out
-	if dir == "" {
-		dir = s.outDir
-	}
-	var existing []string
-	if dir != "" {
-		if ms, err := fixturemigrate.ReadMigrations(dir); err == nil {
-			for _, m := range ms.List {
-				existing = append(existing, m.Name)
-			}
-		} else if !*dryRun {
-			return fmt.Errorf("the migrations directory: %w", err)
-		}
+	if dirErr != nil && !*dryRun {
+		return fmt.Errorf("the migrations directory: %w", dirErr)
 	}
 	stamp := fixturemigrate.NextStamp(now, existing)
 	// bun orders migrations by name as strings, so a short name such as
@@ -218,7 +247,8 @@ func generate(o streams, args []string) error {
 	}
 	fmt.Fprintln(o.stdout, "wrote", target)
 	if s.statePath != "" {
-		state := fixturemigrate.State{Files: headData, Migration: strings.TrimSuffix(file, ".go")}
+		id := strings.TrimSuffix(file, ".go")
+		state := fixturemigrate.State{Files: headData, Migration: id, Covers: id, Base: newestFixture(fixtures)}
 		if prev != nil {
 			state.LeftOut = prev.LeftOut
 		}
@@ -232,7 +262,7 @@ func generate(o streams, args []string) error {
 		}
 		if err := fixturemigrate.WriteState(s.statePath, state); err != nil {
 			return fmt.Errorf("the migration is written, the state file is not: %w; "+
-				"run baseline before generating again", err)
+				"delete %s and generate again once that is fixed", err, target)
 		}
 		fmt.Fprintln(o.stdout, "wrote", s.statePath)
 		noteLeftOut(o, &state)

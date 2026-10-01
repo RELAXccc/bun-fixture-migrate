@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -34,6 +36,10 @@ type statusReport struct {
 	// Directory is the migrations directory, "" when none is configured.
 	Directory  string          `json:"directory"`
 	Migrations []migrationInfo `json:"migrations"`
+	// NotInState are the fixture migrations of the directory whose changes
+	// the state file does not include: generated on another branch, or
+	// written by hand and not recorded with baseline -force yet.
+	NotInState []string `json:"not_in_state"`
 	// Database is nil when no database was asked.
 	Database *databaseInfo `json:"database"`
 	Problems []string      `json:"problems"`
@@ -44,6 +50,11 @@ type stateInfo struct {
 	Path      string `json:"path"`
 	Exists    bool   `json:"exists"`
 	Migration string `json:"migration,omitempty"`
+	Format    int    `json:"format,omitempty"`
+	// Covers is the newest fixture migration whose changes the state
+	// includes, and Base what Covers was generated against.
+	Covers string `json:"covers,omitempty"`
+	Base   string `json:"base,omitempty"`
 }
 
 type migrationInfo struct {
@@ -91,11 +102,12 @@ func status(o streams, args []string) error {
 	if err != nil {
 		return err
 	}
-	old, err := s.statusBase(r)
+	old, state, err := s.statusBase(r)
 	if err != nil {
 		return err
 	}
 
+	var fixtures []fixturemigrate.MigrationFile
 	if s.outDir != "" {
 		ms, err := fixturemigrate.ReadMigrations(s.outDir)
 		if err != nil {
@@ -109,8 +121,15 @@ func status(o streams, args []string) error {
 			}
 			r.Migrations = append(r.Migrations, info)
 		}
+		fixtures = ms.Fixtures()
 	} else {
 		r.Notes = append(r.Notes, "no out directory in the configuration, so no migrations to list")
+	}
+	if state != nil {
+		for _, m := range unaccounted(state, fixtures) {
+			r.NotInState = append(r.NotInState, m.ID())
+			r.Problems = append(r.Problems, lineageProblem(state, m))
+		}
 	}
 
 	var res *fixturemigrate.Result
@@ -162,7 +181,7 @@ func status(o streams, args []string) error {
 
 	if *asJSON {
 		// A program reads an empty list as [], not as null.
-		for _, list := range []*[]string{&r.Uncovered, &r.Refused, &r.LeftOut, &r.Problems, &r.Notes} {
+		for _, list := range []*[]string{&r.Uncovered, &r.Refused, &r.LeftOut, &r.NotInState, &r.Problems, &r.Notes} {
 			if *list == nil {
 				*list = []string{}
 			}
@@ -211,24 +230,26 @@ func status(o streams, args []string) error {
 // git's HEAD while there is none, the base generate would use. With neither
 // there is nothing to say what the fixture file changes, and a gate that
 // passes on that would pass anything.
-func (s *setup) statusBase(r *statusReport) (*fixturemigrate.Snapshot, error) {
+func (s *setup) statusBase(r *statusReport) (*fixturemigrate.Snapshot, *fixturemigrate.State, error) {
 	var files []fixturemigrate.FixtureFile
-	found := false
+	var state *fixturemigrate.State
 	if s.statePath != "" {
 		r.State = &stateInfo{Path: s.statePath}
 		read, err := fixturemigrate.ReadState(s.statePath)
 		switch {
 		case err == nil:
-			r.State.Exists, r.State.Migration = true, read.Migration
+			state = &read
+			r.State.Exists, r.State.Migration, r.State.Format = true, read.Migration, read.Format
+			r.State.Covers, r.State.Base = read.Covers, read.Base
 			r.LeftOut = read.LeftOut
-			files, r.Base, found = read.Files, "the state file", true
+			files, r.Base = read.Files, "the state file"
 		case errors.Is(err, fixturemigrate.ErrNoState):
 		default:
 			r.Problems = append(r.Problems, err.Error())
-			return nil, nil
+			return nil, nil, nil
 		}
 	}
-	if !found {
+	if state == nil {
 		gitFiles, err := s.gitFiles("HEAD")
 		if err != nil {
 			where := "there is no state file at " + s.statePath
@@ -242,14 +263,15 @@ func (s *setup) statusBase(r *statusReport) (*fixturemigrate.Snapshot, error) {
 			case strings.Contains(why, "is not in a git repository"):
 				why = "it is not in a git repository"
 			}
-			return nil, fmt.Errorf("%s, and git cannot say what %s was at HEAD: %s. So nothing says what the "+
+			return nil, nil, fmt.Errorf("%s, and git cannot say what %s was at HEAD: %s. So nothing says what the "+
 				"fixture file changes, and status will not pass it. Run bun-fixture-migrate baseline once the "+
 				"databases hold it, or run status where git is installed and the fixture file is committed",
 				where, s.cfg.FixtureLabel(), why)
 		}
 		files, r.Base = gitFiles, "HEAD"
 	}
-	return s.snapshotOf(files, r.Base)
+	old, err := s.snapshotOf(files, r.Base)
+	return old, state, err
 }
 
 // uncoveredInDB works out what the fixture file changes with both sides
@@ -278,6 +300,94 @@ func (s *setup) uncoveredInDB(o streams, tx bun.Tx, r *statusReport, old, head *
 			"status -offline cannot tell from a change; run bun-fixture-migrate generate to record the new spelling")
 	}
 	return res, nil
+}
+
+// unaccounted is the fixture migrations of the directory the state's history
+// does not include.
+func unaccounted(state *fixturemigrate.State, fixtures []fixturemigrate.MigrationFile) []fixturemigrate.MigrationFile {
+	out, _ := state.Unaccounted(fixtures)
+	return out
+}
+
+// lineageProblem says why a fixture migration is not in the state's history,
+// and what to do about it.
+func lineageProblem(state *fixturemigrate.State, m fixturemigrate.MigrationFile) string {
+	if !generatedFile(m) {
+		return fmt.Sprintf("%s is a fixture migration whose changes the state file does not include. If you wrote it "+
+			"by hand for a change generate left out, record that with bun-fixture-migrate baseline -force", m.ID())
+	}
+	covers := state.Covers
+	if state.Format == 1 {
+		covers = state.Migration
+	}
+	how := fmt.Sprintf("it sorts after %s, the newest migration the state file includes, so it was generated on "+
+		"another branch and the merge kept the state file of this one", covers)
+	switch {
+	case covers == "":
+		how = "the state file includes no fixture migration, so it was generated on another branch and the merge " +
+			"kept the state file of this one"
+	case fixturemigrate.CompareMigrations(m.ID(), covers) < 0:
+		against := "the state file " + state.Base + " left"
+		if state.Base == "" {
+			against = "a state before any fixture migration"
+		}
+		how = fmt.Sprintf("it sorts before %s, which was generated against %s, so the two were generated "+
+			"against the same state on two branches", covers, against)
+	}
+	return fmt.Sprintf("%s is a generated fixture migration whose changes the state file does not include: %s. "+
+		"Whichever of the two runs second finds rows the other changed, and databases that run them in different "+
+		"orders end up different. Keep the one a database already applied and delete the other, take the state "+
+		"file as the one you kept left it, then generate again", m.ID(), how)
+}
+
+// generatedFile reports whether generate wrote a migration, by the comment it
+// opens with, rather than somebody by hand. baseline -force records one
+// written by hand; one generated on another branch has to be generated again.
+func generatedFile(m fixturemigrate.MigrationFile) bool {
+	if len(m.Files) == 0 {
+		return false
+	}
+	data, err := os.ReadFile(m.Files[0])
+	return err == nil && bytes.Contains(data, []byte("\n// Generated by bun-fixture-migrate: "))
+}
+
+// lineageOf is the history a state keeps when it is rewritten without a new
+// migration: what it says, or when it does not say, every fixture migration
+// of the directory.
+func lineageOf(state *fixturemigrate.State, fixtures []fixturemigrate.MigrationFile) (covers, base string) {
+	switch {
+	case state == nil:
+	case state.Format != 1:
+		return state.Covers, state.Base
+	case state.Migration != "baseline" && state.Migration != "":
+		return state.Migration, state.Migration
+	}
+	newest := newestFixture(fixtures)
+	return newest, newest
+}
+
+// fixtureMigrations is the fixture migrations of the migrations directory,
+// none when there is no directory yet.
+func (s *setup) fixtureMigrations() ([]fixturemigrate.MigrationFile, error) {
+	if s.outDir == "" {
+		return nil, nil
+	}
+	ms, err := fixturemigrate.ReadMigrations(s.outDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("the migrations directory: %w", err)
+	}
+	return ms.Fixtures(), nil
+}
+
+// newestFixture is the fixture migration that sorts last, "" for none.
+func newestFixture(fixtures []fixturemigrate.MigrationFile) string {
+	if len(fixtures) == 0 {
+		return ""
+	}
+	return fixtures[len(fixtures)-1].ID()
 }
 
 func printStatus(o streams, r *statusReport) {

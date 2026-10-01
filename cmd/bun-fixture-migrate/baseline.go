@@ -59,6 +59,10 @@ func baseline(o streams, args []string) error {
 	if err != nil {
 		return err
 	}
+	fixtures, err := s.fixtureMigrations()
+	if err != nil {
+		return err
+	}
 
 	var prev *fixturemigrate.State
 	current, err := fixturemigrate.ReadState(s.statePath)
@@ -71,17 +75,48 @@ func baseline(o streams, args []string) error {
 	default:
 		prev = &current
 	}
-	if prev != nil && len(prev.LeftOut) > 0 && !*force {
-		for _, line := range prev.LeftOut {
-			fmt.Fprintln(o.stdout, "left out:", line)
+	// The history. A fixture migration generated on another branch cannot be
+	// recorded as included: its guards expect rows as they were before the
+	// migrations of this branch, so it has to be generated again. One written
+	// by hand is the reason -force exists.
+	covers, base := lineageOf(prev, fixtures)
+	if prev != nil {
+		var byHand []string
+		generated := 0
+		for _, m := range unaccounted(prev, fixtures) {
+			if generatedFile(m) {
+				fmt.Fprintln(o.stderr, "refused:", lineageProblem(prev, m))
+				generated++
+				continue
+			}
+			byHand = append(byHand, m.ID())
 		}
-		return exitError{2, fmt.Sprintf("the state records %s generate left out, which no migration makes yet. "+
-			"Write their migration by hand, then pass -force", plural(len(prev.LeftOut), "change"))}
+		if generated > 0 {
+			return exitError{2, fmt.Sprintf("%s generated against another state, nothing written; "+
+				"baseline cannot make up for that, generating again does", plural(generated, "fixture migration"))}
+		}
+		if len(byHand) > 0 {
+			if !*force {
+				for _, id := range byHand {
+					fmt.Fprintln(o.stdout, "not in the state:", id)
+				}
+				return exitError{2, fmt.Sprintf("%s the state file does not include; pass -force if you wrote "+
+					"them by hand and the fixture file holds what they do", plural(len(byHand), "fixture migration"))}
+			}
+			covers, base = newestFixture(fixtures), newestFixture(fixtures)
+		}
+		if len(prev.LeftOut) > 0 && !*force {
+			for _, line := range prev.LeftOut {
+				fmt.Fprintln(o.stdout, "left out:", line)
+			}
+			return exitError{2, fmt.Sprintf("the state records %s generate left out, which no migration makes yet. "+
+				"Write their migration by hand, then pass -force", plural(len(prev.LeftOut), "change"))}
+		}
 	}
 
 	switch {
 	case prev == nil:
-	case fixturemigrate.SameFiles(prev.Files, files) && len(prev.LeftOut) == 0:
+	case fixturemigrate.SameFiles(prev.Files, files) && len(prev.LeftOut) == 0 && covers == prev.Covers:
 		fmt.Fprintf(o.stdout, "%s already records %s\n", s.statePath, source)
 		return nil
 	case *force:
@@ -103,7 +138,8 @@ func baseline(o streams, args []string) error {
 			fmt.Fprintf(o.stdout, "%s differs from the state only in how values are written\n", source)
 		}
 	}
-	if err := fixturemigrate.WriteState(s.statePath, fixturemigrate.State{Files: files, Migration: "baseline"}); err != nil {
+	state := fixturemigrate.State{Files: files, Migration: "baseline", Covers: covers, Base: base}
+	if err := fixturemigrate.WriteState(s.statePath, state); err != nil {
 		return err
 	}
 	fmt.Fprintf(o.stdout, "wrote %s: generate now diffs against %s\n", s.statePath, source)

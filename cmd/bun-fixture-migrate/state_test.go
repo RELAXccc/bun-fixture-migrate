@@ -365,3 +365,105 @@ func TestGenerateRecordsAnEditThatChangesNoValue(t *testing.T) {
 		t.Fatalf("%v %+v", err, state)
 	}
 }
+
+// gitIn runs git in a directory, failing the test on an error unless the
+// caller expects one.
+func gitIn(t *testing.T, dir string, fail bool, args ...string) string {
+	t.Helper()
+	out, err := git(dir, args...)
+	if (err != nil) != fail {
+		t.Fatalf("git %v: %v %s", args, err, out)
+	}
+	if err != nil {
+		return err.Error()
+	}
+	return string(out)
+}
+
+// Two branches each generate a migration from the same state and change the
+// same row. Kept together, whichever runs second finds the row changed:
+// a database that applied the newer one first skips the older one, a new one
+// runs both and ends elsewhere. Recording the merge with baseline -force is
+// refused; deleting the migration nobody applied and generating it again is
+// what works.
+func TestTwoBranchesGeneratingFromOneState(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	cfg, _ := project(t, oldFixture, oldFixture)
+	dir := filepath.Dir(cfg)
+	state := filepath.Join(dir, "migrations", "fixture_state.yml")
+	for _, args := range [][]string{{"init", "-q", "-b", "main"}, {"config", "user.email", "t@example.com"},
+		{"config", "user.name", "t"}} {
+		gitIn(t, dir, false, args...)
+	}
+	if code, _, errs := call(t, "baseline", "-config", cfg); code != 0 {
+		t.Fatal(errs)
+	}
+	gitIn(t, dir, false, "add", ".")
+	gitIn(t, dir, false, "commit", "-q", "-m", "baseline")
+	branch := func(name, price, at string) {
+		gitIn(t, dir, false, "checkout", "-q", "-b", name, "main")
+		writeFixture(t, cfg, strings.Replace(oldFixture, "price_cents: 2000", "price_cents: "+price, 1))
+		if code, out, errs := call(t, "generate", "-config", cfg, "-name", name, "-at", at); code != 0 {
+			t.Fatalf("exit %d\n%s%s", code, out, errs)
+		}
+		gitIn(t, dir, false, "add", ".")
+		gitIn(t, dir, false, "commit", "-q", "-m", name)
+	}
+	branch("older", "2500", "20261001100000")
+	branch("newer", "3000", "20261001110000")
+	gitIn(t, dir, false, "checkout", "-q", "main")
+	gitIn(t, dir, false, "merge", "-q", "newer")
+	gitIn(t, dir, true, "merge", "-q", "older")
+	if out := gitIn(t, dir, false, "diff", "--name-only", "--diff-filter=U"); !strings.Contains(out, "fixture_state.yml") {
+		t.Fatalf("the state file has to conflict: %s", out)
+	}
+	merged := strings.Replace(oldFixture, "price_cents: 2000", "price_cents: 2500", 1)
+	writeFixture(t, cfg, merged)
+	if code, out, _ := call(t, "status", "-config", cfg, "-offline"); code != 3 || !strings.Contains(out, "conflict markers") {
+		t.Fatalf("a conflicted state file: exit %d\n%s", code, out)
+	}
+
+	// Either side of the state file, recorded with baseline -force as the
+	// runbook used to say: refused, and status says why.
+	for side, missing := range map[string]string{"--theirs": "20261001110000_fixture_newer",
+		"--ours": "20261001100000_fixture_older"} {
+		gitIn(t, dir, false, "checkout", side, "--", state)
+		code, out, errs := call(t, "status", "-config", cfg, "-offline", "-json")
+		var report statusReport
+		if err := json.Unmarshal([]byte(out), &report); err != nil || code != 3 ||
+			strings.Join(report.NotInState, ",") != missing {
+			t.Fatalf("%s: exit %d, %v\n%s%s", side, code, err, out, errs)
+		}
+		if !strings.Contains(strings.Join(report.Problems, " "), "generate again") {
+			t.Fatalf("%s: status has to say what to do: %v", side, report.Problems)
+		}
+		code, out, errs = call(t, "baseline", "-config", cfg, "-force")
+		if code != 2 || !strings.Contains(errs, missing) || !strings.Contains(errs, "generating again does") {
+			t.Fatalf("%s: baseline -force: exit %d\n%s%s", side, code, out, errs)
+		}
+		if code, _, errs := call(t, "generate", "-config", cfg, "-name", "x"); code != 2 || !strings.Contains(errs, missing) {
+			t.Fatalf("%s: generate: exit %d %s", side, code, errs)
+		}
+	}
+
+	// The newer one was deployed; the older one was not. Delete it, take the
+	// state file the newer one left, and generate again.
+	gitIn(t, dir, false, "rm", "-q", "-f", filepath.Join(dir, "migrations", "20261001100000_fixture_older.go"))
+	gitIn(t, dir, false, "checkout", "--ours", "--", state)
+	if code, out, errs := call(t, "generate", "-config", cfg, "-name", "older", "-at", "20261001100000"); code != 0 {
+		t.Fatalf("exit %d\n%s%s", code, out, errs)
+	}
+	files := migrationsOf(t, cfg)
+	if len(files) != 2 || files[0] != "20261001110000_fixture_newer.go" || files[1] != "20261001110001_fixture_older.go" {
+		t.Fatalf("the migration generated again runs after the one deployed: %v", files)
+	}
+	again := readFile(t, filepath.Join(dir, "migrations", files[1]))
+	if !strings.Contains(again, `"price_cents": fixturechange.Lit("3000")`) || !strings.Contains(again, `Lit("2500")`) {
+		t.Fatalf("it starts from what the deployed one leaves:\n%s", again)
+	}
+	if code, out, errs := call(t, "status", "-config", cfg, "-offline"); code != 0 {
+		t.Fatalf("exit %d\n%s%s", code, out, errs)
+	}
+}

@@ -11,6 +11,7 @@ see the [production runbook](production.md); this page is about the tool itself.
 - [The state file](#the-state-file)
 - [Generating](#generating)
 - [Planning](#planning)
+- [Status](#status)
 - [At run time](#at-run-time)
 
 ## Configuration
@@ -141,6 +142,15 @@ not counted when a database is configured: `baseline` asks it, unless `-offline`
 exit 2). `generate -allow-partial` wrote the rest of a change and recorded these in the state file.
 Write their migration by hand, then `baseline -force`.
 
+**`... is a generated fixture migration whose changes the state file does not include`** (`status`,
+exit 3; `generate` and `baseline`, exit 2). Two branches each generated a migration from one state,
+and the merge kept the state file of one of them. `baseline -force` cannot fix that: see
+[the runbook](production.md#the-state-file-conflicts-in-a-merge).
+
+**`... is a fixture migration whose changes the state file does not include. If you wrote it by
+hand ...`.** A migration holding a `fixturechange.Set` that `generate` did not write. Once the
+fixture file holds what it does, record it with `baseline -force`.
+
 **`the fixture file differs from the state file only in how values are written`** (`status` note).
 A value is spelled differently, `1.10` for `1.1` in a numeric column, which only the database can
 tell from a change; `status -offline` fails on it until the state file has the new spelling. Run
@@ -153,6 +163,9 @@ If you expected a change, check the file was saved, and that `status -offline` a
 differs from the state only in comments or in how values are written, `generate` says it wrote the
 state file with the new text.
 
+**`N fixture migrations the state file does not include, nothing written`.** See the state file
+section above.
+
 **`warning: migration 3_backfill sorts after 20260930165255, so bun runs it after this one`.** bun
 orders migrations by name as strings. A migration named with a short number sorts after every
 timestamp. Rename it with a timestamp, or check that running it later is harmless.
@@ -163,8 +176,9 @@ file would not compile there. Fix `package:` in the configuration.
 **`warning: no file in migrations declares the variable Migrations ...`.** The generated file
 registers with the variable named by `migrator:`. Declare it, or fix the name.
 
-**`the migration is written, the state file is not`.** The file system refused the second write. The
-migration is fine; run `baseline -force` once the cause is fixed, before generating again.
+**`the migration is written, the state file is not`.** The file system refused the second write.
+Delete the migration it names and generate again once the cause is fixed: recording it with
+`baseline` instead is refused, because the state file's history does not include it.
 
 ## Planning
 
@@ -176,6 +190,12 @@ again, or raise `-lock-timeout`.
 changes, run before this one in the deploy but not in the plan. If they change the tables the
 fixture migration touches, run `plan -with-sql` so SQL migrations run too, or plan against a copy
 that already has them.
+
+## Status
+
+**Starting the history over.** When every database applied every migration in the directory and the
+state file's history no longer matters, delete the state file and run `baseline`: a new state file
+includes every fixture migration there is.
 
 ## At run time
 
