@@ -186,3 +186,51 @@ func TestADomainIsItsBaseType(t *testing.T) {
 		t.Fatal("a domain over varchar is written from a string field")
 	}
 }
+
+// How a message names an index, and which ones refuse two equal rows.
+func TestKeyIndexDefinition(t *testing.T) {
+	plain := func(cols ...string) []IndexColumn {
+		var out []IndexColumn
+		for _, c := range cols {
+			out = append(out, IndexColumn{Column: c})
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		index    KeyIndex
+		want     string
+		equality bool
+	}{
+		{KeyIndex{Unique: true, Columns: plain("parent_id", "code")}, "UNIQUE (parent_id, code)", true},
+		{KeyIndex{Unique: true, Primary: true, Columns: plain("id")}, "PRIMARY KEY (id)", true},
+		{KeyIndex{Unique: true, NullsNotDistinct: true, Columns: plain("parent_id", "code")},
+			"UNIQUE NULLS NOT DISTINCT (parent_id, code)", true},
+		{KeyIndex{Unique: true, Columns: plain("code"), Predicate: "(deleted_at IS NULL)"},
+			"UNIQUE (code) WHERE deleted_at IS NULL", true},
+		{KeyIndex{Unique: true, Columns: plain("code"), Predicate: "((deleted_at IS NULL) AND (tenant_id IS NULL))"},
+			"UNIQUE (code) WHERE (deleted_at IS NULL) AND (tenant_id IS NULL)", true},
+		{KeyIndex{Unique: true, Columns: []IndexColumn{{Expr: "lower(email)"}}}, "UNIQUE (lower(email))", true},
+		{KeyIndex{Unique: true, Columns: []IndexColumn{{Expr: "COALESCE(parent_id, 0)"}, {Column: "code"}}},
+			"UNIQUE (COALESCE(parent_id, 0), code)", true},
+		{KeyIndex{Unique: true, Columns: []IndexColumn{{Expr: "(plan_id + 1)"}}}, "UNIQUE ((plan_id + 1))", true},
+		{KeyIndex{Unique: true, Columns: []IndexColumn{{Expr: "lower(a) || lower(b)"}}},
+			"UNIQUE ((lower(a) || lower(b)))", true},
+		{KeyIndex{Exclusion: true, Columns: []IndexColumn{{Column: "code", Operator: "="}}},
+			"EXCLUDE (code WITH =)", true},
+		{KeyIndex{Exclusion: true, Columns: []IndexColumn{{Column: "code", Operator: "="},
+			{Column: "during", Operator: "&&"}}}, "EXCLUDE (code WITH =, during WITH &&)", false},
+	} {
+		if got := tc.index.Definition(); got != tc.want {
+			t.Errorf("Definition() = %q, want %q", got, tc.want)
+		}
+		if got := tc.index.Equality(); got != tc.equality {
+			t.Errorf("%s: Equality() = %v", tc.want, got)
+		}
+	}
+	if !(KeyIndex{Columns: plain("a")}).Plain() || (KeyIndex{Columns: []IndexColumn{{Expr: "lower(a)"}}}).Plain() {
+		t.Error("Plain")
+	}
+	if got := trimParens("((a = ')') AND (b IS NULL))"); got != "(a = ')') AND (b IS NULL)" {
+		t.Errorf("trimParens: %q", got)
+	}
+}

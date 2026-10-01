@@ -166,6 +166,13 @@ type Policy struct {
 	// natural key in the database, which makes every lookup by that key
 	// ambiguous. Default "error".
 	DuplicateKey Mode `yaml:"duplicate_key"`
+	// KeyIndex decides what happens when no unique index or constraint of
+	// the table makes a model's natural key unique among its rows: the
+	// database then lets the application add a second row with the key, and
+	// every change to it fails as a duplicate key from then on. It is
+	// checked against a database by check, generate, status and sync, and
+	// never written into a migration. Default "warn".
+	KeyIndex Mode `yaml:"key_index"`
 	// Renames decides what a change of a row's natural key under an unchanged
 	// id becomes: "refuse" (default) leaves it to you, "update" writes an
 	// UPDATE of the key columns guarded by the id and the old key.
@@ -316,6 +323,9 @@ type Model struct {
 	MissingRow   Mode `yaml:"missing_row"`
 	ChangedRow   Mode `yaml:"changed_row"`
 	DuplicateKey Mode `yaml:"duplicate_key"`
+	// KeyIndex overrides Policy.KeyIndex for this model. It is checked
+	// against a database and is not written into the migration.
+	KeyIndex Mode `yaml:"key_index"`
 	// Where is an SQL predicate that limits which rows of the table are master
 	// data, for a table that holds other rows too. It is written into every
 	// query the export and check commands run, and it is your text: keep it
@@ -568,6 +578,9 @@ func (c *Config) Prepare() error {
 			return fmt.Errorf("model %q: array_nulls is %q, it has to be %q or %q", name, m.ArrayNulls,
 				ArrayNullsRefuse, ArrayNullsKeep)
 		}
+		if err := m.prepareKeyIndex(name); err != nil {
+			return err
+		}
 		for _, f := range m.runTimePolicy() {
 			if *f.value != "" && !f.value.valid(f.allowed...) {
 				return fmt.Errorf("model %q: %s is %q, it has to be one of %s, or left out for the policy block's",
@@ -594,6 +607,7 @@ func (p *Policy) prepare() error {
 		{"zero_default", &p.ZeroDefault, ModeError, []Mode{ModeError, ModeWarn, ModeIgnore}},
 		{"null_default", &p.NullDefault, ModeError, []Mode{ModeError, ModeWarn, ModeIgnore}},
 		{"duplicate_key", &p.DuplicateKey, ModeError, []Mode{ModeError, ModeWarn}},
+		{"key_index", &p.KeyIndex, ModeWarn, keyIndexModes},
 	} {
 		if *f.value == "" {
 			*f.value = f.def
@@ -869,6 +883,7 @@ func (c *Config) ModelPolicy(model string) Policy {
 	for _, o := range []struct{ to, from *Mode }{
 		{&p.IDDrift, &m.IDDrift}, {&p.MissingRow, &m.MissingRow},
 		{&p.ChangedRow, &m.ChangedRow}, {&p.DuplicateKey, &m.DuplicateKey},
+		{&p.KeyIndex, &m.KeyIndex},
 	} {
 		if *o.from != "" {
 			*o.to = *o.from
@@ -924,7 +939,34 @@ func (c *Config) ModeOf(f Finding) Mode {
 	if f.Kind == FindingDuplicateKey {
 		return c.ModelPolicy(f.Model).DuplicateKey
 	}
+	if f.Kind == FindingUnbackedKey {
+		return keyIndexMode(c.ModelPolicy(f.Model).KeyIndex, f)
+	}
 	return c.FindingMode(f.Kind)
+}
+
+// keyIndexModes are the values key_index takes, in the policy block and in a
+// model.
+var keyIndexModes = []Mode{ModeError, ModeWarn, ModeIgnore}
+
+// prepareKeyIndex checks the key_index a model sets for itself. It is no
+// run-time policy, so it is not among runTimePolicy's.
+func (m *Model) prepareKeyIndex(name string) error {
+	if m.KeyIndex != "" && !m.KeyIndex.valid(keyIndexModes...) {
+		return fmt.Errorf("model %q: key_index is %q, it has to be one of %s, or left out for the policy block's",
+			name, m.KeyIndex, modeList(keyIndexModes))
+	}
+	return nil
+}
+
+// keyIndexMode is what key_index makes of an unbacked-key finding: the
+// policy, but never more than a warning for one the lint could not decide,
+// which says so.
+func keyIndexMode(mode Mode, f Finding) Mode {
+	if f.unsure && mode == ModeError {
+		return ModeWarn
+	}
+	return mode
 }
 
 // arrayNulls is what a null inside a sequence means for a model.

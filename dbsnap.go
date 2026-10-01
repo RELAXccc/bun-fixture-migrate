@@ -717,8 +717,9 @@ func reportDuplicateRefs(cfg *Config, snap *Snapshot) {
 				Kind: FindingDuplicateKey, Model: model, Row: m.Ref + "=" + value,
 				Detail: fmt.Sprintf(
 					"%s share this %s (%s), and every generated reference resolves with "+
-						"WHERE %s = ?, so it cannot name one of them: add a unique index on %s",
-					plural(len(ids), "row"), m.Ref, strings.Join(ids, ", "), m.Ref, m.Ref),
+						"WHERE %s = ?, so it cannot name one of them: %s",
+					plural(len(ids), "row"), m.Ref, strings.Join(ids, ", "), m.Ref,
+					indexAdvice(snap.tables[model], []string{m.Ref}, "add a unique index on "+m.Ref)),
 			})
 		}
 	}

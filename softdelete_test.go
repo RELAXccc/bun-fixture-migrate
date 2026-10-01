@@ -331,23 +331,29 @@ func TestScaffoldProposesSoftDelete(t *testing.T) {
 	currencies.Columns = append(append([]dbschema.Column{}, currencies.Columns...),
 		dbschema.Column{Name: "retired_at", Position: 4, Type: "timestamp", Nullable: true},
 		dbschema.Column{Name: "deleted_at", Position: 5, Type: "timestamptz", Nullable: true, Default: "now()"})
+	live := unique("currencies_code_live", "code")
+	live.Predicate = "(retired_at IS NULL)"
+	currencies.KeyIndexes = []dbschema.KeyIndex{live}
 	tables["public.currencies"] = &currencies
 	features := *tables["public.features"]
 	features.Columns = append(append([]dbschema.Column{}, features.Columns...),
 		dbschema.Column{Name: "deleted_at", Position: 6, Type: "int8", Nullable: true})
 	tables["public.features"] = &features
 
-	data := Scaffold(tables, nil, "public", ScaffoldOptions{LiveIndexes: map[string]map[string]string{
-		"public.currencies": {"retired_at": "currencies_code_live"},
-	}})
+	data := Scaffold(tables, nil, "public", ScaffoldOptions{})
 	text := string(data)
+	// The words, comment marks and line breaks taken out.
+	words := strings.Join(strings.Fields(strings.ReplaceAll(text, "#", "")), " ")
 	for _, want := range []string{
-		"    # GUESS: the unique index currencies_code_live holds only where retired_at IS NULL",
-		"    soft_delete: retired_at\n",
-		"    # GUESS: deleted_at, a nullable timestamp, is the column of bun's DeletedAt field",
-		"    soft_delete: deleted_at\n",
+		"GUESS: taken from UNIQUE (code) WHERE retired_at IS NULL, which holds only where retired_at IS NULL: the " +
+			"live rows of a table bun soft-deletes, which the soft_delete below says.",
+		"GUESS: UNIQUE (code) WHERE retired_at IS NULL holds only where retired_at IS NULL, which is how a table " +
+			"keeps the rows bun's soft delete deleted",
+		"soft_delete: retired_at",
+		"GUESS: deleted_at, a nullable timestamp, is the column of bun's DeletedAt",
+		"soft_delete: deleted_at",
 	} {
-		if !strings.Contains(text, want) {
+		if !strings.Contains(words, want) {
 			t.Errorf("the scaffold is missing %q:\n%s", want, text)
 		}
 	}
@@ -367,24 +373,6 @@ func TestScaffoldProposesSoftDelete(t *testing.T) {
 	if cfg.Models["Plan"].SoftDelete != "deleted_at" || cfg.Models["Currency"].SoftDelete != "retired_at" ||
 		cfg.Models["Feature"].SoftDelete != "" {
 		t.Fatalf("models: %+v %+v %+v", cfg.Models["Plan"], cfg.Models["Currency"], cfg.Models["Feature"])
-	}
-}
-
-func TestLiveColumn(t *testing.T) {
-	for pred, want := range map[string]string{
-		"(deleted_at IS NULL)":                           "deleted_at",
-		`("Deleted At" IS NULL)`:                         `"Deleted At"`,
-		"((deleted_at IS NULL) AND (tenant_id IS NULL))": "deleted_at,tenant_id",
-		"(deleted_at IS NOT NULL)":                       "",
-		"(status <> 'retired'::text)":                    "",
-	} {
-		var got []string
-		for _, m := range liveColumn.FindAllStringSubmatch(pred, -1) {
-			got = append(got, m[1])
-		}
-		if strings.Join(got, ",") != want {
-			t.Errorf("%s: got %v, want %s", pred, got, want)
-		}
 	}
 }
 

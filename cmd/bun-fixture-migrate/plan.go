@@ -4,17 +4,21 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"database/sql/driver"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
+	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
 	"github.com/RELAXccc/bun-fixture-migrate/fixtureapply"
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 	"github.com/RELAXccc/bun-fixture-migrate/internal/pgerr"
@@ -588,6 +592,9 @@ func simulate(o streams, db *bun.DB, targets []planTarget, lockTimeout time.Dura
 			continue
 		}
 		pm.Result, pm.Notes = "succeeds", append([]string(nil), t.notes...)
+		if t.sql == "" {
+			pm.Notes = append(pm.Notes, keyNotes(o.ctx, tx, t.set)...)
+		}
 		var err error
 		if t.sql != "" {
 			err = runSQLMigration(o, tx, t)
@@ -761,4 +768,94 @@ func printPlan(o streams, r *planReport) {
 		fmt.Fprintf(o.stdout, "for %s it held locked the %s it wrote; other sessions writing them waited\n",
 			held, plural(int(r.RowsLocked), "row"))
 	}
+}
+
+// keyNotes are plan's notes on the natural keys a change set looks its rows
+// up by that no unique index or constraint backs, as the database stands
+// when the set would run: there, a duplicate the application adds before the
+// deploy makes the change fail. They are notes, and fail nothing; check and
+// generate report the same keys under policy.key_index.
+func keyNotes(ctx context.Context, tx bun.Tx, set fixturechange.Set) []string {
+	keys := map[string][][]string{}
+	for _, c := range set.Changes {
+		cols := make([]string, 0, len(c.Key))
+		for col := range c.Key {
+			cols = append(cols, col)
+		}
+		sort.Strings(cols)
+		if !slices.ContainsFunc(keys[c.Model], func(k []string) bool { return slices.Equal(k, cols) }) {
+			keys[c.Model] = append(keys[c.Model], cols)
+		}
+	}
+	models := make([]string, 0, len(keys))
+	for model := range keys {
+		models = append(models, model)
+	}
+	sort.Strings(models)
+	var notes []string
+	err := fixturemigrate.ReadOnly(ctx, tx, func(tx bun.Tx) error {
+		schemas := map[string]map[string]*dbschema.Table{}
+		for _, model := range models {
+			t, ok := set.Tables[model]
+			if !ok {
+				continue
+			}
+			table, err := tableOf(ctx, tx, t.Name, schemas)
+			if err != nil || table == nil {
+				// A table the database lacks fails the change itself, or a
+				// migration the plan did not run creates it.
+				continue
+			}
+			for _, cols := range keys[model] {
+				// A model that soft-deletes its rows looks its live ones up.
+				v, err := fixturemigrate.KeyBacked(ctx, tx, table, cols, fixturemigrate.RowFilter(t.Where, t.SoftDelete))
+				if err != nil {
+					return err
+				}
+				if !v.Backed {
+					notes = append(notes, fmt.Sprintf("%s: %s", model, v.Detail))
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		notes = append(notes, "the natural keys could not be checked against the unique indexes: "+err.Error())
+	}
+	return notes
+}
+
+// tableOf reads a table of a change set as the catalog has it, named as the
+// set names it, through the search path when it names no schema; nil when
+// there is no such table. schemas keeps the schemas read so far.
+func tableOf(ctx context.Context, tx bun.Tx, name string,
+	schemas map[string]map[string]*dbschema.Table) (*dbschema.Table, error) {
+
+	var schema, relname string
+	err := tx.QueryRowContext(ctx, `SELECT n.nspname, c.relname FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = to_regclass(?)`, quoteName(name)).Scan(&schema, &relname)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	tables, ok := schemas[schema]
+	if !ok {
+		if tables, err = dbschema.Load(ctx, tx, schema); err != nil {
+			return nil, err
+		}
+		schemas[schema] = tables
+	}
+	return tables[schema+"."+relname], nil
+}
+
+// quoteName double-quotes each part of a table name as a change set writes
+// it, "items" or "billing.items".
+func quoteName(name string) string {
+	parts := strings.Split(name, ".")
+	for i, p := range parts {
+		parts[i] = `"` + strings.ReplaceAll(p, `"`, `""`) + `"`
+	}
+	return strings.Join(parts, ".")
 }

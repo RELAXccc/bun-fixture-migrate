@@ -503,8 +503,8 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 				if !sameRowSet(prev, cur) {
 					res.Refusals = append(res.Refusals, Refusal{model, label, fmt.Sprintf(
 						"the natural key is not unique (%s before, %s after) and the rows differ: "+
-							"hand-write the migration, and give the table a unique index",
-						plural(len(prev), "row"), plural(len(cur), "row"))})
+							"hand-write the migration%s",
+						plural(len(prev), "row"), plural(len(cur), "row"), keyAdvice(old, next, model, cur[0]))})
 				}
 				continue
 			}

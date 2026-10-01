@@ -62,7 +62,10 @@ Before the export, read what scaffold wrote. It proposes every table but bun's o
 and only you know which the application writes: delete the models of users, orders, sessions and
 the like, or export writes their rows into the fixture file and every deploy is drift. Check
 `seed_guard_table`, which it guesses: a table the fixture file fills, without which a new
-environment runs its fixture migrations before the seed.
+environment runs its fixture migrations before the seed. And check the keys: every natural key needs
+a unique index behind it, or the application can add a second row with it and every change to that
+row fails. `check` says which keys have none and the index to create; a scaffolded configuration
+makes that an error (`key_index: error`).
 
 Then, for every change to master data, edit the fixture file and:
 

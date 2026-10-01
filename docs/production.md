@@ -385,7 +385,11 @@ it; either way nothing was changed.
    scaffold guesses one; without one, `generate` warns, and a new environment fails its first
    deploy (see [below](#a-new-environment)).
 3. `bun-fixture-migrate export` from production, or keep your existing fixture file and run `check`
-   against production until they agree.
+   against production until they agree. `check` also names every natural key no unique index backs,
+   an error under the `key_index: error` scaffold writes: create the index it names, `CONCURRENTLY`
+   on a live table, before the first fixture migration, or the application's next duplicate fails
+   the deploy that touches it. A table holding duplicates already cannot get one until they are
+   gone, and `check` lists those too.
 4. `bun-fixture-migrate baseline`: the databases hold the file, record that.
 5. Add `status -offline` to CI.
 

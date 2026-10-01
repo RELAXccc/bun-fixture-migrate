@@ -364,8 +364,11 @@ hand and `baseline -force`. See the [runbook](production.md#generate-refused-a-c
   what a `[]time.Time` field makes of it, and only the seeding session is checked.
 - Keys equal under their type are found for the type's own equality; a column's nondeterministic
   collation is not considered.
-- A `CHECK` over several columns, a unique index, a foreign key and a trigger are checked by `plan`,
-  not by `check` or `generate`.
+- A `CHECK` over several columns, a unique index over other columns than the natural key, a foreign
+  key and a trigger are checked by `plan`, not by `check` or `generate`. Whether a unique index backs
+  each natural key, and two keys of the files an index stricter than the key holds equal (`Ann@`
+  and `ann@` under `lower(email)`), `check` and `generate` say: see
+  [the natural-key lint](reference.md#the-natural-key-lint).
 - Two `bytea` readings meet in a sequence: a quoted string that is a JSON array of byte values, in a
   `bytea` column, is taken for the sequence.
 - Values never become part of the SQL the tool writes: they are passed as arguments, which bun quotes

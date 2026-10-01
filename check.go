@@ -130,7 +130,8 @@ func (c *CheckResult) Lines() []string {
 	var out []string
 	grouped := FindingsByKind(c.Findings)
 	for _, kind := range []FindingKind{FindingUnknownColumn, FindingInvalidValue, FindingAmbiguousValue,
-		FindingZeroDefault, FindingNullDefault, FindingDuplicateKey, FindingDuplicateID, FindingSoftDelete} {
+		FindingZeroDefault, FindingNullDefault, FindingDuplicateKey, FindingDuplicateID, FindingUnbackedKey,
+		FindingSoftDelete} {
 		list := grouped[kind]
 		if len(list) == 0 {
 			continue
@@ -236,6 +237,8 @@ func (c *Config) FindingMode(kind FindingKind) Mode {
 		return c.Policy.NullDefault
 	case FindingDuplicateKey:
 		return c.Policy.DuplicateKey
+	case FindingUnbackedKey:
+		return c.Policy.KeyIndex
 	}
 	return ModeError
 }
