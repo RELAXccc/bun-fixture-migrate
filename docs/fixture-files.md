@@ -89,8 +89,12 @@ the resolved one. A domain is its base type throughout: a domain over integer is
 `jsonb` a JSON document, and its default is the column's when the column has none. The column's type comes from the database, so **without one** (`generate` with no
 `database` configured or with `-no-lint`, `status -offline`, `baseline`) a change that carries a
 value whose two readings differ is refused with a reason, and so is a value only respelled (`1.10`
-before, `1.1` after), which is a change in a text column and none in a numeric one. To have neither
-question arise, quote a value meant as text, and write any other the way it resolves: `1.1`, `15`,
+before, `1.1` after), which is a change in a text column and none in a numeric one. So is a string
+respelled as another spelling of one interval, `'86400 seconds'` before and `'24:00:00'` or `PT24H`
+after, `'1 days'` and `'1 day'`: an interval column holds them as one value, the database run finds
+no change, and a text column holds two. `'1 day'` and `'24 hours'` are two intervals to PostgreSQL,
+which adds them differently to a timestamp across a change of daylight saving time, and a change
+both ways. To have neither question arise, quote a value meant as text, and write any other the way it resolves: `1.1`, `15`,
 `true`, `2026-01-01T10:00:00Z`. `export` writes every value that way.
 
 **With a database at hand** (`check`, `export`, `generate` when one is configured, `sync`), every
@@ -291,8 +295,8 @@ Each ends up in the output with the model, the row and a reason; `generate` writ
   column: PostgreSQL refuses to write either.
 - **A null in a NOT NULL column without a default**, an `invalid value`: bun writes a plain field's
   zero there instead, and a pointer field, like a migration, fails the insert.
-- **A value only the column's type can settle**, such as `1.10` or `017`, in a change computed
-  without a database; see [values](#values).
+- **A value only the column's type can settle**, such as `1.10` or `017`, or an interval respelled,
+  `'86400 seconds'` to `'24:00:00'`, in a change computed without a database; see [values](#values).
 - **A value the column cannot take as `dbfixture` writes it**, an `invalid value`: one PostgreSQL
   refuses to cast, one too long for the column, one a single-column `CHECK` refuses, a fraction in
   an integer column. See [lengths, domains and constraints](#lengths-domains-and-constraints).

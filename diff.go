@@ -339,6 +339,47 @@ func respelled(model string, m *Model, prev, cur *Entry) (Refusal, bool) {
 	return Refusal{model, cur.label(model), strings.Join(cols, "; ") + ", " + undecidedReason}, true
 }
 
+// respelledInterval refuses a row whose value changed from one spelling of an
+// interval to another, '86400 seconds' to '24:00:00' or '1 days' to '1 day',
+// where the column's type is not known (typed): an interval column holds both
+// as one value, and the database run finds no change, while any other column
+// holds two. Both the database and the files say which, once the catalog is
+// read; without it the change would be written, or not, on a guess. Two
+// plain numbers are left as they are: a code '01' that became '001' is far
+// likelier text than an interval of a second.
+func respelledInterval(model string, m *Model, prev, cur *Entry, typed func(col string) bool) (Refusal, bool) {
+	var cols []string
+	for _, col := range sortedColumns(cur.Cells) {
+		if !m.ownsValue(col) || typed(col) {
+			continue
+		}
+		a, ok := prev.Cells[col]
+		b := cur.Cells[col]
+		if !ok || a.IsNull || b.IsNull || a.Ref != nil || b.Ref != nil || a.Lit == b.Lit ||
+			plainNumber(a.Lit) && plainNumber(b.Lit) {
+			continue
+		}
+		ia, okA := intervalText(a.Lit)
+		ib, okB := intervalText(b.Lit)
+		if okA && okB && ia == ib {
+			cols = append(cols, fmt.Sprintf("%s is written %s before and %s after, which an interval column "+
+				"holds as one value, %s, and any other column as two", col, a.Lit, b.Lit, ia))
+		}
+	}
+	if len(cols) == 0 {
+		return Refusal{}, false
+	}
+	return Refusal{model, cur.label(model), strings.Join(cols, "; ") + ": only the column's type says whether " +
+		"this is a change. With the database configured (and without -no-lint) the tool reads the types and " +
+		"decides; or write it as before"}, true
+}
+
+// plainNumber reports text that is a number and nothing else.
+func plainNumber(s string) bool {
+	s = strings.TrimSpace(s)
+	return s != "" && strings.Trim(s, "+-.0123456789") == ""
+}
+
 // Compute diffs two snapshots. Both sides are the same shape whether they came
 // from a fixture file or from a database, so this one function serves the diff
 // between two revisions of the file and the diff between the database and the
@@ -473,6 +514,12 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 				continue
 			}
 			if r, ok := respelled(model, m, prev[0], cur[0]); ok {
+				res.Refusals = append(res.Refusals, r)
+				continue
+			}
+			if r, ok := respelledInterval(model, m, prev[0], cur[0], func(col string) bool {
+				return old.typed(model, col) || next.typed(model, col)
+			}); ok {
 				res.Refusals = append(res.Refusals, r)
 				continue
 			}

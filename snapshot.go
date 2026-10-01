@@ -138,6 +138,17 @@ type Snapshot struct {
 	tables map[string]*dbschema.Table
 }
 
+// typed reports a column of a model whose type the catalog read for the
+// snapshot names, so its values are as the database holds them.
+func (s *Snapshot) typed(model, col string) bool {
+	t := s.tables[model]
+	if t == nil {
+		return false
+	}
+	_, ok := t.Column(col)
+	return ok
+}
+
 // noteUniques records the unique indexes of a model's table, and the table.
 func (s *Snapshot) noteUniques(model string, table *dbschema.Table) {
 	if s.tables == nil {

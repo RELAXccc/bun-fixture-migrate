@@ -157,7 +157,8 @@ about. So is a migration without a `seed_guard_table`, which on a database that 
 runs before the seed and fails, and one whose seed guard is the table of no model.
 
 With a database configured, both sides are respelled by it first, so a value written two ways (`1.10`
-and `1.1` in a numeric column) is no change. When the fixture files differ from the state file but
+and `1.1` in a numeric column, `'86400 seconds'` and `'24:00:00'` in an interval one) is no change.
+Without one, such a change is refused, since the column's type decides whether it is one. When the fixture files differ from the state file but
 change no value, nothing is generated and the state file takes the new text, so `status -offline`
 agrees.
 
