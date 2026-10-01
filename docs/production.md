@@ -12,6 +12,7 @@ against production itself: it runs in a transaction PostgreSQL holds to `READ ON
 - [generate refused a change](#generate-refused-a-change)
 - [The state file conflicts in a merge](#the-state-file-conflicts-in-a-merge)
 - [The state file was edited or lost](#the-state-file-was-edited-or-lost)
+- [Every migrate fails: the migrations table is already locked](#every-migrate-fails-the-migrations-table-is-already-locked)
 - [Rolling back](#rolling-back)
 - [Running a migration by hand](#running-a-migration-by-hand)
 - [Adopting the tool on an existing project](#adopting-the-tool-on-an-existing-project)
@@ -24,7 +25,7 @@ against production itself: it runs in a transaction PostgreSQL holds to `READ ON
 | every change | `status -offline` | a fixture edit without its migration; a change `generate -allow-partial` left out and nobody migrated; a fixture migration from another branch the state file does not include; two migrations bun would record under one name |
 | before a deploy | `plan -strict` against a recent copy of production | a migration that would fail or skip a change |
 | the deploy | your migrator, then the seed of an empty database | a fixture migration that cannot do what it says |
-| after it | `status -require-applied` | a migration the database did not apply |
+| after it | `status -require-applied` | a migration the database did not apply; the lock of a migrator that died, which fails the next deploy |
 | after it, and on a schedule | `check` | drift between the database and the fixture file |
 
 [CI](ci.md) has ready-made jobs for all of them. `plan` against production itself is safe too:
@@ -175,6 +176,10 @@ to different databases before the merge, those databases have already diverged: 
 deploy, run `check` against each and bring it to the fixture file with `generate -from-db`, or with
 `sync` where nothing deploys to it.
 
+A migration merged after a later-named one was deployed runs after it, whatever its name: bun runs
+every migration it has no record of. `status` against such a database marks it `out of order`;
+`status -strict-order` fails on it.
+
 ## The state file was edited or lost
 
 **Symptom.** A command refuses the state file: its checksum does not match, or its marker is gone.
@@ -188,6 +193,25 @@ the wrong base, so it is refused.
 the state file also added that migration, it is the fixture file at that commit:
 `bun-fixture-migrate baseline -from <commit> -force`. If you cannot tell, `export` from a database
 that applied every migration (`status -require-applied`) and baseline that.
+
+## Every migrate fails: the migrations table is already locked
+
+**Symptom.** The migrator returns `migrate: migrations table is already locked`, on every deploy.
+`status` against the database says `locked: bun_migration_locks holds bun's lock on bun_migrations`
+and exits 3.
+
+**What happened.** bun's `Migrator.Lock` inserts a row into its locks table and `Unlock` deletes it. A
+deploy that died in between, killed or out of memory, left the row, and every `Lock` after it fails.
+
+**Steps.** Make sure no migration is running: no deploy in progress, no replica starting. Then delete
+the row, as `status` prints it:
+
+```
+DELETE FROM bun_migration_locks WHERE table_name = 'bun_migrations';
+```
+
+Then run `status -require-applied`: a migration the dead deploy did not finish is pending, and the
+next deploy runs it. Set `migration_locks_table` if the migrator is built `WithLocksTableName`.
 
 ## Rolling back
 

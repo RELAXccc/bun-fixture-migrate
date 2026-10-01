@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
 )
@@ -465,5 +466,36 @@ func TestTwoBranchesGeneratingFromOneState(t *testing.T) {
 	}
 	if code, out, errs := call(t, "status", "-config", cfg, "-offline"); code != 0 {
 		t.Fatalf("exit %d\n%s%s", code, out, errs)
+	}
+}
+
+// A pending migration named before one the database applied is marked, and
+// so is the lock a migrator that died left behind.
+func TestStatusMarksOrderAndLock(t *testing.T) {
+	at := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	r := &statusReport{Directory: "migrations", Database: &databaseInfo{Table: "bun_migrations", LocksTable: "bun_migration_locks", Locked: true},
+		Migrations: []migrationInfo{{ID: "1_a", Name: "1"}, {ID: "2_b", Name: "2"}, {ID: "3_c", Name: "3"}, {ID: "4_d", Name: "4"}}}
+	markApplied(r, map[string]fixturemigrate.Applied{"1": {Name: "1", GroupID: 1, MigratedAt: at},
+		"3": {Name: "3", GroupID: 2, MigratedAt: at}, "9": {Name: "9", GroupID: 2, MigratedAt: at}})
+	if r.Database.NewestApplied != "3" || !r.Migrations[1].OutOfOrder || r.Migrations[3].OutOfOrder ||
+		r.Migrations[0].OutOfOrder || strings.Join(r.Database.NotInDirectory, ",") != "9" {
+		t.Fatalf("%+v %+v", r.Database, r.Migrations)
+	}
+	var out strings.Builder
+	printStatus(streams{stdout: &out}, r)
+	text := strings.Join(strings.Fields(out.String()), " ")
+	for _, want := range []string{"pending 2_b out of order: runs after 3", "2_b is pending and sorts before 3",
+		"locked: bun_migration_locks holds bun's lock on bun_migrations", "DELETE FROM bun_migration_locks WHERE table_name = 'bun_migrations'"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in\n%s", want, out.String())
+		}
+	}
+}
+
+// -strict-order is about what a database applied.
+func TestStrictOrderNeedsTheDatabase(t *testing.T) {
+	cfg, _ := project(t, oldFixture, oldFixture)
+	if code, _, errs := call(t, "status", "-config", cfg, "-strict-order"); code != 1 || !strings.Contains(errs, "needs the database") {
+		t.Fatalf("exit %d: %s", code, errs)
 	}
 }

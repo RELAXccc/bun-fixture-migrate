@@ -193,6 +193,16 @@ that already has them.
 
 ## Status
 
+**`out of order: runs after 20261001110000`.** The migration is pending and sorts before one this
+database applied. bun runs it on the next migrate all the same, after migrations it was not written
+to follow: usually a branch merged after a later one was deployed. `plan` against a copy of the
+database shows what it does there; `status -strict-order` fails on it.
+
+**`locked: bun_migration_locks holds bun's lock on bun_migrations`** (exit 3). A migrator is running,
+or one died between `Lock` and `Unlock`, and every migrate fails with
+`migrations table is already locked` until the row is gone. See
+[the runbook](production.md#every-migrate-fails-the-migrations-table-is-already-locked).
+
 **Starting the history over.** When every database applied every migration in the directory and the
 state file's history no longer matters, delete the state file and run `baseline`: a new state file
 includes every fixture migration there is.

@@ -129,7 +129,9 @@ Exit 3 when:
   `generate -allow-partial` left out;
 - the directory holds two migrations bun would record under one name, or a fixture migration the state
   file's history does not include;
-- with `-require-applied`, a migration is not applied.
+- with a database, bun's locks table holds the lock on the migrations table;
+- with `-require-applied`, a migration is not applied;
+- with `-strict-order`, a pending migration sorts before one the database applied.
 
 Exit 1 when there is no state file and git cannot read the fixture files as of `HEAD` (it is not
 installed, or this is not a repository): nothing then says what the files change.
@@ -138,6 +140,7 @@ installed, or this is not a repository): nothing then says what the files change
 | --- | --- |
 | `-offline` | do not connect, even with a database configured |
 | `-require-applied` | fail unless the database applied every migration in the directory |
+| `-strict-order` | fail when a pending migration sorts before one the database applied, which bun runs after it all the same |
 | `-json` | the report as JSON, see [status](#status-output) |
 
 ### plan
@@ -178,7 +181,7 @@ Exit 2 when a finding the policy makes an error, or a difference `generate` woul
 | 0 | done; for `check`, `status` and `plan`: nothing found |
 | 1 | the command could not do its job: a bad flag, no connection, an unreadable file, a plan that could not finish, nothing for `status` to compare the fixture files with |
 | 2 | refused: a difference that needs a hand-written migration, a finding the policy makes an error, a state `baseline` will not replace, a fixture migration the state file does not include (`generate`, `baseline`), a file `export` will not write |
-| 3 | found something: drift (`check`), a change no migration makes, a change left out or a migration not applied (`status`), a migration that would fail or skip (`plan`) |
+| 3 | found something: drift (`check`), a change no migration makes, a change left out, a migration not applied or out of order, a leftover lock (`status`), a migration that would fail or skip (`plan`) |
 
 A pipeline can tell "the database drifted" (3) from "the check could not run" (1).
 
@@ -197,6 +200,7 @@ what changing it does. Unknown keys are an error.
 | `package` | `migrations` | its Go package |
 | `migrator` | `Migrations` | the `*migrate.Migrations` variable generated files register with |
 | `migrations_table` | `bun_migrations` | the migrator's table, when it is built `WithTableName`; may be schema-qualified |
+| `migration_locks_table` | `bun_migration_locks` | the migrator's locks table, when it is built `WithLocksTableName`; `status` reports a lock left in it |
 | `state` | `<out>/fixture_state.yml` | the state file |
 | `seed_guard_table` | | a table never empty in a seeded database; while it is empty a fixture migration does nothing |
 | `database` | | a DSN, or `env:NAME` to read one from the environment |
@@ -281,10 +285,11 @@ Finding kinds: `duplicate key`, `zero against a default`, `null against a defaul
   "directory": "migrations",
   "migrations": [
     {"id": "20260930165255_fixture_plan_prices", "name": "20260930165255", "fixture": true, "changes": 3,
-     "applied": {"group": 2, "at": "2026-09-30T17:00:00Z"}}
+     "applied": {"group": 2, "at": "2026-09-30T17:00:00Z"}, "out_of_order": false}
   ],
   "not_in_state": [],
-  "database": {"table": "bun_migrations", "table_exists": true, "not_in_directory": []},
+  "database": {"table": "bun_migrations", "table_exists": true, "not_in_directory": [],
+               "newest_applied": "20260930165255", "locks_table": "bun_migration_locks", "locked": false},
   "problems": [],
   "notes": []
 }
@@ -296,9 +301,9 @@ Finding kinds: `duplicate key`, `zero against a default`, `null against a defaul
 | `base` | what `uncovered` was worked out against: `the state file`, or `HEAD` while there is none |
 | `uncovered`, `refused` | what the fixture files change that no migration makes, one line per model, and what of it `generate` would refuse |
 | `left_out` | changes `generate -allow-partial` refused and recorded in the state file, until `baseline -force` |
-| `migrations` | `applied` is `null` for a pending migration and for all of them without a database |
+| `migrations` | `applied` is `null` for a pending migration and for all of them without a database; `out_of_order` is a pending one that sorts before `newest_applied` |
 | `not_in_state` | fixture migrations of the directory the state's history does not include; `problems` says why |
-| `database` | `null` when none was asked |
+| `database` | `null` when none was asked. `locked` is a row in `locks_table` naming `table`: a migrator running now, or one that died and left it |
 
 ### plan output
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -66,6 +67,9 @@ type migrationInfo struct {
 	// Applied is nil for a migration the database has not applied, and for
 	// every migration when no database was asked.
 	Applied *appliedInfo `json:"applied"`
+	// OutOfOrder is a pending migration that sorts before one the database
+	// applied already. bun runs it all the same, after that one.
+	OutOfOrder bool `json:"out_of_order"`
 }
 
 type appliedInfo struct {
@@ -79,15 +83,24 @@ type databaseInfo struct {
 	// NotInDirectory are migrations the table records that the directory
 	// does not have: another package's, or a file that was deleted.
 	NotInDirectory []string `json:"not_in_directory"`
+	// NewestApplied is the applied migration of the directory that sorts
+	// last, "" when none is applied.
+	NewestApplied string `json:"newest_applied"`
+	// LocksTable is bun's locks table, and Locked whether it holds the lock
+	// on Table: a migrator running right now, or one that died and left it,
+	// after which every migrate fails until the row is deleted.
+	LocksTable string `json:"locks_table"`
+	Locked     bool   `json:"locked"`
 }
 
 // status says where the fixture file, the migrations and a database stand.
 func status(o streams, args []string) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	var (
-		offline  = fs.Bool("offline", false, "do not connect to the database even when one is configured")
-		required = fs.Bool("require-applied", false, "fail unless the database has applied every migration in the directory")
-		asJSON   = fs.Bool("json", false, "write the report as JSON")
+		offline     = fs.Bool("offline", false, "do not connect to the database even when one is configured")
+		required    = fs.Bool("require-applied", false, "fail unless the database has applied every migration in the directory")
+		strictOrder = fs.Bool("strict-order", false, "fail when a pending migration sorts before one the database applied")
+		asJSON      = fs.Bool("json", false, "write the report as JSON")
 	)
 	s, err := common(o, fs, args)
 	if err != nil {
@@ -96,6 +109,9 @@ func status(o streams, args []string) error {
 	useDB := !*offline && s.cfg.Database != ""
 	if *required && !useDB {
 		return fmt.Errorf("-require-applied needs the database")
+	}
+	if *strictOrder && !useDB {
+		return fmt.Errorf("-strict-order needs the database")
 	}
 	r := &statusReport{Fixture: s.cfg.FixtureLabel(), Directory: s.outDir}
 	_, head, err := s.readFixture()
@@ -140,33 +156,24 @@ func status(o streams, args []string) error {
 		}
 		defer db.Close()
 		var applied map[string]fixturemigrate.Applied
-		info := &databaseInfo{Table: s.cfg.MigrationsTable}
+		info := &databaseInfo{Table: s.cfg.MigrationsTable, LocksTable: s.cfg.MigrationLocksTable}
 		err = readOnly(o.ctx, db, func(tx bun.Tx) error {
 			if old != nil {
 				if res, err = s.uncoveredInDB(o, tx, r, old, head); err != nil {
 					return err
 				}
 			}
-			applied, info.TableExists, err = fixturemigrate.ReadApplied(o.ctx, tx, s.cfg.MigrationsTable)
+			if applied, info.TableExists, err = fixturemigrate.ReadApplied(o.ctx, tx, s.cfg.MigrationsTable); err != nil {
+				return err
+			}
+			info.Locked, err = readLock(o.ctx, tx, s.cfg.MigrationLocksTable, s.cfg.MigrationsTable)
 			return err
 		})
 		if err != nil {
 			return err
 		}
 		r.Database = info
-		inDir := map[string]bool{}
-		for i, m := range r.Migrations {
-			inDir[m.Name] = true
-			if a, ok := applied[m.Name]; ok {
-				r.Migrations[i].Applied = &appliedInfo{Group: a.GroupID, At: a.MigratedAt}
-			}
-		}
-		for name := range applied {
-			if !inDir[name] {
-				info.NotInDirectory = append(info.NotInDirectory, name)
-			}
-		}
-		sort.Strings(info.NotInDirectory)
+		markApplied(r, applied)
 	} else if old != nil {
 		if res, err = fixturemigrate.Compute(s.cfg, old, head); err != nil {
 			return err
@@ -209,16 +216,23 @@ func status(o streams, args []string) error {
 	if len(r.Problems) > 0 {
 		failures = append(failures, plural(len(r.Problems), "problem")+" in the migrations directory")
 	}
-	if *required {
-		pending := 0
-		for _, m := range r.Migrations {
-			if m.Applied == nil {
-				pending++
-			}
+	pending, outOfOrder := 0, 0
+	for _, m := range r.Migrations {
+		if m.Applied == nil {
+			pending++
 		}
-		if pending > 0 {
-			failures = append(failures, plural(pending, "migration")+" not applied")
+		if m.OutOfOrder {
+			outOfOrder++
 		}
+	}
+	if *required && pending > 0 {
+		failures = append(failures, plural(pending, "migration")+" not applied")
+	}
+	if *strictOrder && outOfOrder > 0 {
+		failures = append(failures, plural(outOfOrder, "pending migration")+" out of order")
+	}
+	if r.Database != nil && r.Database.Locked {
+		failures = append(failures, r.Database.LocksTable+" holds the lock on "+r.Database.Table)
 	}
 	if len(failures) > 0 {
 		return exitError{3, strings.Join(failures, "; ")}
@@ -300,6 +314,65 @@ func (s *setup) uncoveredInDB(o streams, tx bun.Tx, r *statusReport, old, head *
 			"status -offline cannot tell from a change; run bun-fixture-migrate generate to record the new spelling")
 	}
 	return res, nil
+}
+
+// markApplied fills in what the database applied, and marks every pending
+// migration that sorts before the newest applied one. bun's migrator runs
+// every migration it has no record of, in name order, but after all the ones
+// it already ran: a branch merged late brings a migration named before one
+// that is deployed, and it runs against a database it was not written for.
+func markApplied(r *statusReport, applied map[string]fixturemigrate.Applied) {
+	inDir := map[string]bool{}
+	for i, m := range r.Migrations {
+		inDir[m.Name] = true
+		if a, ok := applied[m.Name]; ok {
+			r.Migrations[i].Applied = &appliedInfo{Group: a.GroupID, At: a.MigratedAt}
+			if m.Name > r.Database.NewestApplied {
+				r.Database.NewestApplied = m.Name
+			}
+		}
+	}
+	for i, m := range r.Migrations {
+		if m.Applied == nil && m.Name < r.Database.NewestApplied {
+			r.Migrations[i].OutOfOrder = true
+		}
+	}
+	for name := range applied {
+		if !inDir[name] {
+			r.Database.NotInDirectory = append(r.Database.NotInDirectory, name)
+		}
+	}
+	sort.Strings(r.Database.NotInDirectory)
+	for _, m := range r.Migrations {
+		if m.OutOfOrder {
+			r.Notes = append(r.Notes, fmt.Sprintf("%s is pending and sorts before %s, which this database applied: "+
+				"bun runs it on the next migrate all the same, after migrations it was not written to follow. Run bun-fixture-migrate plan "+
+				"against a copy of this database to see what it does here", m.ID, r.Database.NewestApplied))
+		}
+	}
+}
+
+// readLock reports whether bun's locks table holds the lock Migrator.Lock
+// takes on the migrations table: a row naming that table. Migrator.Unlock
+// deletes it; a migrator that dies in between leaves it, and every later
+// Lock fails with "migrations table is already locked".
+func readLock(ctx context.Context, db bun.IDB, locksTable, migrationsTable string) (bool, error) {
+	var exists bool
+	if err := db.QueryRowContext(ctx, "SELECT to_regclass(?) IS NOT NULL", locksTable).Scan(&exists); err != nil {
+		return false, fmt.Errorf("look for %s: %w", locksTable, err)
+	}
+	if !exists {
+		return false, nil
+	}
+	// The name was checked to be a plain, optionally schema-qualified
+	// identifier, and is used unquoted, as bun uses it.
+	var n int
+	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM "+locksTable+" WHERE table_name = ?",
+		migrationsTable).Scan(&n); err != nil {
+		return false, fmt.Errorf("read %s, bun's locks table (set migration_locks_table if yours is another): %w",
+			locksTable, err)
+	}
+	return n > 0, nil
 }
 
 // unaccounted is the fixture migrations of the directory the state's history
@@ -447,6 +520,9 @@ func printStatus(o streams, r *statusReport) {
 				state = "applied"
 				detail = fmt.Sprintf("group %d, %s", m.Applied.Group, m.Applied.At.UTC().Format("2006-01-02 15:04:05"))
 			}
+			if m.OutOfOrder {
+				detail = "out of order: runs after " + r.Database.NewestApplied
+			}
 			kind := ""
 			if m.Fixture {
 				kind = "fixture, " + plural(m.Changes, "change")
@@ -462,6 +538,12 @@ func printStatus(o streams, r *statusReport) {
 			fmt.Fprintf(o.stdout, "recorded in %s, not in this directory: %s\n",
 				r.Database.Table, strings.Join(r.Database.NotInDirectory, ", "))
 		}
+	}
+	if r.Database != nil && r.Database.Locked {
+		fmt.Fprintf(o.stdout, "\nlocked: %s holds bun's lock on %s. If no migration is running now, one died and "+
+			"left it, and every migrate fails with \"migrations table is already locked\" until it is gone: "+
+			"DELETE FROM %s WHERE table_name = '%s'\n", r.Database.LocksTable, r.Database.Table,
+			r.Database.LocksTable, r.Database.Table)
 	}
 	if len(r.Problems) > 0 {
 		fmt.Fprintln(o.stdout, "\nproblems")

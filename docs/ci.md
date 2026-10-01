@@ -7,7 +7,7 @@ The checks worth running, and ready-made jobs for GitHub Actions and GitLab CI. 
 | --- | --- | --- |
 | `status -offline` | no | a fixture edit came without its migration; a change `generate -allow-partial` left out is not migrated; a fixture migration from another branch is not in the state file; two migrations share a name |
 | `plan -strict` | a copy of production, or production | a pending fixture migration would fail or skip a change |
-| `status -require-applied` | the deployed database | a migration in the directory is not applied |
+| `status -require-applied` | the deployed database | a migration in the directory is not applied; a deploy that died left bun's lock behind. Add `-strict-order` to fail on a pending migration named before one already applied |
 | `check` | the deployed database | the database and the fixture file disagree (exit 3) |
 
 Exit code 3 always means "found something" and 1 "could not run", so a job can treat drift as a
