@@ -275,7 +275,8 @@ Finding kinds: `duplicate key`, `zero against a default`, `null against a defaul
                   "kind": "insert", "key": "name=pro", "status": "applied", "rows": 1}]}
   ],
   "not_simulated": ["20260930160000_schema"],
-  "notes": []
+  "notes": [],
+  "problems": []
 }
 ```
 
@@ -284,7 +285,8 @@ when the plan itself could not finish. `kind` is `fixture`, or `sql` for a migra
 ran. `after` names pending migrations that were not simulated and run before this one. A
 migration's `notes`, when there are any, say what its `result` and `error` do not: why the plan
 could not tell, or where the deploy can differ from the plan. The top-level `notes` say why a
-migration `-with-sql` would have run is in `not_simulated`.
+migration `-with-sql` would have run is in `not_simulated`. `problems` are those `status` reports in
+the migrations directory, each of which fails the plan.
 
 ### sync output
 

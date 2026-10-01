@@ -114,8 +114,10 @@ func TestPrintPlanSaysWhatHappened(t *testing.T) {
 	o := streams{ctx: context.Background(), stdout: &out, stderr: &out}
 	printPlan(o, &planReport{
 		NotSimulated: []string{"20260101000000_backfill"},
+		Notes:        []string{"20260101000000_backfill.up.sql holds a template"},
+		Problems:     []string{"a.go and b.sql share the name 1"},
 		Migrations: []plannedMigration{
-			{ID: "1_schema", Kind: "sql", Result: "succeeds"},
+			{ID: "1_schema", Kind: "sql", Result: "succeeds", Notes: []string{"a blank line"}},
 			{ID: "2_fixture_a", Kind: "fixture", Result: "fails", Error: "boom", After: []string{"20260101000000_backfill"},
 				Changes: []fixtureapply.Outcome{
 					{Index: 0, Model: "Plan", Key: "name=pro", Kind: fixturechange.Insert, Status: fixtureapply.StatusApplied, Rows: 1},
@@ -135,6 +137,8 @@ func TestPrintPlanSaysWhatHappened(t *testing.T) {
 		"pending before it and not simulated: 20260101000000_backfill", "3_fixture_b: not reached",
 		"4_fixture_c: could not be planned", "5_fixture_d: would do nothing", "not simulated, not fixture migrations",
 		"rolled back: nothing was changed, except that an id an insert drew",
+		"note: a blank line", "note: 20260101000000_backfill.up.sql holds a template",
+		"problems a.go and b.sql share the name 1",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q in:\n%s", want, out.String())

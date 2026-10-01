@@ -29,6 +29,10 @@ type planReport struct {
 	NotSimulated []string `json:"not_simulated"`
 	// Notes say why a migration -with-sql would have run was not simulated.
 	Notes []string `json:"notes"`
+	// Problems are what makes the migrations directory unsafe to deploy as
+	// it stands, as status reports them: two migrations bun records under
+	// one name, a generated file that no longer reads as one.
+	Problems []string `json:"problems"`
 }
 
 type plannedMigration struct {
@@ -377,7 +381,8 @@ func plan(o streams, args []string) error {
 	}
 
 	var targets []planTarget
-	report := &planReport{Migrations: []plannedMigration{}, NotSimulated: []string{}, Notes: []string{}}
+	report := &planReport{Migrations: []plannedMigration{}, NotSimulated: []string{}, Notes: []string{},
+		Problems: []string{}}
 	if len(files) > 0 {
 		for _, path := range files {
 			src, err := os.ReadFile(path)
@@ -401,9 +406,7 @@ func plan(o streams, args []string) error {
 		if err != nil {
 			return fmt.Errorf("the migrations directory: %w", err)
 		}
-		for _, p := range ms.Problems {
-			fmt.Fprintln(o.stderr, "problem:", p)
-		}
+		report.Problems = append(report.Problems, ms.Problems...)
 		var applied map[string]fixturemigrate.Applied
 		err = readOnly(o.ctx, db, func(tx bun.Tx) error {
 			applied, _, err = fixturemigrate.ReadApplied(o.ctx, tx, s.cfg.MigrationsTable)
@@ -452,6 +455,7 @@ func plan(o streams, args []string) error {
 		printPlan(o, report)
 	}
 
+	var failures []string
 	skipped := 0
 	for _, m := range report.Migrations {
 		if m.Result == "inconclusive" {
@@ -459,7 +463,7 @@ func plan(o streams, args []string) error {
 				"migration: " + m.Error}
 		}
 		if m.Result == "fails" {
-			return exitError{3, m.ID + " would fail, and so would the deploy"}
+			failures = append(failures, m.ID+" would fail, and so would the deploy")
 		}
 		for _, c := range m.Changes {
 			if c.Status == fixtureapply.StatusSkipped {
@@ -468,7 +472,15 @@ func plan(o streams, args []string) error {
 		}
 	}
 	if *strict && skipped > 0 {
-		return exitError{3, plural(skipped, "change") + " would be skipped"}
+		failures = append(failures, plural(skipped, "change")+" would be skipped")
+	}
+	// A plan of a directory bun cannot run as it stands is no plan of the
+	// deploy, however well each migration in it went.
+	if n := len(report.Problems); n > 0 {
+		failures = append(failures, plural(n, "problem")+" in the migrations directory")
+	}
+	if len(failures) > 0 {
+		return exitError{3, strings.Join(failures, "; ")}
 	}
 	return nil
 }
@@ -617,6 +629,12 @@ func printPlan(o streams, r *planReport) {
 	}
 	for _, n := range r.Notes {
 		fmt.Fprintf(o.stdout, "note: %s\n", n)
+	}
+	if len(r.Problems) > 0 {
+		fmt.Fprintln(o.stdout, "\nproblems")
+		for _, p := range r.Problems {
+			fmt.Fprintln(o.stdout, "  "+p)
+		}
 	}
 	inserted := false
 	for _, m := range r.Migrations {

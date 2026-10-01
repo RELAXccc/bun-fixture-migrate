@@ -357,3 +357,22 @@ func init() {
 		t.Fatalf("the deploy:\n%s", deploy)
 	}
 }
+
+// A directory bun cannot run as it stands fails the plan, however each
+// migration in it went: here two migrations bun records under one name, so
+// that one of them never runs.
+func TestPlanFailsOnAProblemInTheMigrationsDirectory(t *testing.T) {
+	deferredDB(t)
+	c := deferredCLI(t)
+	c.write("migrations/20000101000000_a.up.sql", "SELECT 1;\n")
+	c.write("migrations/20000101000000_b.up.sql", "SELECT 2;\n")
+	out := c.must(3, "plan", "-with-sql")
+	if !strings.Contains(out, "share the name 20000101000000") ||
+		!strings.Contains(out, "1 problem in the migrations directory") {
+		t.Fatalf("plan:\n%s", out)
+	}
+	_, stdout, _ := c.run("plan", "-json")
+	if !strings.Contains(stdout, `"problems": [`) || !strings.Contains(stdout, "share the name") {
+		t.Fatalf("plan -json:\n%s", stdout)
+	}
+}
