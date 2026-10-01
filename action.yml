@@ -20,9 +20,11 @@ inputs:
     required: false
     default: ""
   config:
-    description: The configuration file, relative to working-directory.
+    description: >-
+      The configuration file, relative to working-directory. Empty leaves it to the command:
+      $BUN_FIXTURE_MIGRATE_CONFIG when the job sets it, else fixture-migrate.yml.
     required: false
-    default: fixture-migrate.yml
+    default: ""
   working-directory:
     description: The directory the command runs in, usually where the configuration sits.
     required: false
@@ -84,12 +86,14 @@ runs:
         BFM_COMMAND: ${{ inputs.command }}
         BFM_ARGS: ${{ inputs.args }}
         BFM_CONFIG: ${{ inputs.config }}
+      # -config only when the input names one, so that a job's
+      # BUN_FIXTURE_MIGRATE_CONFIG is the command's default as everywhere else.
       run: |
         set -uo pipefail
         read -r -a extra <<< "$BFM_ARGS" || true
         case "$BFM_COMMAND" in
           version) set -- version ;;
-          *) set -- "$BFM_COMMAND" -config "$BFM_CONFIG" "${extra[@]}" ;;
+          *) set -- "$BFM_COMMAND" ${BFM_CONFIG:+-config "$BFM_CONFIG"} "${extra[@]}" ;;
         esac
         code=0
         "$RUNNER_TEMP/bun-fixture-migrate-bin/bun-fixture-migrate" "$@" || code=$?

@@ -51,7 +51,7 @@ jobs:
 | --- | --- | --- |
 | `command` | | `status`, `check`, `plan`, `generate`, `baseline`, `export`, `sync` or `version`; required |
 | `args` | | further arguments, split on whitespace |
-| `config` | `fixture-migrate.yml` | the configuration, relative to `working-directory` |
+| `config` | | the configuration, relative to `working-directory`. Empty passes no `-config`, so the command reads `$BUN_FIXTURE_MIGRATE_CONFIG` when the job sets it, else `fixture-migrate.yml` |
 | `working-directory` | `.` | where the command runs |
 | `version` | | a version to `go install`; empty builds the action's own checkout, which is the `@<tag>` of the `uses:` line |
 | `go-version` | | a Go to set up first; empty uses the Go on the runner |
@@ -61,7 +61,9 @@ command through environment variables, never by being pasted into a script.
 
 A database is whatever the configuration names, usually `database: env:DATABASE_URL`, or what
 `-dsn` names for one command, such as `-dsn env:PRODUCTION_READONLY_DSN`; give the step that variable
-from a secret.
+from a secret. `$BUN_FIXTURE_MIGRATE_CONFIG`, set in a job's `env`, names the configuration for every
+step of a job whose configuration is not in `working-directory`, as it does for the command run by
+hand; the `config` input wins over it for one step.
 
 `plan` writes and rolls back, so it connects as a role with the rights the migrations need: the one
 the deploy migrates as, or one granted the same. Give it a secret of its own, here
@@ -147,8 +149,9 @@ drift:
 | `.bun-fixture-migrate` | `BFM_COMMAND` with `BFM_ARGS` |
 
 Variables, from the pipeline or a job: `BFM_VERSION` (default `latest`), `BFM_DIR` (default `.`),
-`BFM_CONFIG` (default `fixture-migrate.yml`) and `BFM_SOURCE`, a checkout to build from instead of
-installing. The template gives them no values of its own, because a job's variables win over the
+`BFM_CONFIG` and `BFM_SOURCE`, a checkout to build from instead of installing. Without `BFM_CONFIG`
+no `-config` is passed, so the command reads `$BUN_FIXTURE_MIGRATE_CONFIG` when it is set, else
+`fixture-migrate.yml` in `BFM_DIR`. The template gives them no values of its own, because a job's variables win over the
 pipeline's and would hide a version pinned for the whole pipeline. Each job sets `BFM_COMMAND` and
 `BFM_ARGS`, which a job extending it overrides. The database DSN goes in a masked CI/CD variable named
 as the configuration's `database: env:NAME` says.

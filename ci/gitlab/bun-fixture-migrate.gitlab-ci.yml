@@ -19,7 +19,8 @@
 #   BFM_VERSION  the version to go install, "latest" when unset
 #   BFM_SOURCE   a checkout to build from instead, for testing this file
 #   BFM_DIR      the directory to run in, "." when unset
-#   BFM_CONFIG   the configuration file in it, "fixture-migrate.yml" when unset
+#   BFM_CONFIG   the configuration file in it; when unset, the command's own
+#                default: $BUN_FIXTURE_MIGRATE_CONFIG, else fixture-migrate.yml
 #
 # and each job sets two of its own, which a job extending it can override:
 #
@@ -50,8 +51,9 @@
   script:
     - cd "${BFM_DIR:-.}"
     # BFM_ARGS is split on whitespace on purpose, and nothing else in it is
-    # interpreted.
-    - bun-fixture-migrate "$BFM_COMMAND" -config "${BFM_CONFIG:-fixture-migrate.yml}" $BFM_ARGS
+    # interpreted. -config only when BFM_CONFIG names one, so that
+    # BUN_FIXTURE_MIGRATE_CONFIG is the default as everywhere else.
+    - bun-fixture-migrate "$BFM_COMMAND" ${BFM_CONFIG:+-config "$BFM_CONFIG"} $BFM_ARGS
 
 # Every change to the fixture file has a migration, and the migrations
 # directory reads. Needs no database: run it on every merge request.
