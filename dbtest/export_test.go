@@ -529,3 +529,27 @@ func itoa(v int64) string { return strconv.FormatInt(v, 10) }
 func ftoa(v float64) string { return strconv.FormatFloat(v, 'g', -1, 64) }
 
 func btoa(v bool) string { return strconv.FormatBool(v) }
+
+// A row with two dangling references is reported for the same one on every
+// run, the first by column name.
+func TestADanglingReferenceIsReportedTheSameEveryTime(t *testing.T) {
+	db := connect(t)
+	run(t, db, "DROP TABLE IF EXISTS dangles, dangle_targets",
+		"CREATE TABLE dangle_targets (id bigint PRIMARY KEY, name text UNIQUE NOT NULL)",
+		"CREATE TABLE dangles (id bigint PRIMARY KEY, name text UNIQUE NOT NULL, a_id bigint, b_id bigint)",
+		"INSERT INTO dangles VALUES (1, 'x', 7, 8)")
+	cfg := &fixturemigrate.Config{Schema: "public", Models: map[string]*fixturemigrate.Model{
+		"Target": {Table: "dangle_targets"},
+		"Dangle": {Table: "dangles", References: map[string]string{"a_id": "Target", "b_id": "Target"}},
+	}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	tables := schemaOf(t, db)
+	for i := 0; i < 20; i++ {
+		_, err := fixturemigrate.DatabaseSnapshot(context.Background(), db, cfg, tables, fixturemigrate.SnapshotOptions{})
+		if err == nil || !strings.Contains(err.Error(), "a_id = 7") {
+			t.Fatalf("run %d: expected a_id to be named, got %v", i, err)
+		}
+	}
+}

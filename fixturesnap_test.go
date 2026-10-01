@@ -297,3 +297,19 @@ func TestATemplateOfStringConstantsIsItsText(t *testing.T) {
 		t.Fatal("a pipeline is not a constant")
 	}
 }
+
+// A row with more than one fault is refused for the same one on every run:
+// the first column by name, not whichever a map hands out first.
+func TestARowWithTwoFaultsIsRefusedForTheSameOneEveryTime(t *testing.T) {
+	text := replace(t, base, "      seats: 10\n",
+		"      seats: 10\n      zz_note: '{{ now }}'\n      aa_note: '{{ $.Currency.gbp.ID }}'\n")
+	first := snapErr(t, text)
+	if first == nil || !strings.Contains(first.Error(), "aa_note") {
+		t.Fatalf("expected aa_note to be named, got %v", first)
+	}
+	for i := 0; i < 50; i++ {
+		if err := snapErr(t, text); err == nil || err.Error() != first.Error() {
+			t.Fatalf("run %d: %v, not %v", i, err, first)
+		}
+	}
+}
