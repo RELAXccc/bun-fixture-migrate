@@ -175,12 +175,22 @@ value of a unique column, or the open end of a price that a partial unique index
 constraint allows once. On top of that order every change waits for the ones it depends on: a row
 pointing at a new row waits for its insert, parents before children in one table too; a row is
 deleted once nothing in the migration still names it, children before parents; and a row taking a
-value another row of the table gives up waits for it, unless two rows trade values, which no unique
-column allows anyway. A unique index over several columns orders the changes by the tuple it holds,
-an item moved down a list to make room at the top included. With a database configured the
-catalog's unique indexes decide; without one, the columns whose values are distinct on both sides
-are taken for unique, and two such guesses that contradict each other both give way, with a warning
-to run with the database. A row whose ref value changes, a country renamed from Germany to
+value another row of the table gives up waits for it. A unique index over several columns orders the
+changes by the tuple it holds, an item moved down a list to make room at the top included. With a
+database configured the catalog's unique indexes decide; without one, the columns whose values are
+distinct on both sides are taken for unique, and two such guesses that contradict each other both
+give way, with a warning to run with the database.
+
+Rows trading the values of a unique index among themselves, two swapping them or a list rotated
+(positions 1, 2, 3 becoming 2, 3, 1), cannot be updated in any order while the index is checked after
+every statement: whichever row moves first finds its new value still held. Nor can rows whose changes
+two such indexes order in opposite ways. With the database configured, `generate`, `check` and `sync`
+refuse those changes, naming the rows and the index: declare it a `UNIQUE` constraint `DEFERRABLE
+INITIALLY IMMEDIATE`, which a migration checks at its end, and generate again; or move one of the
+rows to a value no row holds in a migration of its own first, and the others in the next. A
+`DEFERRABLE` constraint orders nothing, and any trade gets through it. Where the files do not write
+every column of the index, or without the database, where the index is a guess, such a circle is a
+warning instead. A row whose ref value changes, a country renamed from Germany to
 Deutschland, is no change to the rows pointing at it: they point at its id. Models follow their
 references, in file order otherwise, whether or not the new file still mentions them.
 

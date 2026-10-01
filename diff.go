@@ -534,8 +534,9 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 	for i, j := 0, len(deletes)-1; i < j; i, j = i+1, j-1 {
 		deletes[i], deletes[j] = deletes[j], deletes[i]
 	}
-	var notes []Refusal
-	res.Changes, notes = orderChanges(cfg, uniqueIndexes(cfg, old, next), renames, deletes, updates, inserts)
+	var circled, notes []Refusal
+	res.Changes, circled, notes = orderChanges(cfg, uniqueIndexes(cfg, old, next), renames, deletes, updates, inserts)
+	res.Refusals = append(res.Refusals, circled...)
 	res.Warnings = append(res.Warnings, notes...)
 	res.Tables = tablesFor(cfg, res.Changes)
 	for _, model := range order {
@@ -1198,6 +1199,16 @@ type planned struct {
 type uniques struct {
 	indexes map[string][][]string
 	guessed map[string]bool
+	// deferrable holds, by indexName, the indexes the catalog says are
+	// DEFERRABLE wherever it was read: a change set defers them to its end
+	// (fixtureapply), so no order of its changes matters to them.
+	deferrable map[string]bool
+}
+
+// indexName is how uniques names an index of a model: its model and its
+// columns.
+func indexName(model string, cols []string) string {
+	return model + "\x00" + strings.Join(cols, "\x00")
 }
 
 // orderChanges puts a change set in an order the database accepts.
@@ -1221,17 +1232,28 @@ type uniques struct {
 //     another change of the same model gives up waits for it, so a value can
 //     move from one row to another in one set: a single column's value, or
 //     the values an index over several columns holds together, the position
-//     of an item in its list. An index whose values would have to wait for
-//     each other in a circle, two rows trading values, which no order allows,
-//     waits for nothing, and so does one whose waits would close a circle
-//     with the waits already taken, which are kept.
+//     of an item in its list. An index the catalog says is DEFERRABLE orders
+//     nothing: the change set defers it to its end. An index whose waits
+//     would close a circle with the waits already taken, the rows they point
+//     at say, waits for nothing, and the waits already taken are kept.
+//
+// Rows trading the values of a unique index among themselves in a circle,
+// two rows swapping them or a list rotated, cannot be updated in any order
+// while the index is checked after every statement: whichever moves first
+// finds its new value still held. Neither can rows whose changes two such
+// indexes order in opposite ways. Where the catalog says the index is not
+// DEFERRABLE, those changes are refused (the second result), and the rest
+// ordered without them. Where a value the index holds is not all in the
+// files, a column of it no row writes, the circle may be no circle, and is
+// a warning (the third result).
 //
 // Of the changes whose wait is over, the one first in the base order goes
 // next, so the base order stands wherever nothing forces another. The
 // indexes the catalog lists are taken first. Indexes guessed without it are
-// taken after them, and two guesses that would order changes in opposite
-// ways both give way, which the second result says.
-func orderChanges(cfg *Config, uq uniques, renames, deletes, updates, inserts []planned) ([]fixturechange.Change, []Refusal) {
+// taken after them: a circle of one of them is a warning, since nothing says
+// the column is unique, and two guesses that would order changes in opposite
+// ways both give way, which is a warning too.
+func orderChanges(cfg *Config, uq uniques, renames, deletes, updates, inserts []planned) ([]fixturechange.Change, []Refusal, []Refusal) {
 	refOf := func(model string, values fixturechange.Values) (string, bool) {
 		v, ok := values[cfg.Models[model].Ref]
 		if !ok || v.Ref != nil || v.IsNull {
@@ -1331,27 +1353,41 @@ func orderChanges(cfg *Config, uq uniques, renames, deletes, updates, inserts []
 			continue
 		}
 		for _, cols := range uq.indexes[model] {
-			if uq.guessed[model] {
+			switch {
+			case uq.guessed[model]:
 				guessed = append(guessed, index{model, cols})
-			} else {
+			case !uq.deferrable[indexName(model, cols)]:
 				known = append(known, index{model, cols})
 			}
 		}
 	}
 	nodes := n
+	// approx holds the values, as nodes, that a row holds only in part as
+	// far as the files say: a column of the index no fixture row writes
+	// stands for any value (tupleOf), so two rows may hold it or not.
+	approx := map[int]bool{}
+	// refused holds the changes a circle of a unique index refused: they
+	// are left out of the set, and order nothing.
+	refused := map[int]bool{}
 	edgesOf := func(ix index) []edge {
 		freed, taken := map[string][]int{}, map[string][]int{}
+		partial := map[string]bool{}
+		note := func(m map[string][]int, values fixturechange.Values, i int) {
+			if t, ok, exact := tupleOf(values, ix.cols); ok {
+				m[t] = append(m[t], i)
+				partial[t] = partial[t] || !exact
+			}
+		}
 		for _, i := range byModel[ix.model] {
+			if refused[i] {
+				continue
+			}
 			c := changes[i]
 			switch c.Kind {
 			case fixturechange.Insert:
-				if t, ok := tupleOf(c.after, ix.cols); ok {
-					taken[t] = append(taken[t], i)
-				}
+				note(taken, c.after, i)
 			case fixturechange.Delete:
-				if t, ok := tupleOf(c.before, ix.cols); ok {
-					freed[t] = append(freed[t], i)
-				}
+				note(freed, c.before, i)
 			case fixturechange.Update:
 				changed := false
 				for _, col := range ix.cols {
@@ -1361,12 +1397,8 @@ func orderChanges(cfg *Config, uq uniques, renames, deletes, updates, inserts []
 				if !changed {
 					continue
 				}
-				if t, ok := tupleOf(c.before, ix.cols); ok {
-					freed[t] = append(freed[t], i)
-				}
-				if t, ok := tupleOf(c.after, ix.cols); ok {
-					taken[t] = append(taken[t], i)
-				}
+				note(freed, c.before, i)
+				note(taken, c.after, i)
 			}
 		}
 		var more []edge
@@ -1376,6 +1408,7 @@ func orderChanges(cfg *Config, uq uniques, renames, deletes, updates, inserts []
 			}
 			via := nodes
 			nodes++
+			approx[via] = partial[value]
 			from := map[int]bool{}
 			for _, i := range freed[value] {
 				from[i] = true
@@ -1388,6 +1421,85 @@ func orderChanges(cfg *Config, uq uniques, renames, deletes, updates, inserts []
 			}
 		}
 		return more
+	}
+	// circles is the changes of every circle a graph of waits holds, one
+	// list per circle, in the base order, and whether a value it passes
+	// through is one the files hold only in part (approx).
+	type circle struct {
+		changes []int
+		partial bool
+	}
+	circles := func(lists ...[]edge) []circle {
+		next := make([][]int, nodes)
+		for _, list := range lists {
+			for _, e := range list {
+				if !refused[e.from] && !refused[e.to] {
+					next[e.from] = append(next[e.from], e.to)
+				}
+			}
+		}
+		comp := components(nodes, next)
+		size := map[int]int{}
+		for v := 0; v < nodes; v++ {
+			size[comp[v]]++
+		}
+		byComp := map[int]*circle{}
+		var order []int
+		for v := 0; v < nodes; v++ {
+			if size[comp[v]] < 2 {
+				continue
+			}
+			c := byComp[comp[v]]
+			if c == nil {
+				c = &circle{}
+				byComp[comp[v]] = c
+				order = append(order, comp[v])
+			}
+			if v < n {
+				c.changes = append(c.changes, v)
+			} else if approx[v] {
+				c.partial = true
+			}
+		}
+		out := make([]circle, 0, len(order))
+		for _, k := range order {
+			out = append(out, *byComp[k])
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].changes[0] < out[j].changes[0] })
+		return out
+	}
+	labels := func(list []int) string {
+		names := make([]string, 0, len(list))
+		for _, i := range list {
+			names = append(names, keyLabel(changes[i].Model, changes[i].Key))
+		}
+		return joinAnd(names)
+	}
+	// moves says what a change does to the values of an index: "(g, 1) to
+	// (g, 2)".
+	moves := func(c planned, cols []string) string {
+		show := func(values fixturechange.Values) string {
+			parts := make([]string, 0, len(cols))
+			for _, col := range cols {
+				v, ok := values[col]
+				if !ok {
+					parts = append(parts, "?")
+					continue
+				}
+				parts = append(parts, v.String())
+			}
+			if len(parts) == 1 {
+				return parts[0]
+			}
+			return "(" + strings.Join(parts, ", ") + ")"
+		}
+		return show(c.before) + " to " + show(c.after)
+	}
+	columns := func(cols []string) string {
+		if len(cols) == 1 {
+			return cols[0]
+		}
+		return "(" + strings.Join(cols, ", ") + ")"
 	}
 	closes := func(base, more []edge) bool {
 		next := make([][]int, nodes)
@@ -1411,24 +1523,110 @@ func orderChanges(cfg *Config, uq uniques, renames, deletes, updates, inserts []
 		}
 		return out
 	}
-	for _, ix := range known {
-		if more := edgesOf(ix); len(more) > 0 && !closes(edges, more) {
+	// The waits the indexes the catalog lists impose, and which index each
+	// is of, to tell a circle of unique values from one through the rows
+	// the changes point at.
+	var uniqueEdges []edge
+	var uniqueOf []int
+	var refusals, notes []Refusal
+	for k, ix := range known {
+		more := edgesOf(ix)
+		if len(more) == 0 {
+			continue
+		}
+		var cut []int
+		for _, c := range circles(uniqueEdges, more) {
+			model := changes[c.changes[0]].Model
+			if c.partial {
+				notes = append(notes, Refusal{Model: model, Reason: fmt.Sprintf(
+					"%s trade values of the unique index on %s among themselves in a circle, as far as the "+
+						"fixture files say: they do not write every column of it, so the rows may not share "+
+						"the values they leave out. If they do, no order of the updates gets through the index, "+
+						"and the migration fails on it: declare it a UNIQUE constraint DEFERRABLE INITIALLY "+
+						"IMMEDIATE, which a migration checks at its end, or move one of the rows to a value no "+
+						"row holds in a migration of its own first", labels(c.changes), columns(ix.cols))})
+				continue
+			}
+			involved, inCircle := map[int]bool{}, map[int]bool{}
+			for _, i := range c.changes {
+				inCircle[i] = true
+			}
+			for e, ed := range uniqueEdges {
+				if inCircle[ed.from] || inCircle[ed.to] {
+					involved[uniqueOf[e]] = true
+				}
+			}
+			involved[k] = true
+			var names []string
+			for j := range known {
+				if involved[j] {
+					names = append(names, columns(known[j].cols))
+				}
+			}
+			what := "the unique index on " + names[0] + " is"
+			if len(names) > 1 {
+				what = "the unique indexes on " + joinAnd(names) + " are"
+			}
+			for _, i := range c.changes {
+				others := make([]int, 0, len(c.changes)-1)
+				for _, j := range c.changes {
+					if j != i {
+						others = append(others, j)
+					}
+				}
+				refused[i] = true
+				cut = append(cut, i)
+				refusals = append(refusals, Refusal{Model: changes[i].Model, Key: keyLabel(changes[i].Model, changes[i].Key),
+					Reason: fmt.Sprintf("moves %s from %s while %s trade values with it in a circle, and %s "+
+						"checked after every statement, so whichever row moves first finds its new value still "+
+						"held, in any order: no migration of these updates gets through. Declare it a UNIQUE "+
+						"constraint DEFERRABLE INITIALLY IMMEDIATE, which a migration checks at its end, and "+
+						"generate again; or move one of the rows to a value no row holds, in a migration of its "+
+						"own, and the others in the next", columns(ix.cols), moves(changes[i], ix.cols), labels(others), what)})
+			}
+		}
+		if len(cut) > 0 {
+			kept := more[:0:0]
+			for _, e := range more {
+				if !refused[e.from] && !refused[e.to] {
+					kept = append(kept, e)
+				}
+			}
+			more = kept
+		}
+		if len(more) > 0 && !closes(edges, more) {
 			edges = join(edges, more)
+			uniqueEdges = join(uniqueEdges, more)
+			for range more {
+				uniqueOf = append(uniqueOf, k)
+			}
 		}
 	}
 	// A guess that closes a circle on its own, or with what is known, gives
-	// way as a known index would. One that closes it only with other
-	// guesses contradicts them, and nothing says which of them is right.
+	// way as a known index would; on its own, it is a warning that the rows
+	// trade the column's values, which no order allows if it is unique. One
+	// that closes it only with other guesses contradicts them, and nothing
+	// says which of them is right.
 	base := edges
 	type taken struct {
 		ix   index
 		more []edge
 	}
 	var kept []taken
-	var notes []Refusal
 	for _, ix := range guessed {
 		more := edgesOf(ix)
 		if len(more) == 0 {
+			continue
+		}
+		if own := circles(more); len(own) > 0 {
+			for _, c := range own {
+				notes = append(notes, Refusal{Model: ix.model, Reason: fmt.Sprintf(
+					"%s trade their values of %s in a circle. Without the database the tool guesses which "+
+						"columns hold unique values, and %s may be one: if it is, and its constraint is not "+
+						"DEFERRABLE, no order of the updates gets through, and the migration fails on it. Run "+
+						"generate with the database configured, which reads the constraints and says",
+					labels(c.changes), columns(ix.cols), columns(ix.cols))})
+			}
 			continue
 		}
 		if !closes(edges, more) {
@@ -1475,11 +1673,22 @@ func orderChanges(cfg *Config, uq uniques, renames, deletes, updates, inserts []
 	}
 	out := make([]fixturechange.Change, 0, n)
 	for _, i := range topological(waiting, next, rank) {
-		if i < n {
+		if i < n && !refused[i] {
 			out = append(out, changes[i].Change)
 		}
 	}
-	return out, notes
+	return out, refusals, notes
+}
+
+// joinAnd lists names for a sentence: "a", "a and b", "a, b and c".
+func joinAnd(names []string) string {
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
 }
 
 // edge is one change, or one value, waiting for another.
@@ -1488,23 +1697,26 @@ type edge struct{ from, to int }
 // tupleOf is the values a unique index holds for a row, as one comparable
 // string, and false when a NULL in it means it collides with nothing. A
 // column the row does not carry, one no fixture row writes, stands for any
-// value, which can only make a change wait that need not.
-func tupleOf(values fixturechange.Values, cols []string) (string, bool) {
+// value, which can only make a change wait that need not; exact is false
+// when there is one.
+func tupleOf(values fixturechange.Values, cols []string) (tuple string, ok, exact bool) {
 	var b strings.Builder
 	carried := false
+	exact = true
 	for _, col := range cols {
 		v, ok := values[col]
 		if !ok {
 			b.WriteString("\x00*")
+			exact = false
 			continue
 		}
 		if v.IsNull {
-			return "", false
+			return "", false, false
 		}
 		carried = true
 		b.WriteString("\x00" + valueKey(v))
 	}
-	return b.String(), carried
+	return b.String(), carried, exact
 }
 
 // components numbers the strongly connected components of a graph of n nodes,
@@ -1576,12 +1788,26 @@ func components(n int, next [][]int) []int {
 // aside, and that is not a reference: in a table of a handful of rows a
 // foreign key is distinct often enough by chance.
 func uniqueIndexes(cfg *Config, snaps ...*Snapshot) uniques {
-	out := uniques{indexes: map[string][][]string{}, guessed: map[string]bool{}}
+	out := uniques{indexes: map[string][][]string{}, guessed: map[string]bool{}, deferrable: map[string]bool{}}
 	have := map[string]bool{}
+	// An index is deferrable only where every catalog read says so of every
+	// index over its columns.
+	immediate := map[string]bool{}
 	for _, snap := range snaps {
 		for _, model := range sortedKeysOfIndexes(snap.unique) {
+			deferred := map[string]int{}
+			if t := snap.tables[model]; t != nil {
+				for _, cols := range t.Deferrable {
+					deferred[indexName(model, cols)]++
+				}
+			}
 			for _, cols := range snap.unique[model] {
-				k := model + "\x00" + strings.Join(cols, "\x00")
+				k := indexName(model, cols)
+				if deferred[k] > 0 {
+					deferred[k]--
+				} else {
+					immediate[k] = true
+				}
 				if have[k] {
 					continue
 				}
@@ -1591,6 +1817,11 @@ func uniqueIndexes(cfg *Config, snaps ...*Snapshot) uniques {
 			if out.indexes[model] == nil {
 				out.indexes[model] = [][]string{}
 			}
+		}
+	}
+	for k := range have {
+		if !immediate[k] {
+			out.deferrable[k] = true
 		}
 	}
 	shared := map[string]map[string]bool{}

@@ -107,6 +107,13 @@ type Table struct {
 	// expression or a partial one is left out, because it does not make a
 	// lookup by those columns unique.
 	Uniques [][]string
+	// Deferrable lists those of Uniques whose check waits for the end of the
+	// statement or the transaction: a UNIQUE or PRIMARY KEY constraint
+	// declared DEFERRABLE (pg_index.indimmediate is false). A transaction
+	// that defers it may move a value from row to row in any order, two rows
+	// trading values included; every other unique index refuses a value
+	// that another row still holds at the end of each statement.
+	Deferrable [][]string
 	// ForeignKeys lists the outgoing foreign keys.
 	ForeignKeys []ForeignKey
 }
@@ -404,7 +411,7 @@ ORDER BY n.nspname, c.relname, con.conname`
 	// over an expression are left out: neither makes a lookup by those columns
 	// unique, so neither is a natural key.
 	const indexQuery = `
-SELECT n.nspname, c.relname, i.indexrelid::bigint, i.indisprimary, a.attname
+SELECT n.nspname, c.relname, i.indexrelid::bigint, i.indisprimary, NOT i.indimmediate, a.attname
 FROM pg_index i
 JOIN pg_class c ON c.oid = i.indrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -418,18 +425,18 @@ ORDER BY n.nspname, c.relname, i.indisprimary DESC, i.indexrelid, k.ord`
 	}
 	indexes := map[indexKey][]string{}
 	var indexOrder []indexKey
-	primary := map[indexKey]bool{}
+	primary, deferrable := map[indexKey]bool{}, map[indexKey]bool{}
 	if err := each(ctx, db, indexQuery, list, func(rows *sql.Rows) error {
 		var schema, table, column string
 		var oid int64
-		var isPrimary bool
-		if err := rows.Scan(&schema, &table, &oid, &isPrimary, &column); err != nil {
+		var isPrimary, isDeferrable bool
+		if err := rows.Scan(&schema, &table, &oid, &isPrimary, &isDeferrable, &column); err != nil {
 			return err
 		}
 		k := indexKey{schema + "." + table, oid}
 		if _, seen := indexes[k]; !seen {
 			indexOrder = append(indexOrder, k)
-			primary[k] = isPrimary
+			primary[k], deferrable[k] = isPrimary, isDeferrable
 		}
 		indexes[k] = append(indexes[k], column)
 		return nil
@@ -445,6 +452,9 @@ ORDER BY n.nspname, c.relname, i.indisprimary DESC, i.indexrelid, k.ord`
 			t.PrimaryKey = indexes[k]
 		}
 		t.Uniques = append(t.Uniques, indexes[k])
+		if deferrable[k] {
+			t.Deferrable = append(t.Deferrable, indexes[k])
+		}
 	}
 
 	// One row per foreign-key column. The two unnests share an ordinality so a

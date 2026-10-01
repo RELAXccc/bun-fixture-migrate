@@ -535,11 +535,22 @@ func TestPropertyAChangeSetTakesTheDatabaseFromOneFileToTheNext(t *testing.T) {
 		if viaFile {
 			// The way generate goes: file against file, through the Go
 			// source a reviewer reads. Without a database first, which
-			// has to accept every pair this test draws for it.
+			// has to accept every pair this test draws for it. Two notes
+			// swapped between rows are a warning there, since nothing
+			// says the column is not unique; the database says it, and
+			// nothing it holds unique trades values.
 			offline, err := fixturemigrate.Compute(cfg, fixtureSnapshot(t, cfg, oldText, "old"),
 				fixtureSnapshot(t, cfg, newText, "new"))
-			if err != nil || len(offline.Refusals) != 0 || len(offline.Warnings) != 0 {
-				fail("Compute without the database: %v %+v %+v", err, offline.Refusals, offline.Warnings)
+			var warnings []fixturemigrate.Refusal
+			if offline != nil {
+				for _, w := range offline.Warnings {
+					if !strings.Contains(w.Reason, "trade their values of") || !strings.Contains(w.Reason, "in a circle") {
+						warnings = append(warnings, w)
+					}
+				}
+			}
+			if err != nil || len(offline.Refusals) != 0 || len(warnings) != 0 {
+				fail("Compute without the database: %v %+v %+v", err, offline.Refusals, warnings)
 			}
 			// Then with one, which knows which columns are unique.
 			before, head := fixtureSnapshot(t, cfg, oldText, "old"), fixtureSnapshot(t, cfg, newText, "new")

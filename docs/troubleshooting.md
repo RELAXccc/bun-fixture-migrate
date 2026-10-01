@@ -152,6 +152,7 @@ A refusal is a difference `generate` will not write as it stands (exit 2).
 | `version is written 1.10, which a column written from a Go string holds as written ...` | a value whose meaning depends on the column type, in a change computed without a database |
 | `currency_id points at the Currency whose code is written 0012, ...` | the same for a reference: the ref value of the row it names reads two ways, and only that ref column's type says which the database holds |
 | `code is written 0012 before and 012 after` | a key or a value only respelled: no change in a numeric column, a rename in a text one |
+| `moves (grp, position) from (g, 3) to (g, 1) while Item/name=a and Item/name=b trade values with it in a circle` | rows swap or rotate the values of a unique index that is checked after every statement, so no order of the updates gets through: declare it a `UNIQUE` constraint `DEFERRABLE INITIALLY IMMEDIATE`, which a migration checks at its end, or move one row to a free value in a migration of its own first. Without the database it is a warning, since nothing says the column is unique |
 | `parent_id points at Category "Accessories", which 2 rows hold` | a reference by a ref value more than one row holds; make the ref column unique |
 | `its id, 4, is the id of Plan/name=max too` | two rows of the file share an id, usually after merging two branches that each added the next one |
 | `it leaves out note, which other rows of Plan write` | an inserted row leaves out a column with no `defaults` entry; write it, or add one |
