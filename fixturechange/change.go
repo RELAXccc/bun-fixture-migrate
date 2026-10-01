@@ -166,6 +166,14 @@ type Set struct {
 	// set runs inside a caller's transaction, whose lock_timeout limits that
 	// wait. Empty means the session's own lock_timeout, which is usually none.
 	LockTimeout string
+	// AuditTable, when set, is the table, optionally schema-qualified, in
+	// which every successful Apply and Revert of the set records what it did
+	// with each change, in the same transaction: one row per run, which
+	// fixtureapply creates the table for when it is missing. Revert then
+	// undoes only the changes Apply made in this database, and status shows
+	// per database which changes a deploy skipped. Empty records nothing, and
+	// Revert inverts every change.
+	AuditTable string
 }
 
 // PolicyFor is the policy the changes of a model run under: the set's

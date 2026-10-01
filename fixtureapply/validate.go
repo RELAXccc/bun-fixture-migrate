@@ -97,6 +97,11 @@ func Validate(set fixturechange.Set) error {
 			return fmt.Errorf("migrations table %w", err)
 		}
 	}
+	if set.AuditTable != "" {
+		if _, err := quoteIdent(set.AuditTable); err != nil {
+			return fmt.Errorf("audit table %w", err)
+		}
+	}
 	if set.LockTimeout != "" && !lockTimeoutPattern.MatchString(set.LockTimeout) {
 		return fmt.Errorf("lock timeout %q is not a whole number with a unit PostgreSQL knows: ms, s, min, h or d, "+
 			"as in 5s", set.LockTimeout)

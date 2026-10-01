@@ -89,6 +89,8 @@ func TestValidateRejects(t *testing.T) {
 			fixturechange.Set{Tables: tables(), LockTimeout: "5s'; DROP TABLE x; --"}, "ms, s, min, h or d"},
 		"duplicate key policy": {
 			fixturechange.Set{Tables: tables(), Policy: fixturechange.Policy{DuplicateKey: "ignore"}}, "DuplicateKey"},
+		"audit table that is not an identifier": {
+			fixturechange.Set{Tables: tables(), AuditTable: "audit; DROP TABLE x"}, "audit table"},
 		"table that is not an identifier": {
 			fixturechange.Set{Tables: fixturechange.Tables{"Plan": {Name: "plans; DROP TABLE x", ID: "id", Key: "name"}}},
 			"plain SQL identifier"},
