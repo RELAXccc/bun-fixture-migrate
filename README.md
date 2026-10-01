@@ -242,11 +242,12 @@ production was not in the state it expected is lost for good: fix the data, depl
 `migrate` has nothing to do.
 
 A generated migration fails on purpose whenever it cannot do what it says (below), so it has to
-handle this. Under bun's migrator, `fixtureapply.Apply` first looks for the record the migrator made
-of it a moment before: the newest row of `bun_migrations`, if it carries this migration's name and
-was written in the last minute. If the change set fails, it deletes that row, and only that row,
-through the migrator's own `*bun.DB`. A record another replica writes while this one runs is not the
-row it found, and is left alone. The error says so:
+handle this. Under bun's migrator, the generated migration first looks for the records the migrator
+made of it a moment before: every row of `bun_migrations` with this migration's name, written in the
+last minute and newer than every other migration's record (two replicas racing without bun's `Lock`
+make one each). If the change set fails, it deletes those rows, and only those, through the
+migrator's own `*bun.DB`. A record another replica writes after it looked is not one it found, and is
+left alone. The error says so:
 
 ```
 migrate: 20260921120000: up: …: no row of items has name=anvil. …
