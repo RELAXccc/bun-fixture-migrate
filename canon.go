@@ -238,7 +238,7 @@ func castInto(ctx context.Context, db bun.IDB, column dbschema.Column, values []
 			if err := rows.Scan(&in, &out); err != nil {
 				return err
 			}
-			got[in] = columnText(column.Type, out)
+			got[in] = columnText(column, out)
 		}
 		if err := rows.Err(); err != nil {
 			return err

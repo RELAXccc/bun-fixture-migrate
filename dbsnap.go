@@ -241,6 +241,12 @@ func selectQuery(cfg *Config, m *Model, table *dbschema.Table, cols []string) (s
 // money's text depends on the locale, so it is read as the number it is; and
 // an array is read as JSON, which is what a YAML sequence in the fixture file
 // becomes, and what an export writes back as one.
+//
+// The elements of a char(n) array are read without their padding, the way a
+// char(n) column's own value is, so "AB " and "AB" are one value on both
+// sides. An array whose lower bound is not 1, '[0:1]={7,8}', has no JSON and
+// no YAML spelling: it is read as PostgreSQL's own text, which differs from
+// every sequence, and an export refuses it.
 func readExpr(c dbschema.Column, expr string) string {
 	switch {
 	case c.Type == "json":
@@ -248,7 +254,12 @@ func readExpr(c dbschema.Column, expr string) string {
 	case c.Type == "money":
 		return "(" + expr + ")::numeric::text"
 	case c.Category == "A":
-		return "to_jsonb(" + expr + ")::text"
+		elems := "(" + expr + ")"
+		if c.ElemType == "bpchar" {
+			elems = "(" + expr + ")::text[]"
+		}
+		return "CASE WHEN (" + expr + ")::text LIKE '[%' THEN (" + expr + ")::text ELSE to_jsonb(" + elems +
+			")::text END"
 	}
 	return "(" + expr + ")::text"
 }
@@ -285,7 +296,7 @@ func readRows(ctx context.Context, db bun.IDB, cfg *Config, m *Model, table *dbs
 		if hasID {
 			if cells[0].Valid {
 				idCol, _ := table.Column(m.ID)
-				r.id = columnText(idCol.Type, cells[0].String)
+				r.id = columnText(idCol, cells[0].String)
 			}
 			if sameScalar(r.id, "0") {
 				r.id = ""
@@ -299,7 +310,7 @@ func readRows(ctx context.Context, db bun.IDB, cfg *Config, m *Model, table *dbs
 				continue
 			}
 			column, _ := table.Column(col)
-			r.values[col] = fixturechange.Lit(columnText(column.Type, c.String))
+			r.values[col] = fixturechange.Lit(columnText(column, c.String))
 		}
 		out = append(out, r)
 	}

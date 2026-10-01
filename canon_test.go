@@ -33,8 +33,12 @@ func TestReadExpr(t *testing.T) {
 	}{
 		{dbschema.Column{Type: "int8"}, `("x")::text`},
 		{dbschema.Column{Type: "json"}, `("x")::jsonb::text`},
+		{dbschema.Column{Type: "json", Domain: "doc"}, `("x")::jsonb::text`},
 		{dbschema.Column{Type: "money"}, `("x")::numeric::text`},
-		{dbschema.Column{Type: "_text", Category: "A"}, `to_jsonb("x")::text`},
+		{dbschema.Column{Type: "_text", Category: "A", ElemType: "text"},
+			`CASE WHEN ("x")::text LIKE '[%' THEN ("x")::text ELSE to_jsonb(("x"))::text END`},
+		{dbschema.Column{Type: "_bpchar", Category: "A", ElemType: "bpchar"},
+			`CASE WHEN ("x")::text LIKE '[%' THEN ("x")::text ELSE to_jsonb(("x")::text[])::text END`},
 	} {
 		if got := readExpr(tc.col, `"x"`); got != tc.want {
 			t.Errorf("%+v: %s, want %s", tc.col, got, tc.want)
