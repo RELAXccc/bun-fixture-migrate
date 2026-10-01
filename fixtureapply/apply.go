@@ -323,7 +323,7 @@ func revertBase(ctx context.Context, tx bun.IDB, set fixturechange.Set, o option
 		}
 	}
 	out.Message = fmt.Sprintf("reverts the %s that the Apply of %s (row %d of %s) and any before it since the last "+
-		"Revert made in this database; the %s they found made or skipped %s left as they are", plural(made, "change"),
+		"Revert made in this database; the %s they found made or skipped %s left alone", plural(made, "change"),
 		base[0].AppliedAt.UTC().Format(time.RFC3339), base[0].ID, set.AuditTable,
 		plural(len(set.Changes)-made, "other change"), isAre(len(set.Changes)-made))
 	o.log(ctx, slog.LevelInfo, "the change set is reverted as its audit rows say", out, set.Name+": "+out.Message)
