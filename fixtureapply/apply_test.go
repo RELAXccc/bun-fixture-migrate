@@ -72,6 +72,15 @@ func TestValidateRejects(t *testing.T) {
 					Key: fixturechange.Values{"code": fixturechange.Lit("sso")},
 					New: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "a\x00")}},
 			}}, "NUL"},
+		// The same NUL in an element of a list, which JSON spells \u0000:
+		// the array's element lost it, {ab} for ["a\u0000b"].
+		"NUL in an element of a list": {
+			fixturechange.Set{Tables: tables(), Changes: []fixturechange.Change{
+				{Model: "Plan", Kind: fixturechange.Insert,
+					Key: fixturechange.Values{"name": fixturechange.Lit("team")},
+					New: fixturechange.Values{"name": fixturechange.Lit("team"),
+						"tags": fixturechange.Lit(`["ok", ["a\u0000b"]]`)}},
+			}}, "NUL character, which PostgreSQL cannot store, in an element of the list"},
 		"lock timeout without a unit": {
 			fixturechange.Set{Tables: tables(), LockTimeout: "5000"}, "ms, s, min, h or d"},
 		"lock timeout in Go's spelling": {

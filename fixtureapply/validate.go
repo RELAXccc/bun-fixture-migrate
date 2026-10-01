@@ -1,6 +1,7 @@
 package fixtureapply
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -115,10 +116,20 @@ func Validate(set fixturechange.Set) error {
 				}
 				// PostgreSQL's text cannot hold a NUL. bun v1.2.18 drops it from
 				// a bound string without a word, so the database would hold
-				// something other than the file; later versions refuse it.
+				// something other than the file; later versions refuse it. A
+				// list, which an array column is written from, holds one as
+				// \u0000 in its JSON, and its element would lose it the same
+				// way. Only a json column, not a jsonb one, could keep the
+				// escape as it is; Validate does not know the column's type,
+				// so that rare list is refused as well.
 				if strings.ContainsRune(v.Lit, 0) || (v.Ref != nil && strings.ContainsRune(v.Ref.Key, 0)) {
-					return fmt.Errorf("change %d (%s.%s): the value holds a NUL character, which PostgreSQL "+
-						"cannot store", i, c.Model, col)
+					return fmt.Errorf("change %d (%s.%s): %w", i, c.Model, col, errNUL)
+				}
+				if strings.HasPrefix(strings.TrimSpace(v.Lit), "[") && strings.Contains(v.Lit, `\u0000`) {
+					if _, _, err := arrayLiteral(v.Lit); errors.Is(err, errNUL) {
+						return fmt.Errorf("change %d (%s.%s): %w, in an element of the list %s", i, c.Model, col,
+							errNUL, v.Lit)
+					}
 				}
 			}
 		}

@@ -7,6 +7,7 @@ package dbtest_test
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/RELAXccc/bun-fixture-migrate/fixtureapply"
@@ -210,5 +211,48 @@ func TestACharArrayMatchesItsGuard(t *testing.T) {
 	}
 	if got := currencies(); got != `{EUR,"US "}` {
 		t.Fatalf("currencies %s", got)
+	}
+}
+
+// A list an array column cannot hold. A NUL in an element was dropped without
+// a word, so ["a\u0000b"] was stored as {ab}: Validate refuses it before any
+// statement runs. An empty list inside a list, or lists nested deeper than
+// PostgreSQL's six dimensions, failed with PostgreSQL's words at deploy time;
+// they are refused with a sentence, and the set rolls back.
+func TestAListAnArrayCannotHoldIsRefused(t *testing.T) {
+	db := connect(t)
+	run(t, db, "DROP TABLE IF EXISTS guard_lists",
+		"CREATE TABLE guard_lists (id bigint PRIMARY KEY, name text UNIQUE NOT NULL, t text[], i int[])")
+	for _, c := range []struct{ col, list, want string }{
+		{"t", `["a\u0000b"]`, "the value holds a NUL character, which PostgreSQL cannot store"},
+		{"i", `[[]]`, "empty list inside a list"},
+		{"i", `[[[[[[[1]]]]]]]`, "PostgreSQL stores arrays of at most 6 dimensions"},
+	} {
+		set := fixturechange.Set{Name: "lists", Tables: fixturechange.Tables{"Row": {Name: "guard_lists", ID: "id", Key: "name"}},
+			Changes: []fixturechange.Change{
+				{Model: "Row", Kind: fixturechange.Insert, Key: lit("name", "first"),
+					New: fixturechange.Values{"id": fixturechange.Lit("1"), "name": fixturechange.Lit("first")}},
+				{Model: "Row", Kind: fixturechange.Insert, Key: lit("name", "second"),
+					New: fixturechange.Values{"id": fixturechange.Lit("2"), "name": fixturechange.Lit("second"),
+						c.col: fixturechange.Lit(c.list)}},
+			}}
+		err := fixtureapply.Apply(context.Background(), db, set, quiet())
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("%s: want %q, got %v", c.list, c.want, err)
+		}
+		if n := scan[int64](t, db, "SELECT count(*) FROM guard_lists"); n != 0 {
+			t.Fatalf("%s: %d rows written", c.list, n)
+		}
+	}
+	// Six dimensions are fine.
+	set := fixturechange.Set{Name: "lists", Tables: fixturechange.Tables{"Row": {Name: "guard_lists", ID: "id", Key: "name"}},
+		Changes: []fixturechange.Change{{Model: "Row", Kind: fixturechange.Insert, Key: lit("name", "deep"),
+			New: fixturechange.Values{"id": fixturechange.Lit("1"), "name": fixturechange.Lit("deep"),
+				"i": fixturechange.Lit(`[[[[[[1]]]]]]`)}}}}
+	if err := fixtureapply.Apply(context.Background(), db, set, quiet()); err != nil {
+		t.Fatal(err)
+	}
+	if got := scan[string](t, db, "SELECT i::text FROM guard_lists"); got != "{{{{{{1}}}}}}" {
+		t.Fatalf("stored %s", got)
 	}
 }
