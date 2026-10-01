@@ -435,6 +435,13 @@ func castValues(ctx context.Context, db bun.IDB, column dbschema.Column,
 		if !valueError(err) {
 			return nil, nil, err
 		}
+		// An error the cast raises for NULL too is about the statement --
+		// a type or a function a CHECK names that cannot be found -- and
+		// not about any value of the file.
+		if err := castNull(ctx, db, column); err != nil {
+			return nil, nil, fmt.Errorf("a value of %s cannot be checked against its type, whatever it is: %w",
+				column.FullType, err)
+		}
 		// One of them is not a value of the type. Find which, one by one.
 		for _, v := range batch {
 			if err := castInto(ctx, db, column, []string{v}, inputs, canon, raw, invalid); err != nil {
@@ -499,6 +506,22 @@ func castInput(c dbschema.Column, v string) (string, string) {
 		}
 	}
 	return v, ""
+}
+
+// castNull runs the cast castInto runs, the column's CHECK constraints
+// included, for a NULL, which every type and every constraint takes: an error
+// is the statement's.
+func castNull(ctx context.Context, db bun.IDB, column dbschema.Column) error {
+	cast := "t.v::" + castType(column)
+	selects := []string{readExpr(column, cast), tooLong(column, "t.v")}
+	for _, check := range column.Checks {
+		selects = append(selects, "(SELECT NOT COALESCE("+check.Expr+", true) FROM (SELECT "+cast+" AS "+
+			sqlIdent(column.Name)+") AS c__)")
+	}
+	return db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		_, err := tx.ExecContext(ctx, "SELECT "+strings.Join(selects, ", ")+" FROM (VALUES (NULL::text)) AS t(v)")
+		return err
+	})
 }
 
 func castInto(ctx context.Context, db bun.IDB, column dbschema.Column, values []string, inputs map[string]string,
@@ -1228,7 +1251,7 @@ func equalKeys(ctx context.Context, db bun.IDB, table *dbschema.Table, cols []st
 		}
 	}
 	query := "SELECT array_to_string(array_agg(t.i ORDER BY t.i), ',') FROM (VALUES " + rowsSQL + ") AS t(" +
-		strings.Join(names, ", ") + ") GROUP BY " + strings.Join(groupBy, ", ") + " HAVING count(*) > 1"
+		strings.Join(names, ", ") + ") GROUP BY " + strings.Join(groupBy, ", ") + " HAVING count(*) > 1 ORDER BY min(t.i)"
 	err := db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		rows, err := tx.QueryContext(ctx, query, args...)
 		if err != nil {

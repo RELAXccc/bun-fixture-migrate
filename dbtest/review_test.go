@@ -578,3 +578,58 @@ func TestReviewAChangeIsSpelledTheSameWithAndWithoutTheDatabase(t *testing.T) {
 	}
 	l.fidelity(v1, v2)
 }
+
+type RvKey struct {
+	bun.BaseModel `bun:"table:rv_keys"`
+	ID            int64  `bun:"id,pk"`
+	Code          string `bun:"code,notnull"`
+}
+
+// Keys that are one value to their type are reported in the order of the
+// rows, every time: the groups were read in whatever order the server's
+// aggregate handed them out.
+func TestReviewEqualKeysAreReportedInRowOrder(t *testing.T) {
+	db := connect(t)
+	if _, err := db.ExecContext(context.Background(), "CREATE EXTENSION IF NOT EXISTS citext"); err != nil {
+		t.Skipf("citext: %v", err)
+	}
+	l := newLab(t, map[string]*fixturemigrate.Model{"RvKey": {Table: "rv_keys", Key: []string{"code"}}}, "rv_keys",
+		[]string{"DROP TABLE IF EXISTS rv_keys", "CREATE TABLE rv_keys (id bigint PRIMARY KEY, code citext NOT NULL)"},
+		`SELECT ''`, (*RvKey)(nil))
+	var rows, want []string
+	for i, code := range []string{"zeta", "mu", "alpha", "omega", "beta", "kappa", "delta", "pi", "eta", "chi", "rho", "nu"} {
+		rows = append(rows, fmt.Sprintf("    - {id: %d, code: %s}\n    - {id: %d, code: %s}\n", 2*i+1, code,
+			2*i+2, strings.ToUpper(code)))
+		want = append(want, "RvKey/code="+code)
+	}
+	head := l.read("- model: RvKey\n  rows:\n" + strings.Join(rows, ""))
+	var got []string
+	for _, f := range head.Findings {
+		got = append(got, f.Row)
+	}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("got  %s\nwant %s", strings.Join(got, " "), strings.Join(want, " "))
+	}
+}
+
+// An error casting to a column's type that has nothing to do with the values,
+// a type that cannot be found, stops the command instead of making every
+// value of the column an invalid value.
+func TestReviewAnErrorOfTheCastItselfIsNoInvalidValue(t *testing.T) {
+	l := newLab(t, map[string]*fixturemigrate.Model{"RvKey": {Table: "rv_keys", Key: []string{"code"}}}, "rv_keys",
+		[]string{"DROP TABLE IF EXISTS rv_keys", "CREATE TABLE rv_keys (id bigint PRIMARY KEY, code text NOT NULL)"},
+		`SELECT ''`, (*RvKey)(nil))
+	head := fixtureSnapshot(t, l.cfg, "- model: RvKey\n  rows:\n    - {id: 1, code: a}\n    - {id: 2, code: b}\n", "fixture.yml")
+	readOnlyDo(t, l.db, func(tx bun.Tx, tables map[string]*dbschema.Table) {
+		table := tables["public.rv_keys"]
+		for i, c := range table.Columns {
+			if c.Name == "code" {
+				table.Columns[i].FullType = "no_such_type"
+			}
+		}
+		err := fixturemigrate.Canonicalize(context.Background(), tx, l.cfg, head, tables)
+		if err == nil || !strings.Contains(err.Error(), "cannot be checked against its type, whatever it is") {
+			t.Fatalf("expected the cast to fail as a whole, got %v and %+v", err, head.Findings)
+		}
+	})
+}
