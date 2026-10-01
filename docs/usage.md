@@ -210,6 +210,10 @@ file, the newer truth. Three settings and one loop keep that safe:
 - `policy.changed_row: warn` (the default): a migration that finds a row changed since the file was
   written leaves it alone and says so, instead of overwriting the edit.
 - `check` on a schedule reports the difference, with exit code 3.
+- An admin UI that saves a row through bun, `db.NewUpdate().Model(row)`, writes `DEFAULT` rather than
+  NULL for a nil pointer or a zero in a `nullzero` field, since bun v1.2.17, as an insert does.
+  Clearing such a field leaves the column's default, so `check` reports the row against a file that
+  says `~`, and an export writes the default into the file.
 - To take the edits into the file, export from production and generate:
 
   ```

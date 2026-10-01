@@ -163,14 +163,18 @@ as the configuration's `database: env:NAME` says.
 [`.github/workflows/test.yml`](../.github/workflows/test.yml), mirrored by
 [`.gitlab-ci.yml`](../.gitlab-ci.yml):
 
-- **lint**: gofmt, `go mod tidy -diff`, `go vet` and staticcheck on all three modules; govulncheck
-  under the current Go;
-- **unit**: the tests that need no database, under Go 1.24 and the current Go, with the race detector,
-  and a short run of every fuzz target;
-- **postgres**: the database suite against PostgreSQL 12, 13, 14, 15, 16, 17 and 18 under `pgdriver`,
-  and against 12 and 18 under `pgx`;
+- **lint**: gofmt, `go mod tidy -diff`, `go vet` and staticcheck on every module; govulncheck under
+  the current Go;
+- **unit**: the tests that need no database, with the race detector, under Go 1.24, the oldest Go
+  the module builds with, Go 1.26, the oldest still supported, and the current stable Go; and a
+  short run of every fuzz target under the current Go (a job of its own, `fuzz`, on GitLab);
+- **postgres**: the database suite, with the race detector, against PostgreSQL 12, 13, 14, 15, 16,
+  17 and 18 under `pgdriver` and the current Go; against 18 under Go 1.24; against 12 and 18 under
+  `pgx`; and against the next release, now 19beta4, allowed to fail until it ships (`postgres next`
+  on GitLab);
 - **action**: the action on `examples/basic`, deployed by its own migrate step, then checked and
-  drifted on purpose;
+  drifted on purpose; on GitLab, the templates on the same project (`template status`,
+  `template deploy and check`);
 - **bun-master**: everything against bun's master branch, allowed to fail: every premise about bun
   has a test, so a change upstream shows here before it is released.
 

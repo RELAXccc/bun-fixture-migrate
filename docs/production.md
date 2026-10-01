@@ -41,6 +41,7 @@ large one against a copy, or off-peak.
 | | |
 | --- | --- |
 | `export`, `check`, `status`, `scaffold`, `generate -from-db` | read, in one `REPEATABLE READ, READ ONLY` transaction |
+| `generate`, `baseline` | read the same way whenever a database is configured or named with `-dsn`: `generate` to check the fixture file against the columns and respell its values (not with `-no-lint`), `baseline` to ask whether a difference is only in how values are written (not with `-offline`) |
 | `plan` | writes in one transaction and always rolls it back. A sequence an insert drew from stays advanced, which only leaves a gap in the ids; a sequence the migration would move is reported, not moved. Under `-with-sql`, a SQL migration's own `setval` or `nextval` is not rolled back either, because PostgreSQL's sequences are not transactional; plan notes such a migration |
 | `sync` | writes, with `-yes`. Meant for databases that are not deployed to |
 | a fixture migration | writes, in one transaction, under a transaction-scoped advisory lock |
@@ -171,10 +172,14 @@ and recording the merge with `baseline -force` therefore does not work, and is r
 
 1. Resolve the fixture files as for any file: they say what the master data is after the merge.
 2. Keep the migration a database already applied, usually the one merged first. Delete the other
-   branch's migration file; it must not have run anywhere that matters (`status` against a database
+   branch's migration file with `git rm -f <file>`: during a merge, a plain `git rm` of a file the
+   merge staged refuses. It must not have run anywhere that matters (`status` against a database
    lists what it applied).
 3. Take the state file as the kept migration left it: when merging the other branch into yours,
-   `git checkout --ours -- internal/migrations/fixture_state.yml`.
+   `git checkout --ours -- internal/migrations/fixture_state.yml`. Not the side the deleted
+   migration left: that state includes changes no migration in the directory makes any more, and
+   `status`, `generate` and `baseline` refuse it (`the state file includes the changes of ..., which
+   is not in ...`).
 4. `bun-fixture-migrate generate -name "..."`. It writes the deleted migration's changes, and anything
    the merge resolved differently, as a migration from what the kept one leaves, named after it.
 5. Check the result where it can go wrong. `status -offline` must report nothing. Then
@@ -282,11 +287,16 @@ report `unchanged`).
 ## Adopting the tool on an existing project
 
 1. `bun-fixture-migrate scaffold -o fixture-migrate.yml` against a database that holds the master
-   data, then read every guess it marks.
-2. `bun-fixture-migrate export` from production, or keep your existing fixture file and run `check`
+   data, then read every guess it marks `# GUESS:`. Above all, delete the model of every table the
+   application writes, users, orders, sessions: scaffold proposes every table but bun's own, and a
+   table left in is exported into the fixture file and is drift after every deploy.
+2. Set `seed_guard_table` to a table the fixture file fills and the application never empties.
+   scaffold guesses one; without one, `generate` warns, and a new environment fails its first
+   deploy (see [below](#a-new-environment)).
+3. `bun-fixture-migrate export` from production, or keep your existing fixture file and run `check`
    against production until they agree.
-3. `bun-fixture-migrate baseline`: the databases hold the file, record that.
-4. Add `status -offline` to CI.
+4. `bun-fixture-migrate baseline`: the databases hold the file, record that.
+5. Add `status -offline` to CI.
 
 From then on every fixture edit comes with a generated migration. Databases that were never seeded
 from the file still need to agree with it before the first migration: `check` each one.
@@ -295,7 +305,9 @@ from the file still need to agree with it before the first migration: `check` ea
 
 A new database gets the schema from the migrations and the data from the fixture file:
 
-1. run the migrator; the fixture migrations see an empty `seed_guard_table` and do nothing;
+1. run the migrator; the fixture migrations see an empty `seed_guard_table` and do nothing. Without
+   a seed guard they run here, before the seed, against empty tables, and the first that changes a
+   row fails the deploy: `generate` warns about a migration written without one;
 2. load the fixture file with `dbfixture`, in a transaction;
 3. `fixtureapply.SyncSequences` on the seeded tables.
 

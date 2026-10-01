@@ -52,10 +52,16 @@ else.
 
 ```
 $ export DATABASE_URL=postgres://localhost/myapp?sslmode=disable
-$ bun-fixture-migrate scaffold -o fixture-migrate.yml   # then read it: keys and names are guesses
+$ bun-fixture-migrate scaffold -o fixture-migrate.yml   # then read it: every GUESS is yours to fix
 $ bun-fixture-migrate export                             # or keep your fixture file and run check
 $ bun-fixture-migrate baseline                           # the databases hold the file as it is
 ```
+
+Before the export, read what scaffold wrote. It proposes every table but bun's own as master data,
+and only you know which the application writes: delete the models of users, orders, sessions and
+the like, or export writes their rows into the fixture file and every deploy is drift. Check
+`seed_guard_table`, which it guesses: a table the fixture file fills, without which a new
+environment runs its fixture migrations before the seed.
 
 Then, for every change to master data, edit the fixture file and:
 
@@ -213,6 +219,11 @@ in a `nullzero` field — which between them is how a bun model spells a nullabl
 Every command reports it the same way, under `policy.null_default`. The only field that does write
 the NULL is one of a type such as `sql.NullString` with neither tag; if that is how your models spell
 nullable columns, set the policy to `warn`.
+
+Since bun v1.2.17 the same holds for an `UPDATE` of a model, `db.NewUpdate().Model(row)`: a nil
+pointer and a zero in a `nullzero` field are written as `DEFAULT`. An admin UI that clears such a
+field in production leaves the column's default there, not NULL, and `check` reports the row as
+drift against a file that says `~`.
 
 ### A failed migration is recorded as applied
 
