@@ -10,6 +10,7 @@ import (
 	"strings"
 	"text/template/parse"
 	"time"
+	"unicode/utf8"
 
 	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
@@ -112,11 +113,13 @@ func exportModels(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table
 
 	var b strings.Builder
 	for _, line := range header {
-		if line == "" {
-			b.WriteString("#\n")
-			continue
+		for _, part := range commentLines(line) {
+			if part == "" {
+				b.WriteString("#\n")
+				continue
+			}
+			b.WriteString("# " + part + "\n")
 		}
-		b.WriteString("# " + line + "\n")
 	}
 	if len(header) > 0 {
 		b.WriteString("\n")
@@ -214,6 +217,32 @@ func exportModels(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table
 		return nil, err
 	}
 	return out, nil
+}
+
+// commentLines is a header line as the lines of a YAML comment: a line break
+// in it, which a finding quoting a value can hold, starts a comment line of
+// its own instead of ending the comment, and a character YAML refuses even
+// in a comment is written as an escape.
+func commentLines(line string) []string {
+	var out []string
+	var b strings.Builder
+	for i := 0; i < len(line); {
+		r, size := utf8.DecodeRuneInString(line[i:])
+		i += size
+		switch {
+		case r == '\r' && strings.HasPrefix(line[i:], "\n"):
+		case r == '\n' || r == '\r' || r == 0x85 || r == 0x2028 || r == 0x2029:
+			out = append(out, b.String())
+			b.Reset()
+		case r == utf8.RuneError && size == 1:
+			fmt.Fprintf(&b, `\x%02x`, line[i-1])
+		case r == '\t' || yamlPrintable(r):
+			b.WriteRune(r)
+		default:
+			writeYAMLEscape(&b, r)
+		}
+	}
+	return append(out, b.String())
 }
 
 // writtenRow is one row of an export, as it was meant to read back.

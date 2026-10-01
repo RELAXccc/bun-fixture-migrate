@@ -17,7 +17,24 @@ type Refusal struct {
 	Reason string
 }
 
-func (r Refusal) String() string { return r.Model + " " + r.Key + ": " + r.Reason }
+func (r Refusal) String() string { return r.Where() + ": " + r.Reason }
+
+// Where names the row a refusal is about: its key's label, which starts with
+// the model already ("Plan/name=team"), or the model and what else names the
+// row ("Plan id 3").
+func (r Refusal) Where() string { return rowWhere(r.Model, r.Key) }
+
+// rowWhere names a row of a model for a report without saying the model
+// twice.
+func rowWhere(model, row string) string {
+	switch {
+	case row == "":
+		return model
+	case strings.HasPrefix(row, model+"/"):
+		return row
+	}
+	return model + " " + row
+}
 
 // Result is what Compute found.
 type Result struct {

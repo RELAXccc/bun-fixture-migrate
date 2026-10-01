@@ -545,3 +545,24 @@ func TestLintNullDefaultsReportsANullTheColumnCannotHold(t *testing.T) {
 		t.Fatalf("expected one invalid value, got %q", got)
 	}
 }
+
+// A finding in the header quotes a value, and a value can hold a line break:
+// it starts a comment line of its own, so the export still parses.
+func TestExportHeaderKeepsALineBreakInsideTheComment(t *testing.T) {
+	cfg := testConfig(t)
+	state := snap(t, cfg, base, "the database")
+	for _, model := range state.Order {
+		for _, e := range state.Entries[model] {
+			e.Anchor = anchorOf(e.Key)
+		}
+	}
+	header := []string{"zero against a default: Plan/name=a\n- model: X\r\nrows: [1]\x01  end"}
+	data, err := Export(cfg, state, testTables(), header)
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	want := "# zero against a default: Plan/name=a\n# - model: X\n# rows: [1]\\x01 \n# end\n"
+	if !strings.HasPrefix(string(data), want) {
+		t.Fatalf("got\n%s", data)
+	}
+}

@@ -487,7 +487,8 @@ func groupUndecided(refusals []fixturemigrate.Refusal) []string {
 		g := groups[key]
 		if len(g.rows) == 1 {
 			model, col, _ := strings.Cut(key, ".")
-			out = append(out, model+" "+g.rows[0]+": "+col+" is written "+g.example+", "+g.why)
+			out = append(out, fixturemigrate.Refusal{Model: model, Key: g.rows[0]}.Where()+": "+col+" is written "+
+				g.example+", "+g.why)
 			continue
 		}
 		out = append(out, fmt.Sprintf("%s is written like %s in %d rows, %s the first of them, %s",

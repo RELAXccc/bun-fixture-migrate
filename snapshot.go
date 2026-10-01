@@ -194,13 +194,10 @@ const (
 	FindingDuplicateID FindingKind = "duplicate id"
 )
 
-func (f Finding) String() string {
-	where := f.Model
-	if f.Row != "" {
-		where += " " + f.Row
-	}
-	return where + ": " + f.Detail
-}
+func (f Finding) String() string { return f.Where() + ": " + f.Detail }
+
+// Where names the row a finding is about, as Refusal.Where does.
+func (f Finding) Where() string { return rowWhere(f.Model, f.Row) }
 
 // byKey indexes the entries of a model by their natural key, in reading order.
 func byKey(entries []*Entry) (map[string][]*Entry, []string) {

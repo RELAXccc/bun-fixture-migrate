@@ -942,7 +942,7 @@ func lintJSONNulls(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Tabl
 					continue
 				}
 				snap.Findings = append(snap.Findings, Finding{
-					Kind: FindingNullDefault, Model: model, Row: e.KeyStr,
+					Kind: FindingNullDefault, Model: model, Row: e.label(model),
 					Detail: fmt.Sprintf("%s is null, which in a %s column is the JSON null when the model's field is "+
 						"a map, a slice or an any, and NULL when it is a pointer or nullzero, and only the model "+
 						"knows which: set policy.null_default to warn if it writes NULL here; for the JSON null, "+
@@ -1009,7 +1009,7 @@ func reportEqualKeys(ctx context.Context, db bun.IDB, cfg *Config, snap *Snapsho
 					continue // reportDuplicates has said so
 				}
 				snap.Findings = append(snap.Findings, Finding{
-					Kind: FindingDuplicateKey, Model: model, Row: group[0].KeyStr,
+					Kind: FindingDuplicateKey, Model: model, Row: group[0].label(model),
 					Detail: fmt.Sprintf("the natural keys %s are one value to the key's type in PostgreSQL, so "+
 						"no lookup by it can tell these %s (%s) apart, and a unique index would keep dbfixture "+
 						"from loading them all: make them differ as the type compares them",
