@@ -3,6 +3,7 @@ package fixtureapply
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
@@ -51,10 +52,14 @@ func (r *runner) diagnose(ctx context.Context, c fixturechange.Change, t fixture
 		}
 		// Not "drop the change from the migration": every other database
 		// would then never get it, and nothing would say so.
+		where := "this migration's Policy"
+		if t.Policy != nil {
+			where = fmt.Sprintf("the Policy of %s in this migration's Tables", strconv.Quote(c.Model))
+		}
 		return outcome{problem: problemMissing, message: fmt.Sprintf(
 			"no row of %s has %s.%s %s. Put the row back; or, if it is meant to be gone in this database, set "+
-				"MissingRow to \"warn\" in this migration's Policy, and the change is recorded as done here "+
-				"without being made", t.Name, keyLabel(c.Key), note, what)}, nil
+				"MissingRow to \"warn\" in %s, and the change is recorded as done here without being made",
+			t.Name, keyLabel(c.Key), note, what, where)}, nil
 	}
 	if err := r.stopped(ctx, c, t, table); err != nil {
 		return outcome{}, err
@@ -225,7 +230,7 @@ func (r *runner) diagnoseInsert(ctx context.Context, c fixturechange.Change, t f
 	// under another id is not the row the file describes, even when every
 	// other value agrees: whatever knows the file's id -- a reference in
 	// another table, a URL, a client -- will not find it.
-	if id, ok := c.New[t.ID]; ok && id.Ref == nil && !id.IsNull && r.set.Policy.IDDrift != fixturechange.ModeIgnore {
+	if id, ok := c.New[t.ID]; ok && id.Ref == nil && !id.IsNull && r.set.PolicyFor(c.Model).IDDrift != fixturechange.ModeIgnore {
 		withID, err := r.count(ctx, c.Model, table, c.Key, fixturechange.Values{t.ID: id})
 		if err != nil {
 			return outcome{}, err

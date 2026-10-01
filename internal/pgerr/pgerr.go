@@ -55,4 +55,6 @@ const (
 	UndefinedTable = "42P01"
 	// UndefinedColumn is a column that does not exist.
 	UndefinedColumn = "42703"
+	// InvalidSchemaName is a schema that does not exist.
+	InvalidSchemaName = "3F000"
 )

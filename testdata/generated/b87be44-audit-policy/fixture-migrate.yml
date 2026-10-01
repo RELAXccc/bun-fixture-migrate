@@ -1,0 +1,33 @@
+# The configuration the change set beside it was generated with: an audit
+# table, and run-time policies of the models' own.
+fixture: fixture.yml
+out: migrations
+package: migrations
+migrator: Migrations
+seed_guard_table: corpus_plans
+lock_timeout: 5s
+audit_table: corpus_audit
+policy:
+  renames: update
+  duplicate_key: warn
+models:
+  Currency:
+    table: corpus_currencies
+    key: [code]
+    ref: code
+    deletes: cascade
+    id_drift: warn
+  Plan:
+    table: corpus_plans
+    serial: true
+    key: [name]
+    references: {currency_id: Currency}
+    defaults: {note: ~}
+    changed_row: error
+  Feature:
+    table: corpus_features
+    serial: true
+    key: [plan_id, code]
+    references: {plan_id: Plan}
+    missing_row: warn
+    duplicate_key: error

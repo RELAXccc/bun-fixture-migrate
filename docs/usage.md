@@ -122,7 +122,7 @@ Four details matter:
 | `WithLocksTableName` | set `migration_locks_table` to the same name; `status` reads it to report a lock left behind |
 | `WithUpsert(true)` and `RunMigration` | re-running an applied fixture migration finds its changes made and reports them `unchanged` |
 | `BeforeMigration` / `AfterMigration` | run around the migration as usual |
-| `Rollback` | runs the generated down function, which reverts the change set with the same guards |
+| `Rollback` | runs the generated down function, which reverts the change set with the same guards: with an `audit_table`, only the changes the migration made in that database |
 
 The record removal only happens when `Apply` runs under bun's migrator, on the migrator's own
 `*bun.DB`, and only to the rows that, before the change set ran, carried the migration's name, had
@@ -155,9 +155,10 @@ applying the same set, one of them outside the migrator's lock, cannot both inse
 finds every change made and reports `unchanged`. The seed step needs the migrator's lock too: hold
 it around the seed, as above.
 
-**By hand, in an emergency.** Every generated migration is a plain Go value; `plan -file` shows
-what one does against any database, applied or not, and `Apply` runs it from a small program. Do
-not edit the rows by hand instead: the next fixture migration's guards compare against the values
+**By hand, in an emergency.** `apply -file` shows what one generated migration does against any
+database, applied or not, and with `-yes -record` runs it and records it as bun's migrator would, in
+one transaction; see [the runbook](production.md#running-a-migration-by-hand). Do not edit the rows
+by hand instead: the next fixture migration's guards compare against the values
 the state file says the database holds, and a hand edit shows up there as a changed row.
 
 ## SQL migrations next to fixture migrations

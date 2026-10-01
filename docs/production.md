@@ -44,7 +44,8 @@ large one against a copy, or off-peak.
 | `generate`, `baseline` | read the same way whenever a database is configured or named with `-dsn`: `generate` to check the fixture file against the columns and respell its values (not with `-no-lint`), `baseline` to ask whether a difference is only in how values are written (not with `-offline`) |
 | `plan` | writes in one transaction and always rolls it back. A sequence an insert drew from stays advanced, which only leaves a gap in the ids; a sequence the migration would move is reported, not moved. Under `-with-sql`, a SQL migration's own `setval` or `nextval` is not rolled back either, because PostgreSQL's sequences are not transactional; plan notes such a migration |
 | `sync` | writes, with `-yes`. Meant for databases that are not deployed to |
-| a fixture migration | writes, in one transaction, under a transaction-scoped advisory lock |
+| `apply` | without `-yes`, as `plan -file`; with it, runs one migration as the migrator would, and with `-record` writes or deletes its record in the migrations table, in the same transaction |
+| a fixture migration | writes, in one transaction, under a transaction-scoped advisory lock; with an `audit_table`, one row there per run, in the same transaction |
 
 Every connection the command opens carries `application_name=bun-fixture-migrate` unless the DSN
 sets one. `SIGINT` and `SIGTERM` cancel the running query and roll back.
@@ -109,6 +110,9 @@ that ran before this one. It was left alone.`
 this database, or a migration that ran before this one changed it, as when two branches each
 generated a migration for the same row and the older one was merged last. Under `changed_row: warn`,
 the default, the row as it is wins and the migration moves on. The migration is recorded as applied; that change will not be attempted again.
+
+With an `audit_table`, `status` against the database lists, per migration, the changes its last
+run here skipped and why, long after the deploy log is gone; without one, only that log says so.
 
 **Steps.** Run `check`. It lists the row with the database's and the file's values side by side.
 Then decide which one is right:
@@ -257,12 +261,21 @@ A rollback puts back the rows the migration deleted, and nothing a delete reache
 key under `deletes: cascade`: the subscriptions that went with a plan stay gone, and the log of the
 rollback says so for every such row. The log of the migration said how many there were.
 
-A rollback assumes the migration made every one of its changes on this database: nothing records
-which ones it made. A change the migration found already made -- the row already held the new value
-through some other path, or was already there -- is rolled back all the same: the update writes the
-old value, which this database may never have held, and the inserted row is deleted. Before rolling
-back a database where the migration reported `unchanged` changes, look at those rows. Where a row
-does not hold what the migration writes, the change is not rolled back and the log says so.
+Set `audit_table` before you need to roll back. With it, every run of a generated migration records,
+in the transaction that made its changes, which of them it applied, found made already and skipped,
+and a rollback undoes only the ones it applied in that database. A change the migration found made
+-- the row already held the new value through some other path, or was already there -- is left as it
+is, and so is one it skipped: a delete it skipped because somebody had removed the row does not put
+the row back. The log says why for each. `status` against the database shows what the last run did.
+
+Without it, or for a migration that ran before it was set, a rollback assumes the migration made
+every one of its changes on this database, and says so in the log. A change the migration found
+already made is rolled back all the same: the update writes the old value, which this database may
+never have held, and the inserted row is deleted. Before rolling back such a migration where it
+reported `unchanged` changes, look at those rows. Where a row does not hold what the migration
+writes, the change is not rolled back and the log says so.
+
+To roll back one migration rather than the migrator's last group, use `apply -revert` (below).
 
 A rolled-back migration is pending again, and the next deploy runs it again. To undo the change for
 good, revert the commit that brought the migration, the fixture edit and the state file, together,
@@ -276,13 +289,38 @@ forwards: correct the file and generate a new migration.
 To see what any fixture migration does against any database, applied or not:
 
 ```
-bun-fixture-migrate plan -file internal/migrations/20260930165255_fixture_plan_prices.go
+bun-fixture-migrate apply -file internal/migrations/20260930165255_fixture_plan_prices.go
 ```
 
-To apply one outside the migrator, write a small program that calls
-`fixtureapply.Apply(ctx, db, theSet)` with the set from the file, and insert its row into the
-migrations table the way bun would, or the migrator will run it again (harmlessly: every change will
-report `unchanged`).
+Without `-yes` that is `plan -file`: everything runs, nothing stays. To apply it outside the
+migrator, when a deploy cannot run it or one database needs it before the others:
+
+```
+bun-fixture-migrate apply -file internal/migrations/20260930165255_fixture_plan_prices.go -yes -record
+```
+
+It runs the change set as the migrator would, with the policy, lock timeout and audit table the
+file carries, and `-record` writes bun's record of the migration into the migrations table in the
+same transaction: the changes and the record are committed together or not at all, and the migrator
+then treats the migration as applied and does not run it. Without `-record` the migrator runs it again
+on the next deploy, harmlessly: every change reports `unchanged`. `-record` refuses a migration that
+is recorded already.
+
+To take one migration back, whatever group the migrator ran it in:
+
+```
+bun-fixture-migrate apply -file internal/migrations/20260930165255_fixture_plan_prices.go -revert
+bun-fixture-migrate apply -file internal/migrations/20260930165255_fixture_plan_prices.go -revert -yes -record
+```
+
+The first says which changes the revert undoes (with an `audit_table`, those the migration made
+here) and what it finds; the second makes them and deletes the record, so the migrator runs the
+migration again on the next deploy, unless you remove it first, as [above](#rolling-back) says.
+
+Run it as the role the deploy migrates as, and not while a deploy is migrating: the change set's
+advisory lock keeps two change sets apart, but not bun's migrator from recording the same migration.
+`apply` exits 3 when the change set fails, as it would in the deploy, and 2 when the record refuses
+it; either way nothing was changed.
 
 ## Adopting the tool on an existing project
 

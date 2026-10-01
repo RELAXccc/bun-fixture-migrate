@@ -73,6 +73,9 @@ type planTarget struct {
 	queries []string
 	readErr error
 	notes   []string
+	// revert runs the change set's Revert instead of its Apply (apply
+	// -revert without -yes).
+	revert bool
 }
 
 // upSQL is the .up.sql file of a SQL migration, "" for any other.
@@ -569,7 +572,11 @@ func simulate(o streams, db *bun.DB, targets []planTarget, lockTimeout time.Dura
 		if t.sql != "" {
 			err = runSQLMigration(o, tx, t)
 		} else {
-			err = fixtureapply.Apply(o.ctx, tx, t.set,
+			run := fixtureapply.Apply
+			if t.revert {
+				run = fixtureapply.Revert
+			}
+			err = run(o.ctx, tx, t.set,
 				fixtureapply.WithDryRun(),
 				fixtureapply.WithLogger(func(string, ...any) {}),
 				fixtureapply.WithReport(func(out fixtureapply.Outcome) {

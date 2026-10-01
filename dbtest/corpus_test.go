@@ -15,6 +15,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
 )
 
 const corpusMigrations = `package migrations
@@ -82,21 +84,22 @@ func TestEveryGeneratedFileCompilesAndRuns(t *testing.T) {
 	// module so it resolves bun and the library through its own go.mod.
 	build := "corpuscheck"
 	t.Cleanup(func() { os.RemoveAll(build) })
-	var imports, sets []string
+	var imports, sets, files []string
 	for i, dir := range dirs {
-		files, err := filepath.Glob(filepath.Join(dir, "*.go"))
-		if err != nil || len(files) != 1 {
-			t.Fatalf("%s: want one generated file, got %v %v", dir, files, err)
+		found, err := filepath.Glob(filepath.Join(dir, "*.go"))
+		if err != nil || len(found) != 1 {
+			t.Fatalf("%s: want one generated file, got %v %v", dir, found, err)
 		}
+		files = append(files, found[0])
 		pkg := filepath.Join(build, fmt.Sprintf("c%d", i))
 		if err := os.MkdirAll(pkg, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		src, err := os.ReadFile(files[0])
+		src, err := os.ReadFile(found[0])
 		if err != nil {
 			t.Fatal(err)
 		}
-		for name, content := range map[string][]byte{"migrations.go": []byte(corpusMigrations), filepath.Base(files[0]): src} {
+		for name, content := range map[string][]byte{"migrations.go": []byte(corpusMigrations), filepath.Base(found[0]): src} {
 			if err := os.WriteFile(filepath.Join(pkg, name), content, 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -166,6 +169,20 @@ func TestEveryGeneratedFileCompilesAndRuns(t *testing.T) {
 			migrate("up again")
 			if got := dump(); got != after {
 				t.Fatalf("up after down differs\n--- got ---\n%s\n--- want ---\n%s", got, after)
+			}
+			// A set with an audit table recorded each of the three runs.
+			src, err := os.ReadFile(files[i])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if set, _, err := fixturemigrate.ReadChangeSet(src); err != nil {
+				t.Fatal(err)
+			} else if set.AuditTable != "" {
+				got := scan[string](t, db, "SELECT string_agg(direction, ',' ORDER BY id) FROM "+set.AuditTable+
+					" WHERE set_name = ?", set.Name)
+				if got != "up,down,up" {
+					t.Fatalf("%s holds %q", set.AuditTable, got)
+				}
 			}
 		})
 	}

@@ -78,7 +78,7 @@ type checkChange struct {
 func findingsJSON(cfg *fixturemigrate.Config, findings []fixturemigrate.Finding) []checkFinding {
 	out := []checkFinding{}
 	for _, f := range findings {
-		out = append(out, checkFinding{Kind: string(f.Kind), Level: string(cfg.FindingMode(f.Kind)),
+		out = append(out, checkFinding{Kind: string(f.Kind), Level: string(cfg.ModeOf(f)),
 			Model: f.Model, Row: f.Row, Detail: f.Detail})
 	}
 	return out

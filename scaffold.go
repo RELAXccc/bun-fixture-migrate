@@ -607,6 +607,12 @@ migrator: Migrations
 # long as that transaction stays open, and the application's own writes to
 # those rows queue up behind it.
 lock_timeout: 10s
+# Uncomment to have every generated migration record, in a table of this name,
+# which changes each of its runs applied, found made already and skipped: a
+# rollback then undoes only what the migration did in that database, and status
+# shows per database what a deploy skipped. The first run creates the table,
+# which takes CREATE on its schema.
+# audit_table: bun_fixture_audit
 # Where the commands connect, unless -dsn names another database. "env:NAME"
 # reads the DSN from an environment variable, which is how the password stays
 # out of the repository.
@@ -618,7 +624,9 @@ database: env:DATABASE_URL
 
 const policyBlock = `# The choices that depend on how you run your databases rather than on what is
 # correct. Everything not here is fixed, because the alternative would let this
-# tool corrupt a database.
+# tool corrupt a database. A model can set id_drift, missing_row, changed_row,
+# duplicate_key, deletes and array_nulls for itself, as in the policy block:
+# changed_row: warn for translations an admin UI edits, error for prices.
 policy:
   # The id in the fixture file is not the id the database gave the row: the
   # file's id belongs to another row, or the row lives under a different id.

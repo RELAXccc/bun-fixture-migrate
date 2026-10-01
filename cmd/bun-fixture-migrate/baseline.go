@@ -243,7 +243,7 @@ func (s *setup) refuseFindings(o streams, snap *fixturemigrate.Snapshot) error {
 	n := 0
 	for _, f := range findings {
 		fmt.Fprintln(o.stderr, string(f.Kind)+":", f.String())
-		if s.cfg.FindingMode(f.Kind) == fixturemigrate.ModeError {
+		if s.cfg.ModeOf(f) == fixturemigrate.ModeError {
 			n++
 		}
 	}
