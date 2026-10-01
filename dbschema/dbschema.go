@@ -13,6 +13,7 @@ package dbschema
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -28,26 +29,47 @@ type Column struct {
 	// Position is its ordinal position, which export uses as the column order
 	// so an exported file looks like the table.
 	Position int
-	// Type is the PostgreSQL type name as the catalog spells it ("int8",
-	// "text", "bool", "numeric", "timestamptz", "jsonb", "_text" for text[]).
+	// Type is the name of the column's type as the catalog spells it, with
+	// any domain peeled off: "int8", "text", "bool", "numeric",
+	// "timestamptz", "jsonb", "_text" for text[]. A column of a domain over
+	// integer is "int4" here: every question asked of a column's type --
+	// what its zero is, whether its values are numbers, how they are read,
+	// written and exported -- is a question about the type its values are.
 	Type string
+	// Domain is the column's domain as SQL names it ("qty",
+	// "billing.amount"), "" for a column of a plain type. Its constraints
+	// apply to every value, which is why a value is cast to FullType.
+	Domain string
 	// FullType is the type as SQL writes it, with its modifiers and, where
 	// the search path needs it, its schema: "numeric(10,2)", "character
-	// varying(20)", "text[]", "timestamp with time zone". It is what a value
-	// is cast to so PostgreSQL can say what the column would hold.
+	// varying(20)", "text[]", "timestamp with time zone", or the domain's
+	// name. It is what a value is cast to so PostgreSQL can say what the
+	// column would hold.
 	FullType string
 	// Category is the type's category (pg_type.typcategory): "A" for an
 	// array, "E" for an enum, "N" numeric, "S" string, "D" date and time,
-	// "U" user-defined, and so on.
+	// "U" user-defined, and so on. A domain has its base type's.
 	Category string
 	// ElemCategory is the category of an array's element type, "" for a
 	// column that is not an array.
 	ElemCategory string
-	// Nullable is true when the column accepts NULL.
+	// ElemType is the name of an array's element type with any domain
+	// peeled off, "bpchar" for character(3)[]; "" for a column that is not
+	// an array.
+	ElemType string
+	// Length is the declared length of a character or bit-string column, or
+	// of the elements of an array of them, a domain's included: 3 for
+	// varchar(3), character(3)[] and bit(3). It is 0 when there is none.
+	// An explicit cast truncates to it without a word where an INSERT
+	// refuses, so a value is checked against it before it is cast.
+	Length int
+	// Nullable is true when the column accepts NULL: neither the column nor
+	// its domain says NOT NULL.
 	Nullable bool
-	// Default is the column default exactly as the catalog stores it, "" when
-	// the column has none. "nextval('t_id_seq'::regclass)" for a serial
-	// column, "0", "false", "'x'::text", "now()".
+	// Default is the column default exactly as the catalog stores it, or
+	// the domain's when the column has none, "" when neither has one.
+	// "nextval('t_id_seq'::regclass)" for a serial column, "0", "false",
+	// "'x'::text", "now()".
 	Default string
 	// Identity is true for a GENERATED ... AS IDENTITY column.
 	Identity bool
@@ -57,6 +79,19 @@ type Column struct {
 	// Generated is true for a GENERATED ALWAYS AS (...) STORED column. Its
 	// Default is the generation expression, and nothing can write into it.
 	Generated bool
+	// Checks are the table's CHECK constraints that name this column and no
+	// other, which a value can be held against on its own. A constraint
+	// over several columns is not among them.
+	Checks []Check
+}
+
+// Check is a CHECK constraint over one column.
+type Check struct {
+	// Name is the constraint's name.
+	Name string
+	// Expr is its expression as pg_get_expr writes it, naming the column
+	// unqualified: "(price < 100)".
+	Expr string
 }
 
 // Table is one table.
@@ -142,6 +177,27 @@ func (c Column) ZeroText() (string, bool) {
 		return "00000000-0000-0000-0000-000000000000", true
 	}
 	return "", false
+}
+
+// declaredLength reads the length out of a type modifier: varchar and bpchar
+// keep n plus a four-byte header, bit and varbit keep n itself. An array's
+// modifier is its elements'.
+func declaredLength(c Column, typmod int) int {
+	typ := c.Type
+	if c.Category == "A" {
+		typ = c.ElemType
+	}
+	switch typ {
+	case "varchar", "bpchar":
+		if typmod >= 4 {
+			return typmod - 4
+		}
+	case "bit", "varbit":
+		if typmod > 0 {
+			return typmod
+		}
+	}
+	return 0
 }
 
 // LiteralDefault is the column default reduced to the value it produces, for a
@@ -259,27 +315,51 @@ func Load(ctx context.Context, db bun.IDB, schemas ...string) (map[string]*Table
 
 	// One row per column. Nothing is aggregated in SQL: a column name may hold
 	// any character, so there is no separator a string_agg could use safely.
+	//
+	// A domain is followed down to the type its values are, a domain over a
+	// domain included; on the way it may contribute a length, a NOT NULL and a
+	// default. The default of the outermost domain that has one is what an
+	// INSERT saying DEFAULT gets, unless the column has its own.
 	const columnQuery = `
-SELECT n.nspname, c.relname, a.attname, a.attnum, t.typname,
-       format_type(a.atttypid, a.atttypmod), t.typcategory::text, COALESCE(et.typcategory::text, ''),
-       NOT a.attnotnull, COALESCE(pg_get_expr(d.adbin, d.adrelid), ''), a.attidentity <> '',
+WITH RECURSIVE dom AS (
+	SELECT oid AS dom, typbasetype AS base, typtypmod AS typmod, typnotnull AS notnull, typdefaultbin AS def
+	FROM pg_type WHERE typtype = 'd'
+	UNION ALL
+	SELECT dom.dom, t.typbasetype, CASE WHEN dom.typmod <> -1 THEN dom.typmod ELSE t.typtypmod END,
+	       dom.notnull OR t.typnotnull, COALESCE(dom.def, t.typdefaultbin)
+	FROM dom JOIN pg_type t ON t.oid = dom.base WHERE t.typtype = 'd'
+), domains AS (
+	SELECT dom.* FROM dom JOIN pg_type b ON b.oid = dom.base WHERE b.typtype <> 'd'
+)
+SELECT n.nspname, c.relname, a.attname, a.attnum, bt.typname,
+       CASE WHEN t.typtype = 'd' THEN format_type(t.oid, NULL) ELSE '' END,
+       format_type(a.atttypid, a.atttypmod), bt.typcategory::text, COALESCE(et.typcategory::text, ''),
+       COALESCE(ebt.typname, ''), COALESCE(NULLIF(a.atttypmod, -1), NULLIF(r.typmod, -1), NULLIF(er.typmod, -1), -1),
+       NOT a.attnotnull AND NOT COALESCE(r.notnull, false),
+       COALESCE(pg_get_expr(d.adbin, d.adrelid), pg_get_expr(r.def, 0), ''), a.attidentity <> '',
        a.attidentity = 'a', a.attgenerated <> ''
 FROM pg_attribute a
 JOIN pg_class c ON c.oid = a.attrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_type t ON t.oid = a.atttypid
-LEFT JOIN pg_type et ON et.oid = t.typelem AND t.typcategory = 'A'
+LEFT JOIN domains r ON r.dom = a.atttypid
+JOIN pg_type bt ON bt.oid = COALESCE(r.base, a.atttypid)
+LEFT JOIN pg_type et ON et.oid = bt.typelem AND bt.typcategory = 'A'
+LEFT JOIN domains er ON er.dom = et.oid
+LEFT JOIN pg_type ebt ON ebt.oid = COALESCE(er.base, et.oid)
 LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
 WHERE n.nspname IN (?) AND c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped
 ORDER BY n.nspname, c.relname, a.attnum`
 	if err := each(ctx, db, columnQuery, list, func(rows *sql.Rows) error {
 		var schema, table string
 		var col Column
-		if err := rows.Scan(&schema, &table, &col.Name, &col.Position, &col.Type, &col.FullType, &col.Category,
-			&col.ElemCategory, &col.Nullable,
+		var typmod int
+		if err := rows.Scan(&schema, &table, &col.Name, &col.Position, &col.Type, &col.Domain, &col.FullType,
+			&col.Category, &col.ElemCategory, &col.ElemType, &typmod, &col.Nullable,
 			&col.Default, &col.Identity, &col.IdentityAlways, &col.Generated); err != nil {
 			return err
 		}
+		col.Length = declaredLength(col, typmod)
 		t := tables[schema+"."+table]
 		if t == nil {
 			t = &Table{Schema: schema, Name: table}
@@ -289,6 +369,35 @@ ORDER BY n.nspname, c.relname, a.attnum`
 		return nil
 	}); err != nil {
 		return nil, fmt.Errorf("read the columns of %s: %w", strings.Join(schemas, ", "), err)
+	}
+
+	// One row per CHECK constraint that names a single column. A constraint
+	// over several columns cannot be held against one value; PostgreSQL
+	// checks it when the row is written.
+	const checkQuery = `
+SELECT n.nspname, c.relname, a.attname, con.conname, pg_get_expr(con.conbin, con.conrelid)
+FROM pg_constraint con
+JOIN pg_class c ON c.oid = con.conrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = con.conkey[1]
+WHERE n.nspname IN (?) AND con.contype = 'c' AND cardinality(con.conkey) = 1
+ORDER BY n.nspname, c.relname, con.conname`
+	if err := each(ctx, db, checkQuery, list, func(rows *sql.Rows) error {
+		var schema, table, column string
+		var check Check
+		if err := rows.Scan(&schema, &table, &column, &check.Name, &check.Expr); err != nil {
+			return err
+		}
+		if t := tables[schema+"."+table]; t != nil {
+			for i := range t.Columns {
+				if t.Columns[i].Name == column {
+					t.Columns[i].Checks = append(t.Columns[i].Checks, check)
+				}
+			}
+		}
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("read the check constraints of %s: %w", strings.Join(schemas, ", "), err)
 	}
 
 	// One row per indexed column, in index order. A partial index and an index
@@ -400,6 +509,47 @@ func each(ctx context.Context, db bun.IDB, query string, arg any, fn func(*sql.R
 		return err
 	}
 	return rows.Close()
+}
+
+// NotATable says what a relation is that Load leaves out although it exists:
+// "a view", "a materialized view", "a foreign table", and so on. It is "" when
+// nothing of that name exists. qualified is "schema.name", the way Load keys
+// its result.
+//
+// Only a table holds master data: a view's rows belong to the tables it reads,
+// and whatever writes into it writes into those, if anything. So a model
+// naming one is refused, and this is what the refusal says.
+func NotATable(ctx context.Context, db bun.IDB, qualified string) (string, error) {
+	schema, name, ok := strings.Cut(qualified, ".")
+	if !ok {
+		schema, name = "public", qualified
+	}
+	var kind string
+	err := db.QueryRowContext(ctx, `SELECT c.relkind::text FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ? AND c.relname = ?`, schema, name).Scan(&kind)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	switch kind {
+	case "r", "p":
+		return "", nil
+	case "v":
+		return "a view", nil
+	case "m":
+		return "a materialized view", nil
+	case "f":
+		return "a foreign table", nil
+	case "S":
+		return "a sequence", nil
+	case "i", "I":
+		return "an index", nil
+	case "c":
+		return "a composite type", nil
+	}
+	return "not a table", nil
 }
 
 // Names lists the tables of a schema map in a stable order.

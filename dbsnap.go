@@ -60,8 +60,7 @@ func DatabaseSnapshot(ctx context.Context, db bun.IDB, cfg *Config, tables map[s
 		}
 		table := tables[cfg.QualifiedTable(m)]
 		if table == nil {
-			return nil, fmt.Errorf("model %q: the configuration says %s, which is not a table in this database",
-				model, cfg.QualifiedTable(m))
+			return nil, notATable(ctx, db, model, cfg.QualifiedTable(m))
 		}
 		cols, err := readColumns(m, table, opts.Columns[model])
 		if err != nil {
@@ -118,6 +117,18 @@ func DatabaseSnapshot(ctx context.Context, db bun.IDB, cfg *Config, tables map[s
 	}
 	reportDuplicateRefs(cfg, snap)
 	return snap, nil
+}
+
+// notATable is the error for a model whose table Load did not find: a view,
+// a materialized view or a foreign table says what it is, because only a
+// table holds master data.
+func notATable(ctx context.Context, db bun.IDB, model, qualified string) error {
+	kind, err := dbschema.NotATable(ctx, db, qualified)
+	if err != nil || kind == "" {
+		return fmt.Errorf("model %q: the configuration says %s, which is not a table in this database", model, qualified)
+	}
+	return fmt.Errorf("model %q: the configuration says %s, which is %s: only a table holds master data, so name "+
+		"the table whose rows it shows", model, qualified, kind)
 }
 
 // readColumns is the column list to read for a model: the projection the caller
