@@ -23,6 +23,11 @@ migrator: Migrations
 # fails deletes the record bun made of it before running it, so it runs again
 # once the database is fixed; status and plan read what was applied from here.
 migrations_table: bun_migrations
+# The table bun's Migrator.Lock writes a row into while it migrates: bun's
+# default unless you build the migrator with migrate.WithLocksTableName.
+# status reports a row a crashed deploy left there, which makes every later
+# migrate fail with "migrations table is already locked".
+migration_locks_table: bun_migration_locks
 # The state file: the fixture file as the generated migrations leave a
 # database. generate diffs against it, not against git, and rewrites it with
 # every migration, so an edit committed without a migration is still found and
