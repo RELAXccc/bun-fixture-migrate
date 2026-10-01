@@ -344,6 +344,18 @@ hand and `baseline -force`. See the [runbook](production.md#generate-refused-a-c
   table, which is then read without an id of its own, and keep the column in `key` and `references`;
   `scaffold` writes it so. Its rows name their plan, `id: '{{ $.Plan.free.ID }}'`, as `dbfixture` loads
   them.
+- A row pointing at such a table, an addon whose `detail_id` holds a plan's details, names the model at
+  the end of the chain in `references` (`detail_id: Plan`), and `scaffold` writes it so. Nothing then
+  orders it after the `id: none` model. A migration may insert the addon before the details row it
+  points at, or delete the details row before the addon, and `plan` fails on the foreign key. Until
+  that is fixed, add the details in one migration and the rows pointing at them in the next; on a
+  delete, remove the rows pointing at them first. `export` may write the addon's block above the
+  details' block, which `dbfixture` cannot load: move it below by hand.
+- Without a database an interval is read as PostgreSQL reads it, except that a time field before a
+  fractional day, `'00:00 1.5 days'`, is added to the half day where PostgreSQL lets it overwrite the
+  half day (`1 day 12:00:00` against `1 day`). So `'1.5 days'` becoming `'00:00 1.5 days'` is refused
+  as one value written two ways, where it is a change in any column. Configure the database, which
+  reads it as PostgreSQL does, or write the value without the time field.
 - A structured value (mapping or sequence) is supported in `json`, `jsonb`, array and `bytea` columns,
   and not as a reference. A mapping in an `hstore` column, which a `map[string]string` field loads, is
   an `invalid value`.
