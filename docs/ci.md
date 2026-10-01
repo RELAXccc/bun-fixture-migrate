@@ -11,8 +11,10 @@ The checks worth running, and ready-made jobs for GitHub Actions and GitLab CI. 
 | `check` | the deployed database | the database and the fixture file disagree (exit 3) |
 
 Exit code 3 always means "found something" and 1 "could not run", so a job can treat drift as a
-warning and a broken connection as a failure. Every command takes `-json` for a report to archive
-or alert on; see the [reference](reference.md#json-output).
+warning and a broken connection as a failure. A finding the configuration's policy makes a warning is
+reported and does not fail a job. `check`, `status`, `plan` and `sync` take `-json` for a report to
+archive or alert on; see the [reference](reference.md#json-output). `export -stdout` writes the same
+bytes for the same database, so a job can diff it against the committed fixture file.
 
 Pin the tool to one version, the same as the `fixtureapply` your migrations import through
 `go.mod`. Build it with a supported Go release: the tool's own `go.mod` names the oldest Go it
@@ -52,8 +54,10 @@ jobs:
 The output `exit-code` is the command's exit code; the step fails unless it is 0. Inputs reach the
 command through environment variables, never by being pasted into a script.
 
-A database is whatever the configuration names, usually `database: env:DATABASE_URL`; give the step
-that variable from a secret:
+A database is whatever the configuration names, usually `database: env:DATABASE_URL`, or what
+`-dsn` names for one command, such as `-dsn env:PRODUCTION_READONLY_DSN`; give the step that variable
+from a secret. `$BUN_FIXTURE_MIGRATE_CONFIG` names the configuration for every command of a job that
+does not run where it is:
 
 ```yaml
   plan:

@@ -12,8 +12,14 @@ Everything the command and the library take and give back. For what to do with i
 ## Commands
 
 `bun-fixture-migrate <command> [flags]`. Every command but `scaffold` and `version` reads a
-configuration file, `fixture-migrate.yml` in the current directory unless `-config` names another;
-paths in it are relative to it. Every command takes `-h`.
+configuration file: the one `-config` names, else the one `$BUN_FIXTURE_MIGRATE_CONFIG` names, else
+`fixture-migrate.yml` in the current directory. Paths in it are relative to it. Every command takes
+`-h`.
+
+Every command that connects, `export`, `check`, `generate`, `status`, `plan` and `sync`, takes
+`-dsn`: the database to use instead of the configuration's `database`, as a URL or as `env:NAME` to
+read one from the environment, which keeps the password out of the process list. Neither the
+command nor its errors repeat a password.
 
 | Command | Database | Writes |
 | --- | --- | --- |
@@ -38,7 +44,7 @@ a natural key guessed from the narrowest unique index besides the primary key. E
 
 | Flag | |
 | --- | --- |
-| `-dsn` | the database; default `$DATABASE_URL` |
+| `-dsn` | the database, as a URL or `env:NAME`; default `$DATABASE_URL` |
 | `-o` | write to this file, which must not exist; default standard output |
 | `-schema` | the schema to read, default `public` |
 | `-tables` | comma-separated tables; default all of them |
@@ -152,12 +158,13 @@ Exit 2 when a finding the policy makes an error, or a difference `generate` woul
 
 | Code | Meaning |
 | --- | --- |
-| 0 | done; for `check`, `status` and `plan`: nothing found |
-| 1 | the command could not do its job: a bad flag, no connection, an unreadable file, a plan that could not finish |
+| 0 | done; for `check`, `status` and `plan`: nothing found, or only findings the policy makes warnings |
+| 1 | the command could not do its job: a bad flag, no connection, an unreadable file, output that could not be written, a plan that could not finish |
 | 2 | refused: a difference that needs a hand-written migration, a finding the policy makes an error, a state `baseline` will not replace, a file `export` will not write |
-| 3 | found something: drift (`check`), a change no migration makes or a migration not applied (`status`), a migration that would fail or skip (`plan`) |
+| 3 | found something: drift (`check`), a change no migration makes or a migration not applied (`status`), a migration that would fail or skip, or a problem in the migrations directory (`status`, `plan`) |
 
-A pipeline can tell "the database drifted" (3) from "the check could not run" (1).
+A pipeline can tell "the database drifted" (3) from "the check could not run" (1). Whatever the
+code, the last line on standard error says why, starting with `bun-fixture-migrate:`.
 
 ## Configuration
 

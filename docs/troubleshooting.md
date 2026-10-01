@@ -15,6 +15,13 @@ see the [production runbook](production.md); this page is about the tool itself.
 
 ## Configuration
 
+**`flag provided but not defined: -x; "bun-fixture-migrate plan -h" lists its flags`.** Flags come
+after the command, and each command has its own; `-h` lists them. Only the commands that connect take
+`-dsn`.
+
+**`open fixture-migrate.yml: no such file or directory`.** The configuration is looked for in the
+current directory unless `-config` or `$BUN_FIXTURE_MIGRATE_CONFIG` names it.
+
 **`model "X" is in the fixture file but not in the configuration`.** Every model the fixture files
 name needs an entry under `models:`. A model the tool silently skipped would be a change that never
 happens. `scaffold` writes entries for every table.
@@ -36,8 +43,11 @@ left out of `references` (and set by hand).
 
 ## Connecting
 
-**`the configuration reads the database DSN from DATABASE_URL, which is not set`.** `database:
-env:DATABASE_URL` names an environment variable; set it.
+**`no database in the configuration file and no -dsn; this command needs one`.** Set `database` in
+the configuration, usually `env:DATABASE_URL`, or pass `-dsn`.
+
+**`the database DSN is to be read from the environment variable DATABASE_URL, which is not set`.**
+`database: env:DATABASE_URL`, or `-dsn env:DATABASE_URL`, names an environment variable; set it.
 
 **`the database DSN is not a URL pgdriver can read`.** Write it as
 `postgres://user:password@host:5432/dbname?sslmode=disable`. A keyword DSN (`host=... user=...`) is

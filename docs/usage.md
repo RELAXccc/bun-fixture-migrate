@@ -173,7 +173,7 @@ file, the newer truth. Three settings and one loop keep that safe:
 - To take the edits into the file, export from production and generate:
 
   ```
-  DATABASE_URL=<read-only production DSN> bun-fixture-migrate export
+  bun-fixture-migrate export -dsn env:PRODUCTION_READONLY_DSN
   bun-fixture-migrate generate -name "admin edits"
   ```
 

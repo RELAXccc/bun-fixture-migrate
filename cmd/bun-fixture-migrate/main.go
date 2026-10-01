@@ -15,6 +15,10 @@
 //	sync       bring a database to the fixture file directly, without a
 //	           migration file: a developer's, a test run's, a staging copy
 //
+// Every command that reads a configuration takes -config, which defaults to
+// $BUN_FIXTURE_MIGRATE_CONFIG and then to fixture-migrate.yml, and every one
+// that connects takes -dsn, which wins over the configuration's database.
+//
 // Exit codes: 0 when there was nothing to do or the work was done, 1 on an
 // error, 2 when something was refused and nothing was written, 3 when check,
 // status or plan found something.
@@ -27,11 +31,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -54,6 +60,17 @@ const usage = `bun-fixture-migrate <command> [flags]
   version    print the version of this binary
 
 Run "bun-fixture-migrate <command> -h" for the flags of one command.`
+
+// configEnv names the default for -config, for a project whose configuration
+// is not where the command runs: a monorepo, a CI job, a container.
+const configEnv = "BUN_FIXTURE_MIGRATE_CONFIG"
+
+// connects are the commands that can connect to a database, which take -dsn.
+// baseline never does, and scaffold has a -dsn of its own because it runs
+// before there is a configuration.
+var connects = map[string]bool{
+	"export": true, "check": true, "generate": true, "status": true, "plan": true, "sync": true,
+}
 
 func main() {
 	// Interrupted, a command stops at its next query and its transaction
@@ -107,9 +124,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if err == nil || errors.Is(err, flag.ErrHelp) {
 		return 0
 	}
+	// Every error is one line, with the command's name in front, whatever
+	// the exit code: in a CI log it is the line that says why the job failed.
 	var exit exitError
 	if errors.As(err, &exit) {
-		fmt.Fprintln(stderr, exit.message)
+		fmt.Fprintln(stderr, "bun-fixture-migrate:", exit.message)
 		return exit.code
 	}
 	fmt.Fprintln(stderr, "bun-fixture-migrate:", err)
@@ -163,18 +182,63 @@ type setup struct {
 	statePath    string
 }
 
-func common(o streams, fs *flag.FlagSet, args []string) (*setup, error) {
+// parseFlags reads a command's flags. The flag package prints a bad flag's
+// error itself, then the usage, and run would print the error a second time;
+// so here the package prints nothing, -h prints the usage, and a bad flag
+// comes back as the one error run prints, saying where the flags are listed.
+func parseFlags(o streams, fs *flag.FlagSet, args []string) error {
+	fs.SetOutput(io.Discard)
+	err := fs.Parse(args)
 	fs.SetOutput(o.stderr)
-	configPath := fs.String("config", "fixture-migrate.yml", "configuration file")
-	if err := fs.Parse(args); err != nil {
-		return nil, err
+	switch {
+	case errors.Is(err, flag.ErrHelp):
+		fmt.Fprintf(o.stderr, "Usage of %s:\n", fs.Name())
+		fs.PrintDefaults()
+		return err
+	case err != nil:
+		return fmt.Errorf("%w; \"bun-fixture-migrate %s -h\" lists its flags", err, fs.Name())
+	case fs.NArg() > 0:
+		return fmt.Errorf("unexpected argument %s; every option is a flag, see -h", quoteArg(fs.Arg(0)))
 	}
-	if fs.NArg() > 0 {
-		return nil, fmt.Errorf("unexpected argument %q; every option is a flag, see -h", fs.Arg(0))
+	return nil
+}
+
+// quoteArg is a command-line argument fit to repeat in a message. A DSN left
+// behind by a mistyped flag is repeated with its password masked, and one
+// that cannot be read as a URL is not repeated at all.
+func quoteArg(arg string) string {
+	u, err := url.Parse(arg)
+	switch {
+	case err == nil && u.Scheme != "" && u.Host != "":
+		return strconv.Quote(redact(u))
+	case strings.Contains(arg, "://") || strings.Contains(strings.ToLower(arg), "password"):
+		return "that looks like a DSN (not repeated here)"
+	}
+	return strconv.Quote(arg)
+}
+
+func common(o streams, fs *flag.FlagSet, args []string) (*setup, error) {
+	defaultConfig := "fixture-migrate.yml"
+	if env := os.Getenv(configEnv); env != "" {
+		defaultConfig = env
+	}
+	configPath := fs.String("config", defaultConfig, "configuration file; $"+configEnv+" sets the default")
+	var dsn *string
+	if connects[fs.Name()] {
+		dsn = fs.String("dsn", "", "the database, instead of the configuration's: a URL, or env:NAME to read one "+
+			"from the environment")
+	}
+	if err := parseFlags(o, fs, args); err != nil {
+		return nil, err
 	}
 	cfg, err := fixturemigrate.LoadConfig(*configPath)
 	if err != nil {
 		return nil, err
+	}
+	// Everything that asks whether a database is configured, and connect,
+	// read it from the configuration, so -dsn is put there.
+	if dsn != nil && *dsn != "" {
+		cfg.Database = *dsn
 	}
 	s := &setup{cfg: cfg, root: filepath.Dir(*configPath)}
 	for _, f := range cfg.Fixtures {
@@ -474,8 +538,7 @@ func scaffold(o streams, args []string) error {
 		only   = fs.String("tables", "", "comma-separated tables to include, default all of them")
 		out    = fs.String("o", "", "write here instead of standard output")
 	)
-	fs.SetOutput(o.stderr)
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(o, fs, args); err != nil {
 		return err
 	}
 	if *dsn == "" {
@@ -484,7 +547,11 @@ func scaffold(o streams, args []string) error {
 	if *dsn == "" {
 		return fmt.Errorf("pass -dsn, or set DATABASE_URL")
 	}
-	db, err := openDB(o.ctx, *dsn)
+	resolved, err := resolveDSN(*dsn)
+	if err != nil {
+		return err
+	}
+	db, err := openDB(o.ctx, resolved)
 	if err != nil {
 		return err
 	}

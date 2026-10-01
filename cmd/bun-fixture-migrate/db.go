@@ -17,16 +17,16 @@ import (
 )
 
 // resolveDSN reads a DSN written as "env:NAME" from the environment, so the
-// password stays out of the repository.
+// password stays out of the repository and out of the command line.
 func resolveDSN(dsn string) (string, error) {
 	if name, ok := strings.CutPrefix(dsn, "env:"); ok {
 		dsn = os.Getenv(name)
 		if dsn == "" {
-			return "", fmt.Errorf("the configuration reads the database DSN from %s, which is not set", name)
+			return "", fmt.Errorf("the database DSN is to be read from the environment variable %s, which is not set", name)
 		}
 	}
 	if dsn == "" {
-		return "", fmt.Errorf("no database in the configuration file; this command needs one")
+		return "", fmt.Errorf("no database in the configuration file and no -dsn; this command needs one")
 	}
 	return dsn, nil
 }
