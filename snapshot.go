@@ -386,7 +386,8 @@ func (s *Snapshot) reportDuplicates(model string) {
 		s.Findings = append(s.Findings, Finding{
 			Kind: FindingDuplicateKey, Model: model, Row: group[0].label(model),
 			Detail: "this natural key is held by " + plural(len(group), "row") + " (" + strings.Join(ids, ", ") +
-				"), so no lookup by it can tell them apart: give the table a unique index, or add a column to key",
+				"), so no lookup by it can tell them apart: " + indexAdvice(s.tables[model], sortedColumns(group[0].Key),
+				"give the table a unique index") + ", or add a column to key",
 		})
 	}
 }
