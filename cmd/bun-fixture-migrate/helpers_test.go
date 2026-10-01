@@ -96,6 +96,10 @@ func TestResolveDSN(t *testing.T) {
 	if _, err := resolveDSN(""); err == nil {
 		t.Fatal("no DSN is an error")
 	}
+	if _, err := resolveDSN("env:"); err == nil || !strings.Contains(err.Error(), "write env:NAME") ||
+		strings.Contains(err.Error(), "variable ,") {
+		t.Fatalf("env: names no variable: %v", err)
+	}
 	if dsn, _ := resolveDSN("postgres://y"); dsn != "postgres://y" {
 		t.Fatal(dsn)
 	}
@@ -268,5 +272,19 @@ func TestScaffoldDoesNotOverwrite(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(path); string(got) != "x" {
 		t.Fatal("scaffold overwrote a file")
+	}
+}
+
+// An export is written anew from the database, so the comments of the file
+// it replaces are counted, to say they are gone.
+func TestDroppedComments(t *testing.T) {
+	old := "# master data\n- model: Plan\n  rows:\n    # the cheap one\n    - name: free # forever\n      note: \"a # b\"\n"
+	exported := "# Exported by bun-fixture-migrate from a live database.\n- model: Plan\n  rows:\n    - name: free\n" +
+		"      note: \"a # b\"\n"
+	if n := droppedComments([]byte(old), []byte(exported)); n != 3 {
+		t.Fatalf("got %d, want the three comments", n)
+	}
+	if n := droppedComments([]byte(exported), []byte(exported)); n != 0 {
+		t.Fatalf("the export's own header is kept: %d", n)
 	}
 }

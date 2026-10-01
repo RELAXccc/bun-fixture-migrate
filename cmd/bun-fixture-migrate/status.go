@@ -55,11 +55,17 @@ type statusReport struct {
 	// migration for Uncovered as things stand, so the report does not tell
 	// anybody to run it.
 	generateRefuses bool
+	// coveredMissing is true when the migration the state file names as the
+	// newest it includes is not in the directory, which generate refuses.
+	coveredMissing bool
 }
 
 type stateInfo struct {
-	Path      string `json:"path"`
-	Exists    bool   `json:"exists"`
+	Path   string `json:"path"`
+	Exists bool   `json:"exists"`
+	// Error is why a state file that exists does not read: a merge that
+	// stopped in it, an edit its checksum caught. Nothing is compared then.
+	Error     string `json:"error,omitempty"`
 	Migration string `json:"migration,omitempty"`
 	Format    int    `json:"format,omitempty"`
 	// Covers is the newest fixture migration whose changes the state
@@ -133,13 +139,14 @@ func status(o streams, args []string) error {
 		return err
 	}
 
-	var fixtures []fixturemigrate.MigrationFile
+	var fixtures, all []fixturemigrate.MigrationFile
 	if s.outDir != "" {
 		ms, err := fixturemigrate.ReadMigrations(s.outDir)
 		if err != nil {
 			return fmt.Errorf("the migrations directory: %w", err)
 		}
 		r.Problems = append(r.Problems, ms.Problems...)
+		all = ms.List
 		for _, m := range ms.List {
 			info := migrationInfo{ID: m.ID(), Name: m.Name, Fixture: m.Fixture != nil}
 			if m.Fixture != nil {
@@ -155,6 +162,12 @@ func status(o streams, args []string) error {
 		for _, m := range unaccounted(state, fixtures) {
 			r.NotInState = append(r.NotInState, m.ID())
 			r.Problems = append(r.Problems, lineageProblem(state, m))
+		}
+		if s.outDir != "" {
+			if gone := coveredGone(state, all, s.outDir, s.statePath); gone != "" {
+				r.Problems = append(r.Problems, gone)
+				r.coveredMissing = true
+			}
 		}
 	}
 
@@ -205,7 +218,7 @@ func status(o streams, args []string) error {
 			errorFindings++
 		}
 	}
-	r.generateRefuses = errorFindings > 0 || len(r.NotInState) > 0
+	r.generateRefuses = errorFindings > 0 || len(r.NotInState) > 0 || r.coveredMissing
 
 	if *asJSON {
 		// A program reads an empty list as [], not as null.
@@ -231,6 +244,9 @@ func status(o streams, args []string) error {
 	}
 
 	var failures []string
+	if r.State != nil && r.State.Error != "" {
+		failures = append(failures, "the state file does not read, so nothing says what the fixture file changes")
+	}
 	if n := len(r.Uncovered) + len(r.Refused); n > 0 {
 		failures = append(failures, "the fixture file has changes no migration makes")
 	}
@@ -286,7 +302,8 @@ func (s *setup) statusBase(r *statusReport) (*fixturemigrate.Snapshot, *fixturem
 			files, r.Base = read.Files, "the state file"
 		case errors.Is(err, fixturemigrate.ErrNoState):
 		default:
-			r.Problems = append(r.Problems, err.Error())
+			r.State.Exists = true
+			r.State.Error = strings.TrimPrefix(err.Error(), s.statePath+": ")
 			return nil, nil, nil
 		}
 	}
@@ -319,7 +336,8 @@ func (s *setup) statusBase(r *statusReport) (*fixturemigrate.Snapshot, *fixturem
 // respelled by the database, as generate does, so a value written 1.10 in one
 // and 1.1 in the other of a numeric column is no change. It says so when
 // that is all there is, because status -offline cannot tell until the state
-// file has the new spelling.
+// file has the new spelling. It lints the fixture file against the columns as
+// generate does, and what that finds is the fixture file's findings.
 func (s *setup) uncoveredInDB(o streams, tx bun.Tx, r *statusReport, old, head *fixturemigrate.Snapshot) (*fixturemigrate.Result, error) {
 	offline, err := fixturemigrate.Compute(s.cfg, old, head)
 	if err != nil {
@@ -332,6 +350,11 @@ func (s *setup) uncoveredInDB(o streams, tx bun.Tx, r *statusReport, old, head *
 	if err := canonical(o, tx, s.cfg, tables, head, old); err != nil {
 		return nil, err
 	}
+	// The lint generate runs before it writes anything, so status does not
+	// send anybody to a generate that refuses.
+	fixturemigrate.LintColumns(s.cfg, head, tables)
+	fixturemigrate.LintZeroDefaults(s.cfg, head, tables)
+	fixturemigrate.LintNullDefaults(s.cfg, head, tables)
 	res, err := fixturemigrate.Compute(s.cfg, old, head)
 	if err != nil {
 		return nil, err
@@ -522,20 +545,39 @@ func lineageOf(state *fixturemigrate.State, fixtures []fixturemigrate.MigrationF
 	return newest, newest
 }
 
-// fixtureMigrations is the fixture migrations of the migrations directory,
-// none when there is no directory yet.
-func (s *setup) fixtureMigrations() ([]fixturemigrate.MigrationFile, error) {
+// migrations is the migrations directory, empty when there is none yet.
+func (s *setup) migrations() (*fixturemigrate.Migrations, error) {
 	if s.outDir == "" {
-		return nil, nil
+		return &fixturemigrate.Migrations{}, nil
 	}
 	ms, err := fixturemigrate.ReadMigrations(s.outDir)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		return &fixturemigrate.Migrations{}, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("the migrations directory: %w", err)
 	}
-	return ms.Fixtures(), nil
+	return ms, nil
+}
+
+// coveredGone says, when the migration the state names as the newest it
+// includes is not in the directory, that its changes are lost: the state,
+// which generate diffs against, says they are made, and no migration makes
+// them. "" when it is there, or the state names none. A file that is there
+// and no longer reads as a change set is a problem of its own already.
+func coveredGone(state *fixturemigrate.State, all []fixturemigrate.MigrationFile, dir, statePath string) string {
+	covered := state.Covered()
+	if covered == "" {
+		return ""
+	}
+	for _, m := range all {
+		if m.ID() == covered {
+			return ""
+		}
+	}
+	return fmt.Sprintf("the state file includes the changes of %s, which is not in %s: it was deleted or renamed and "+
+		"no migration makes its changes. Put it back, or take the state file back from git (git checkout <rev> -- %s) "+
+		"and generate again", covered, dir, statePath)
 }
 
 // newestFixture is the fixture migration that sorts last, "" for none.
@@ -552,6 +594,8 @@ func printStatus(o streams, r *statusReport) {
 	switch {
 	case r.State == nil:
 		fmt.Fprintf(w, "state file\tnone configured\n")
+	case r.State.Error != "":
+		fmt.Fprintf(w, "state file\t%s does not read: %s\n", r.State.Path, r.State.Error)
 	case !r.State.Exists:
 		fmt.Fprintf(w, "state file\t%s does not exist yet\n", r.State.Path)
 	default:

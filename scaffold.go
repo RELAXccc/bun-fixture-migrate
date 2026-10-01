@@ -21,6 +21,11 @@ type ScaffoldOptions struct {
 	// Triggers are, per table, the BEFORE INSERT or UPDATE row triggers on
 	// it, which can write columns of a row as a migration writes it.
 	Triggers map[string][]string
+	// MigrationsTable and MigrationLocksTable are the tables bun's migrator
+	// keeps its records and its lock in, bun's defaults when empty. They are
+	// no master data, and the configuration names them.
+	MigrationsTable     string
+	MigrationLocksTable string
 }
 
 // LoadScaffoldOptions reads the partitions and the row triggers of a schema.
@@ -76,40 +81,31 @@ func scanPairs(rows *sql.Rows, fn func(a, b string)) error {
 // and the policy block — and the comments say so where a guess was made.
 //
 // Read what comes out. It is a first draft made of guesses, not a description
-// of your intentions: the natural key in particular is guessed from the
-// narrowest unique index, and a table with no unique index other than its
-// primary key gets one the tool cannot check.
+// of your intentions. Every table of the schema is proposed as a model but
+// bun's own two, and only you know which of them the application writes: a
+// table of users or orders kept in a fixture file is drift after every
+// deploy. The natural key is guessed from the narrowest unique index, and a
+// table with neither a unique index besides its primary key nor a name column
+// has nothing to guess one from, so it is written commented out.
 func Scaffold(tables map[string]*dbschema.Table, only []string, schema string, opts ScaffoldOptions) []byte {
-	var names []string
-	for _, n := range dbschema.Names(tables) {
-		if !opts.Partitions[n] {
-			names = append(names, n)
-		}
-	}
-	if len(only) > 0 {
-		wanted := map[string]bool{}
-		for _, t := range only {
-			if !strings.Contains(t, ".") {
-				t = schema + "." + t
-			}
-			wanted[t] = true
-		}
-		var kept []string
-		for _, n := range names {
-			if wanted[n] {
-				kept = append(kept, n)
-			}
-		}
-		names = kept
-	}
+	names := ScaffoldTables(tables, only, schema, opts)
+	// The tables proposed as models; one without a key to guess is
+	// written commented out, and a reference to it is no reference.
 	models := map[string]string{} // qualified table -> model name
+	commented := map[string]bool{}
 	for _, n := range names {
-		models[n] = modelName(tables[n].Name)
+		t := tables[n]
+		if guessKey(t, scaffoldID(t)) == nil {
+			if _, ok := t.Column("name"); !ok {
+				commented[n] = true
+				continue
+			}
+		}
+		models[n] = modelName(t.Name)
 	}
 
 	var b strings.Builder
-	b.WriteString(configHeader)
-	fmt.Fprintf(&b, "schema: %s\n\n", schema)
+	b.WriteString(configHeader(tables, names, models, schema, opts))
 	b.WriteString(policyBlock)
 	b.WriteString("\n# One entry per model of the fixture file. A model in the file that is not\n")
 	b.WriteString("# listed here stops the tool: a model nobody configured is a mistake, and a\n")
@@ -117,133 +113,257 @@ func Scaffold(tables map[string]*dbschema.Table, only []string, schema string, o
 	b.WriteString("models:\n")
 
 	for i, name := range names {
-		t := tables[name]
-		model := models[name]
 		if i > 0 {
 			b.WriteString("\n")
 		}
-		fmt.Fprintf(&b, "  %s:\n", model)
-		table := t.Name
-		if t.Schema != schema {
-			table = t.Qualified()
+		block := scaffoldModel(tables, tables[name], modelName(tables[name].Name), schema, models, opts.Triggers[name])
+		if !commented[name] {
+			b.WriteString(block)
+			continue
 		}
-		fmt.Fprintf(&b, "    table: %s\n", table)
-
-		id := "id"
-		if len(t.PrimaryKey) == 1 {
-			id = t.PrimaryKey[0]
-		} else if len(t.PrimaryKey) > 1 {
-			b.WriteString("    # This table has a composite primary key (" +
-				strings.Join(t.PrimaryKey, ", ") + "). Name one column as id, or\n" +
-				"    # leave id out and put every key column in key.\n")
+		fmt.Fprintf(&b, "  # %s has no unique index besides its primary key and no name column, so\n"+
+			"  # nothing tells two of its rows apart without their ids, which differ between\n"+
+			"  # databases. Give it a unique index on the columns that do, put them in key,\n"+
+			"  # and take the comment marks away; until then it is no model.\n", tables[name].Qualified())
+		for _, line := range strings.SplitAfter(strings.TrimSuffix(block, "\n"), "\n") {
+			b.WriteString("  # " + strings.TrimPrefix(line, "  "))
 		}
-		if id != "id" || len(t.PrimaryKey) == 1 {
-			fmt.Fprintf(&b, "    id: %s\n", id)
-		}
-		if c, ok := t.Column(id); ok && c.Serial() {
-			b.WriteString("    # The id comes from a sequence, so the migration moves the sequence\n" +
-				"    # past any explicit id it writes. Without that the next ordinary insert\n" +
-				"    # collides with an id the migration already used.\n")
-			b.WriteString("    serial: true\n")
-		}
-
-		key := guessKey(t, id)
-		if key == nil {
-			b.WriteString("    # GUESS: this table has no unique index besides its primary key, so\n" +
-				"    # there is nothing to tell two rows apart by name. Say which columns do,\n" +
-				"    # and give the table a unique index on them; without one the database\n" +
-				"    # cannot stop a duplicate appearing and no guard here is reliable.\n")
-			key = []string{"name"}
-		} else {
-			b.WriteString("    # The natural key: what identifies a row when its id is meaningless,\n" +
-				"    # taken from the narrowest unique index. Every guard the generated\n" +
-				"    # migration writes matches on these columns.\n")
-		}
-		fmt.Fprintf(&b, "    key: [%s]\n", strings.Join(key, ", "))
-		if ref := guessRef(t, key, id); ref != "" && ref != "name" {
-			b.WriteString("    # The column another model's reference to this one names it by.\n")
-			fmt.Fprintf(&b, "    ref: %s\n", ref)
-		}
-
-		var refs []string
-		for _, c := range t.Columns {
-			fk := t.ForeignKeyOf(c.Name)
-			if fk == nil {
-				continue
-			}
-			target, ok := models[fk.RefSchema+"."+fk.RefTable]
-			if !ok {
-				refs = append(refs, fmt.Sprintf("      # %s points at %s.%s, which is not in this configuration",
-					c.Name, fk.RefSchema, fk.RefTable))
-				continue
-			}
-			// A reference holds the target's id. A column holding another
-			// of its columns, a code say, holds a value that is the same in
-			// every database, and is compared as it is.
-			if pk := tables[fk.RefSchema+"."+fk.RefTable].PrimaryKey; len(pk) != 1 || pk[0] != fk.RefColumns[0] {
-				refs = append(refs, fmt.Sprintf("      # %s points at %s.%s, which is not its id: an ordinary column",
-					c.Name, fk.RefTable, fk.RefColumns[0]))
-				continue
-			}
-			refs = append(refs, fmt.Sprintf("      %s: %s", c.Name, target))
-		}
-		if len(refs) > 0 {
-			b.WriteString("    # Columns holding another row's id. The migration carries the target's\n" +
-				"    # name and looks the id up where it runs, because ids drift between\n" +
-				"    # databases and names do not.\n")
-			b.WriteString("    references:\n")
-			for _, line := range refs {
-				b.WriteString(line + "\n")
-			}
-		}
-
-		var defaults []string
-		for _, c := range t.Columns {
-			if c.Name == id || c.Serial() {
-				continue
-			}
-			def, ok := c.LiteralDefault()
-			if !ok {
-				continue
-			}
-			defaults = append(defaults, fmt.Sprintf("      %s: %q", c.Name, def))
-		}
-		if len(defaults) > 0 {
-			b.WriteString("    # What a column means when a fixture row leaves it out, taken from the\n" +
-				"    # column defaults. Without an entry an omitted column is \"not set\", and a\n" +
-				"    # column written on one side and omitted on the other is refused rather\n" +
-				"    # than guessed at.\n")
-			b.WriteString("    defaults:\n")
-			for _, line := range defaults {
-				b.WriteString(line + "\n")
-			}
-		}
-		if ignored := writtenByTheDatabase(t, opts.Triggers[name]); len(ignored) > 0 {
-			b.WriteString("    # GUESS: the database writes these when a row is written, from a default\n" +
-				"    # such as now() or from a trigger, so they are not master data: compared,\n" +
-				"    # a migrated row would be drift the moment it was written. Take a column\n" +
-				"    # out of the list if the fixture files are to set it.\n")
-			fmt.Fprintf(&b, "    ignore: [%s]\n", strings.Join(ignored, ", "))
-		}
-		if triggers := opts.Triggers[name]; len(triggers) > 0 {
-			b.WriteString("    # BEFORE row triggers (" + strings.Join(triggers, ", ") + ") can change a row\n" +
-				"    # as a migration writes it. Put every column they write in ignore, or check\n" +
-				"    # reports it as drift after each migration that touches the row.\n")
-		}
-		if hazards := hazardColumns(t); len(hazards) > 0 {
-			b.WriteString("    # These columns have a non-zero default. bun writes DEFAULT, not the\n" +
-				"    # value, for a zero in such a column, so a fixture row saying 0 here will\n" +
-				"    # not produce 0 in the database. policy.zero_default decides what happens\n" +
-				"    # when one does: " + strings.Join(hazards, ", ") + "\n")
-		}
-		if hazards := nullHazardColumns(t, id); len(hazards) > 0 {
-			b.WriteString("    # These nullable columns have a default. bun writes DEFAULT, not NULL,\n" +
-				"    # for a nil pointer or a nullzero field, so a fixture row saying ~ here\n" +
-				"    # will not produce NULL in the database. policy.null_default decides what\n" +
-				"    # happens when one does: " + strings.Join(hazards, ", ") + "\n")
-		}
+		b.WriteString("\n")
 	}
 	return []byte(b.String())
+}
+
+// ScaffoldTables is the tables Scaffold proposes as models, as "schema.table":
+// those asked for, or every table, but for partitions, whose rows are their
+// table's, and bun's migrations and locks tables.
+func ScaffoldTables(tables map[string]*dbschema.Table, only []string, schema string, opts ScaffoldOptions) []string {
+	migrations, locks := opts.MigrationsTable, opts.MigrationLocksTable
+	if migrations == "" {
+		migrations = "bun_migrations"
+	}
+	if locks == "" {
+		locks = "bun_migration_locks"
+	}
+	bunTables := map[string]bool{}
+	for _, t := range []string{migrations, locks} {
+		if !strings.Contains(t, ".") {
+			t = schema + "." + t
+		}
+		bunTables[t] = true
+	}
+	var names []string
+	for _, n := range dbschema.Names(tables) {
+		if !opts.Partitions[n] && !bunTables[n] {
+			names = append(names, n)
+		}
+	}
+	if len(only) == 0 {
+		return names
+	}
+	wanted := map[string]bool{}
+	for _, t := range only {
+		if !strings.Contains(t, ".") {
+			t = schema + "." + t
+		}
+		wanted[t] = true
+	}
+	var kept []string
+	for _, n := range names {
+		if wanted[n] {
+			kept = append(kept, n)
+		}
+	}
+	return kept
+}
+
+// scaffoldID is the column Scaffold takes for a table's id: its primary key
+// when that is one column, "id" otherwise.
+func scaffoldID(t *dbschema.Table) string {
+	if len(t.PrimaryKey) == 1 {
+		return t.PrimaryKey[0]
+	}
+	return "id"
+}
+
+// scaffoldModel is the entry of one model.
+func scaffoldModel(tables map[string]*dbschema.Table, t *dbschema.Table, model, schema string,
+	models map[string]string, triggers []string) string {
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "  %s:\n", model)
+	b.WriteString("    # GUESS: proposed because the schema has it. Delete this model unless the\n" +
+		"    # fixture files own the table's rows: a table the application writes, such\n" +
+		"    # as users, orders or sessions, exported into a fixture file is drift after\n" +
+		"    # every deploy, and a migration generated from it overwrites real data.\n")
+	table := t.Name
+	if t.Schema != schema {
+		table = t.Qualified()
+	}
+	fmt.Fprintf(&b, "    table: %s\n", table)
+
+	id := scaffoldID(t)
+	if len(t.PrimaryKey) > 1 {
+		b.WriteString("    # This table has a composite primary key (" +
+			strings.Join(t.PrimaryKey, ", ") + "). Name one column as id, or\n" +
+			"    # leave id out and put every key column in key.\n")
+	}
+	if len(t.PrimaryKey) == 1 {
+		fmt.Fprintf(&b, "    id: %s\n", id)
+	}
+	if c, ok := t.Column(id); ok && c.Serial() {
+		b.WriteString("    # The id comes from a sequence, so the migration moves the sequence\n" +
+			"    # past any explicit id it writes. Without that the next ordinary insert\n" +
+			"    # collides with an id the migration already used.\n")
+		b.WriteString("    serial: true\n")
+	}
+
+	key := guessKey(t, id)
+	if key == nil {
+		b.WriteString("    # GUESS: this table has no unique index besides its primary key, so\n" +
+			"    # there is nothing to tell two rows apart by name. Say which columns do,\n" +
+			"    # and give the table a unique index on them; without one the database\n" +
+			"    # cannot stop a duplicate appearing and no guard here is reliable.\n")
+		key = []string{"name"}
+	} else {
+		b.WriteString("    # The natural key: what identifies a row when its id is meaningless,\n" +
+			"    # taken from the narrowest unique index. Every guard the generated\n" +
+			"    # migration writes matches on these columns.\n")
+	}
+	fmt.Fprintf(&b, "    key: [%s]\n", strings.Join(key, ", "))
+	if ref := guessRef(t, key, id); ref != "" && ref != "name" {
+		b.WriteString("    # The column another model's reference to this one names it by.\n")
+		fmt.Fprintf(&b, "    ref: %s\n", ref)
+	}
+
+	var refs []string
+	for _, c := range t.Columns {
+		fk := t.ForeignKeyOf(c.Name)
+		if fk == nil {
+			continue
+		}
+		target, ok := models[fk.RefSchema+"."+fk.RefTable]
+		if !ok {
+			refs = append(refs, fmt.Sprintf("      # %s points at %s.%s, which is not in this configuration",
+				c.Name, fk.RefSchema, fk.RefTable))
+			continue
+		}
+		// A reference holds the target's id. A column holding another
+		// of its columns, a code say, holds a value that is the same in
+		// every database, and is compared as it is.
+		if pk := tables[fk.RefSchema+"."+fk.RefTable].PrimaryKey; len(pk) != 1 || pk[0] != fk.RefColumns[0] {
+			refs = append(refs, fmt.Sprintf("      # %s points at %s.%s, which is not its id: an ordinary column",
+				c.Name, fk.RefTable, fk.RefColumns[0]))
+			continue
+		}
+		refs = append(refs, fmt.Sprintf("      %s: %s", c.Name, target))
+	}
+	if len(refs) > 0 {
+		b.WriteString("    # Columns holding another row's id. The migration carries the target's\n" +
+			"    # name and looks the id up where it runs, because ids drift between\n" +
+			"    # databases and names do not.\n")
+		b.WriteString("    references:\n")
+		for _, line := range refs {
+			b.WriteString(line + "\n")
+		}
+	}
+
+	var defaults []string
+	for _, c := range t.Columns {
+		if c.Name == id || c.Serial() {
+			continue
+		}
+		def, ok := c.LiteralDefault()
+		if !ok {
+			continue
+		}
+		defaults = append(defaults, fmt.Sprintf("      %s: %q", c.Name, def))
+	}
+	if len(defaults) > 0 {
+		b.WriteString("    # What a column means when a fixture row leaves it out, taken from the\n" +
+			"    # column defaults. Without an entry an omitted column is \"not set\", and a\n" +
+			"    # column written on one side and omitted on the other is refused rather\n" +
+			"    # than guessed at.\n")
+		b.WriteString("    defaults:\n")
+		for _, line := range defaults {
+			b.WriteString(line + "\n")
+		}
+	}
+	if ignored := writtenByTheDatabase(t, triggers); len(ignored) > 0 {
+		b.WriteString("    # GUESS: the database writes these when a row is written, from a default\n" +
+			"    # such as now() or from a trigger, so they are not master data: compared,\n" +
+			"    # a migrated row would be drift the moment it was written. Take a column\n" +
+			"    # out of the list if the fixture files are to set it.\n")
+		fmt.Fprintf(&b, "    ignore: [%s]\n", strings.Join(ignored, ", "))
+	}
+	if len(triggers) > 0 {
+		b.WriteString("    # BEFORE row triggers (" + strings.Join(triggers, ", ") + ") can change a row\n" +
+			"    # as a migration writes it. Put every column they write in ignore, or check\n" +
+			"    # reports it as drift after each migration that touches the row.\n")
+	}
+	if hazards := hazardColumns(t); len(hazards) > 0 {
+		b.WriteString("    # These columns have a non-zero default. bun writes DEFAULT, not the\n" +
+			"    # value, for a zero in such a column, so a fixture row saying 0 here will\n" +
+			"    # not produce 0 in the database. policy.zero_default decides what happens\n" +
+			"    # when one does: " + strings.Join(hazards, ", ") + "\n")
+	}
+	if hazards := nullHazardColumns(t, id); len(hazards) > 0 {
+		b.WriteString("    # These nullable columns have a default. bun writes DEFAULT, not NULL,\n" +
+			"    # for a nil pointer or a nullzero field, so a fixture row saying ~ here\n" +
+			"    # will not produce NULL in the database. policy.null_default decides what\n" +
+			"    # happens when one does: " + strings.Join(hazards, ", ") + "\n")
+	}
+	return b.String()
+}
+
+// guessGuard is the seed guard table Scaffold proposes: of the models, the
+// first in dependency order that another model points at, which a seeded
+// database has rows in for the others to point at; else the first model.
+// "" when there is none.
+func guessGuard(tables map[string]*dbschema.Table, names []string, models map[string]string) string {
+	referenced := map[string]bool{}
+	targets := map[string][]string{}
+	for _, n := range names {
+		if _, ok := models[n]; !ok {
+			continue
+		}
+		for _, fk := range tables[n].ForeignKeys {
+			target := fk.RefSchema + "." + fk.RefTable
+			if _, ok := models[target]; !ok || target == n {
+				continue
+			}
+			referenced[target] = true
+			targets[n] = append(targets[n], target)
+		}
+	}
+	var order []string
+	seen := map[string]bool{}
+	var visit func(string)
+	visit = func(n string) {
+		if seen[n] {
+			return
+		}
+		seen[n] = true
+		deps := append([]string{}, targets[n]...)
+		sort.Strings(deps)
+		for _, d := range deps {
+			visit(d)
+		}
+		order = append(order, n)
+	}
+	for _, n := range names {
+		if _, ok := models[n]; ok {
+			visit(n)
+		}
+	}
+	for _, n := range order {
+		if referenced[n] {
+			return n
+		}
+	}
+	if len(order) > 0 {
+		return order[0]
+	}
+	return ""
 }
 
 // writtenByTheDatabase are the columns of a table the database fills in when a
@@ -387,7 +507,27 @@ var irregular = map[string]string{
 	"indices": "index", "matrices": "matrix", "analyses": "analysis", "series": "series", "news": "news",
 }
 
-const configHeader = `# bun-fixture-migrate. Written by "bun-fixture-migrate scaffold" from a live
+// configHeader is the top of the configuration: where the files are, bun's
+// tables, the seed guard, the database.
+func configHeader(tables map[string]*dbschema.Table, names []string, models map[string]string, schema string,
+	opts ScaffoldOptions) string {
+
+	migrations, locks := opts.MigrationsTable, opts.MigrationLocksTable
+	if migrations == "" {
+		migrations = "bun_migrations"
+	}
+	if locks == "" {
+		locks = "bun_migration_locks"
+	}
+	guard := ""
+	if g := guessGuard(tables, names, models); g != "" {
+		guard = tables[g].Name
+		if tables[g].Schema != schema {
+			guard = tables[g].Qualified()
+		}
+	}
+	var b strings.Builder
+	b.WriteString(`# bun-fixture-migrate. Written by "bun-fixture-migrate scaffold" from a live
 # database: everything below is either read from the catalog or guessed from it.
 # Read it before you rely on it, and fix the guesses the comments point at.
 
@@ -398,15 +538,27 @@ fixture: fixtures/fixture.yml
 out: internal/migrations
 package: migrations
 migrator: Migrations
-# The table your migrator records applied migrations in; set it if you build
-# the migrator with migrate.WithTableName.
-migrations_table: bun_migrations
-# A table that is never empty in a seeded database. While it is empty, a
+# The tables your migrator records applied migrations and keeps its lock in;
+# set them if you build the migrator with migrate.WithTableName or
+# migrate.WithLocksTableName. They are bun's, not master data, so no model
+# below is one of them.
+`)
+	fmt.Fprintf(&b, "migrations_table: %s\nmigration_locks_table: %s\n", migrations, locks)
+	b.WriteString(`# A table that is never empty in a seeded database. While it is empty, a
 # generated migration does nothing at all: that database has not been seeded
-# yet, and dbfixture is about to load the new state by itself. Remove this only
-# if your migration chain never runs before the seed.
-seed_guard_table: ""
-# How long a generated migration waits for a lock another session holds on a
+# yet, and dbfixture is about to load the new state by itself. Without one, a
+# new database runs every fixture migration before the seed, against tables
+# with nothing in them, and the first that changes a row fails the deploy.
+`)
+	if guard == "" {
+		b.WriteString("# GUESS: no model to take it from; name the table the seed fills first.\n")
+	} else {
+		fmt.Fprintf(&b, "# GUESS: %s, the first table the other models point at. It has to be the\n"+
+			"# table of a model below, one the fixture files fill and the application\n"+
+			"# never empties; if you delete its model, name another.\n", guard)
+	}
+	fmt.Fprintf(&b, "seed_guard_table: %q\n", guard)
+	b.WriteString(`# How long a generated migration waits for a lock another session holds on a
 # row it writes, an admin's open transaction say, before it fails, rolls back
 # and leaves the migration to the next deploy. Without it the deploy waits as
 # long as that transaction stays open, and the application's own writes to
@@ -416,7 +568,10 @@ lock_timeout: 10s
 # reads the DSN from an environment variable, which is how the password stays
 # out of the repository.
 database: env:DATABASE_URL
-`
+`)
+	fmt.Fprintf(&b, "schema: %s\n\n", schema)
+	return b.String()
+}
 
 const policyBlock = `# The choices that depend on how you run your databases rather than on what is
 # correct. Everything not here is fixed, because the alternative would let this

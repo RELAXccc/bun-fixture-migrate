@@ -19,6 +19,7 @@ package fixturemigrate
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -295,6 +296,12 @@ func LoadConfig(path string) (*Config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err := dec.Decode(&cfg); err != nil {
+		// yaml.v3 puts each of several errors on a line of its own; an
+		// error here is one line.
+		var typeErr *yaml.TypeError
+		if errors.As(err, &typeErr) {
+			return nil, fmt.Errorf("%s: yaml: %s", path, strings.Join(typeErr.Errors, "; "))
+		}
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	if err := cfg.Prepare(); err != nil {

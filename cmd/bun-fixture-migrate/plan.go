@@ -320,6 +320,11 @@ func judge(err error) (result, note string) {
 	case code == pgerr.ActiveSQLTransaction:
 		return "inconclusive", "it cannot run inside a transaction, so plan cannot simulate it or what " +
 			"follows it; plan without -with-sql"
+	case code == pgerr.InsufficientPrivilege, code == pgerr.ReadOnlyTransaction:
+		// The plan's role, not the migration: a read-only role, one without
+		// the grants, or one a row-level security policy limits. The deploy
+		// connects as the role the application migrates as.
+		return "inconclusive", "the role plan connects as cannot write here; plan as the role the deploy uses"
 	case code == pgerr.UnsafeNewEnumValue:
 		return "inconclusive", "it uses an enum value a migration before it in this plan added, and " +
 			"PostgreSQL lets no transaction use an enum value it added itself. The plan runs every migration " +
@@ -380,6 +385,26 @@ func plan(o streams, args []string) error {
 	if err != nil {
 		return err
 	}
+	// The files named, read before anything connects.
+	var fileTargets []planTarget
+	for _, path := range files {
+		if !strings.HasSuffix(path, ".go") {
+			return fmt.Errorf("plan -file takes a fixture migration generate wrote, a .go file, and %s is not "+
+				"one; a pending SQL migration is planned with the others under -with-sql", path)
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		set, isFixture, err := fixturemigrate.ReadChangeSet(src)
+		if err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		if !isFixture {
+			return fmt.Errorf("%s holds no fixture change set: plan -file takes a fixture migration generate wrote", path)
+		}
+		fileTargets = append(fileTargets, planTarget{id: strings.TrimSuffix(filepath.Base(path), ".go"), set: set})
+	}
 	db, err := s.connect(o.ctx)
 	if err != nil {
 		return err
@@ -400,20 +425,7 @@ func plan(o streams, args []string) error {
 	report := &planReport{Migrations: []plannedMigration{}, NotSimulated: []string{}, Notes: []string{},
 		Problems: []string{}}
 	if len(files) > 0 {
-		for _, path := range files {
-			src, err := os.ReadFile(path)
-			if err != nil {
-				return err
-			}
-			set, isFixture, err := fixturemigrate.ReadChangeSet(src)
-			if err != nil {
-				return fmt.Errorf("%s: %w", path, err)
-			}
-			if !isFixture {
-				return fmt.Errorf("%s holds no fixture change set", path)
-			}
-			targets = append(targets, planTarget{id: strings.TrimSuffix(filepath.Base(path), ".go"), set: set})
-		}
+		targets = fileTargets
 	} else {
 		if s.outDir == "" {
 			return fmt.Errorf("no out directory in the configuration; name the files with -file")
@@ -423,6 +435,20 @@ func plan(o streams, args []string) error {
 			return fmt.Errorf("the migrations directory: %w", err)
 		}
 		report.Problems = append(report.Problems, ms.Problems...)
+		// The history status checks: a fixture migration the state file does
+		// not include, or the one it includes last gone from the directory.
+		// Each is a deploy whose migrations were not generated one after
+		// another, however well each of them plans.
+		if s.statePath != "" {
+			if state, err := fixturemigrate.ReadState(s.statePath); err == nil {
+				for _, m := range unaccounted(&state, ms.Fixtures()) {
+					report.Problems = append(report.Problems, lineageProblem(&state, m))
+				}
+				if gone := coveredGone(&state, ms.List, s.outDir, s.statePath); gone != "" {
+					report.Problems = append(report.Problems, gone)
+				}
+			}
+		}
 		var applied map[string]fixturemigrate.Applied
 		err = readOnly(o.ctx, db, func(tx bun.Tx) error {
 			applied, _, err = fixturemigrate.ReadApplied(o.ctx, tx, s.cfg.MigrationsTable)
@@ -509,6 +535,18 @@ func simulate(o streams, db *bun.DB, targets []planTarget, lockTimeout time.Dura
 		return err
 	}
 	defer tx.Rollback()
+	// A transaction that starts read only, from default_transaction_read_only
+	// on the role or in the DSN, refuses every write, which would read as
+	// every migration failing, as on a standby.
+	var readOnly string
+	if err := tx.QueryRowContext(o.ctx, "SHOW transaction_read_only").Scan(&readOnly); err != nil {
+		return err
+	}
+	if readOnly == "on" {
+		return fmt.Errorf("the database starts every transaction of this connection read only " +
+			"(default_transaction_read_only), so nothing can be planned there: plan as the role the deploy uses, " +
+			"which needs the rights the migrations need")
+	}
 	start := time.Now()
 	if lockTimeout > 0 {
 		if _, err := tx.ExecContext(o.ctx, fmt.Sprintf("SET LOCAL lock_timeout = %d", lockTimeout.Milliseconds())); err != nil {

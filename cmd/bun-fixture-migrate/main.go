@@ -37,6 +37,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -65,11 +67,12 @@ Run "bun-fixture-migrate <command> -h" for the flags of one command.`
 // is not where the command runs: a monorepo, a CI job, a container.
 const configEnv = "BUN_FIXTURE_MIGRATE_CONFIG"
 
-// connects are the commands that can connect to a database, which take -dsn.
-// baseline never does, and scaffold has a -dsn of its own because it runs
-// before there is a configuration.
+// connects are the commands that can connect to a database, which take -dsn:
+// baseline does to ask whether a difference is only in how values are
+// written. scaffold has a -dsn of its own, because it runs before there is a
+// configuration.
 var connects = map[string]bool{
-	"export": true, "check": true, "generate": true, "status": true, "plan": true, "sync": true,
+	"export": true, "check": true, "generate": true, "baseline": true, "status": true, "plan": true, "sync": true,
 }
 
 func main() {
@@ -128,11 +131,23 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	// the exit code: in a CI log it is the line that says why the job failed.
 	var exit exitError
 	if errors.As(err, &exit) {
-		fmt.Fprintln(stderr, "bun-fixture-migrate:", exit.message)
+		fmt.Fprintln(stderr, "bun-fixture-migrate:", oneLine(exit.message))
 		return exit.code
 	}
-	fmt.Fprintln(stderr, "bun-fixture-migrate:", err)
+	fmt.Fprintln(stderr, "bun-fixture-migrate:", oneLine(err.Error()))
 	return 1
+}
+
+// oneLine is a message as the last line of a failed command prints it: an
+// error that arrived in several lines, from git or a library, has them joined.
+func oneLine(msg string) string {
+	var parts []string
+	for _, line := range strings.Split(msg, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			parts = append(parts, line)
+		}
+	}
+	return strings.Join(parts, "; ")
 }
 
 // version is what the build carries: the module version for a binary from
@@ -205,13 +220,15 @@ func parseFlags(o streams, fs *flag.FlagSet, args []string) error {
 
 // quoteArg is a command-line argument fit to repeat in a message. A DSN left
 // behind by a mistyped flag is repeated with its password masked, and one
-// that cannot be read as a URL is not repeated at all.
+// that cannot be read as a URL, such as user:password@host without a scheme,
+// is not repeated at all.
 func quoteArg(arg string) string {
 	u, err := url.Parse(arg)
 	switch {
 	case err == nil && u.Scheme != "" && u.Host != "":
 		return strconv.Quote(redact(u))
-	case strings.Contains(arg, "://") || strings.Contains(strings.ToLower(arg), "password"):
+	case strings.Contains(arg, "://") || strings.Contains(arg, "@") ||
+		strings.Contains(strings.ToLower(arg), "password"):
 		return "that looks like a DSN (not repeated here)"
 	}
 	return strconv.Quote(arg)
@@ -233,6 +250,11 @@ func common(o streams, fs *flag.FlagSet, args []string) (*setup, error) {
 	}
 	cfg, err := fixturemigrate.LoadConfig(*configPath)
 	if err != nil {
+		set := false
+		fs.Visit(func(f *flag.Flag) { set = set || f.Name == "config" })
+		if !set && os.Getenv(configEnv) != "" {
+			return nil, fmt.Errorf("%w (the configuration $%s names)", err, configEnv)
+		}
 		return nil, err
 	}
 	// Everything that asks whether a database is configured, and connect,
@@ -357,16 +379,67 @@ func lint(o streams, cfg *fixturemigrate.Config, snap *fixturemigrate.Snapshot, 
 
 // databaseSnapshot reads the database, limited to the columns the fixture file
 // writes. A column no fixture row mentions is not master data, so a difference
-// in it is not drift.
+// in it is not drift. A column the table does not have is not read: the lint
+// reports it as an unknown column, which is a finding, not a query that fails.
 func databaseSnapshot(ctx context.Context, db bun.IDB, cfg *fixturemigrate.Config,
 	tables map[string]*dbschema.Table, head *fixturemigrate.Snapshot) (*fixturemigrate.Snapshot, error) {
 
+	if err := checkModels(cfg, tables); err != nil {
+		return nil, err
+	}
 	columns := map[string][]string{}
 	for model, cols := range head.Columns {
-		columns[model] = cols
+		m := cfg.Models[model]
+		table := tables[cfg.QualifiedTable(m)]
+		columns[model] = []string{}
+		for _, col := range cols {
+			if _, ok := table.Column(col); ok || table == nil {
+				columns[model] = append(columns[model], col)
+			}
+		}
 	}
 	return fixturemigrate.DatabaseSnapshot(ctx, db, cfg, tables, fixturemigrate.SnapshotOptions{
 		Columns: columns, Order: head.Order})
+}
+
+// checkModels says, before a query names one, that a column the
+// configuration makes a model's key or a reference is not in its table, which
+// PostgreSQL would otherwise say from inside a query nobody wrote. A model
+// whose table is missing is left to the snapshot, which says what it is.
+func checkModels(cfg *fixturemigrate.Config, tables map[string]*dbschema.Table) error {
+	for _, name := range cfg.ModelNames() {
+		m := cfg.Models[name]
+		table := tables[cfg.QualifiedTable(m)]
+		if table == nil {
+			continue
+		}
+		key := append([]string{}, m.Key...)
+		for _, group := range m.KeyAnyOf {
+			key = append(key, group...)
+		}
+		for _, col := range key {
+			if _, ok := table.Column(col); !ok {
+				return fmt.Errorf("model %q: its key is [%s], and %s has no column %s. Set key to the columns that "+
+					"tell two of its rows apart, those of a unique index on the table; a table with none is no master "+
+					"data this tool can migrate", name, strings.Join(key, ", "), table.Qualified(), col)
+			}
+		}
+		refs := make([]string, 0, len(m.References))
+		for col := range m.References {
+			refs = append(refs, col)
+		}
+		sort.Strings(refs)
+		for _, col := range refs {
+			if slices.Contains(m.Ignore, col) || slices.Contains(m.Derived, col) {
+				continue
+			}
+			if _, ok := table.Column(col); !ok {
+				return fmt.Errorf("model %q: references names %s, and %s has no such column; fix the name, or take "+
+					"it out of references", name, col, table.Qualified())
+			}
+		}
+	}
+	return nil
 }
 
 // export writes the fixture files from the database.
@@ -414,6 +487,9 @@ func export(o streams, args []string) error {
 		if err != nil {
 			return err
 		}
+		if err := checkModels(s.cfg, tables); err != nil {
+			return err
+		}
 		var opts fixturemigrate.SnapshotOptions
 		if !*allColumns {
 			opts.Columns = exportColumns(s.cfg, tables, head)
@@ -450,6 +526,15 @@ func export(o streams, args []string) error {
 	for _, f := range findings {
 		fmt.Fprintln(o.stderr, string(f.Kind)+":", f.String())
 	}
+	// An export is written from the database, not edited into the file it
+	// replaces: what the file said in comments is gone from it. Written
+	// elsewhere, with -o or to standard output, it replaces nothing.
+	for i, data := range outputs {
+		if n := droppedComments(current[i].Data, data); n > 0 && *out == "" && !*stdout {
+			fmt.Fprintf(o.stderr, "note: the export does not keep the comments of %s: %s not in it; "+
+				"put back the ones to keep before committing\n", s.fixturePaths[i], plural(n, "comment line"))
+		}
+	}
 	if mode == fixturemigrate.ModeError {
 		return exitError{2, fmt.Sprintf(
 			"%s, nothing written: this export would not reproduce the database it was taken from. "+
@@ -480,6 +565,24 @@ func export(o streams, args []string) error {
 		fmt.Fprintln(o.stdout, "wrote", target)
 	}
 	return nil
+}
+
+// droppedComments counts the comment lines of a fixture file that an export of
+// it does not have. An export writes the file anew from the database, so a
+// comment, whole-line or after a value, is not carried over.
+func droppedComments(old, exported []byte) int {
+	kept := map[string]bool{}
+	for _, line := range strings.Split(string(exported), "\n") {
+		kept[strings.TrimSpace(line)] = true
+	}
+	n := 0
+	for _, line := range strings.Split(string(old), "\n") {
+		line = strings.TrimSpace(line)
+		if !kept[line] && (strings.HasPrefix(line, "#") || strings.Contains(line, " #")) {
+			n++
+		}
+	}
+	return n
 }
 
 // exportColumns is the columns an export writes of each model the fixture
@@ -615,10 +718,14 @@ func check(o streams, args []string) error {
 func scaffold(o streams, args []string) error {
 	fs := flag.NewFlagSet("scaffold", flag.ContinueOnError)
 	var (
-		dsn    = fs.String("dsn", "", "PostgreSQL DSN (there is no configuration file yet)")
-		schema = fs.String("schema", "public", "schema to read")
-		only   = fs.String("tables", "", "comma-separated tables to include, default all of them")
-		out    = fs.String("o", "", "write here instead of standard output")
+		dsn        = fs.String("dsn", "", "PostgreSQL DSN (there is no configuration file yet)")
+		schema     = fs.String("schema", "public", "schema to read")
+		only       = fs.String("tables", "", "comma-separated tables to include, default all of them")
+		out        = fs.String("o", "", "write here instead of standard output")
+		migrations = fs.String("migrations-table", "bun_migrations", "the table the migrator records migrations in, "+
+			"which is left out and written into the configuration")
+		locks = fs.String("migration-locks-table", "bun_migration_locks", "the table the migrator keeps its lock in, "+
+			"which is left out and written into the configuration")
 	)
 	if err := parseFlags(o, fs, args); err != nil {
 		return err
@@ -639,12 +746,13 @@ func scaffold(o streams, args []string) error {
 	}
 	defer db.Close()
 	var tables map[string]*dbschema.Table
-	var opts fixturemigrate.ScaffoldOptions
+	opts := fixturemigrate.ScaffoldOptions{MigrationsTable: *migrations, MigrationLocksTable: *locks}
 	err = readOnly(o.ctx, db, func(tx bun.Tx) error {
 		if tables, err = dbschema.Load(o.ctx, tx, *schema); err != nil {
 			return err
 		}
-		opts, err = fixturemigrate.LoadScaffoldOptions(o.ctx, tx, *schema)
+		read, err := fixturemigrate.LoadScaffoldOptions(o.ctx, tx, *schema)
+		opts.Partitions, opts.Triggers = read.Partitions, read.Triggers
 		return err
 	})
 	if err != nil {
@@ -657,6 +765,32 @@ func scaffold(o streams, args []string) error {
 			wanted[i] = strings.TrimSpace(wanted[i])
 		}
 	}
+	// A table asked for that is not proposed is refused rather than left
+	// out without a word: a typo, or a table of another schema.
+	proposed := map[string]bool{}
+	for _, n := range fixturemigrate.ScaffoldTables(tables, nil, *schema, opts) {
+		proposed[n] = true
+	}
+	for _, t := range wanted {
+		q := t
+		if !strings.Contains(q, ".") {
+			q = *schema + "." + q
+		}
+		switch {
+		case proposed[q]:
+		case tables[q] == nil:
+			return fmt.Errorf("-tables names %s, which is not a table of schema %s", t, *schema)
+		case opts.Partitions[q]:
+			return fmt.Errorf("-tables names %s, a partition: its rows are its partitioned table's, which is the "+
+				"model", t)
+		default:
+			return fmt.Errorf("-tables names %s, which is the migrator's own table and no master data", t)
+		}
+	}
+	if len(fixturemigrate.ScaffoldTables(tables, wanted, *schema, opts)) == 0 {
+		return fmt.Errorf("schema %s has no table to propose as a model: it does not exist, the role cannot see "+
+			"its tables, or it holds only the migrator's; pass -schema", *schema)
+	}
 	data := fixturemigrate.Scaffold(tables, wanted, *schema, opts)
 	if *out == "" {
 		return writeOut(o.stdout, data)
@@ -668,7 +802,8 @@ func scaffold(o streams, args []string) error {
 		return err
 	}
 	fmt.Fprintln(o.stderr, "wrote", *out)
-	fmt.Fprintln(o.stderr, "read it: the natural keys and the model names are guesses")
+	fmt.Fprintln(o.stderr, "read it: which tables are master data, the natural keys, the model names and the "+
+		"seed guard table are guesses")
 	return nil
 }
 
@@ -721,8 +856,10 @@ func git(dir string, args ...string) ([]byte, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
-		if msg := strings.TrimSpace(stderr.String()); msg != "" {
-			return nil, errors.New(msg)
+		// git ends a sentence with a period, which a message that goes on
+		// after it would double.
+		if msg := strings.TrimSuffix(strings.TrimSpace(stderr.String()), "."); msg != "" {
+			return nil, errors.New(oneLine(msg))
 		}
 		return nil, err
 	}

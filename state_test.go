@@ -67,6 +67,43 @@ func TestReadAndWriteState(t *testing.T) {
 	}
 }
 
+// A project adopting the tool has neither its fixtures directory nor its
+// migrations directory yet: the first export and the first baseline make
+// them. An error names the file being written, not the temporary one.
+func TestWriteFileAtomicMakesTheDirectory(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "fixtures", "master", "fixture.yml")
+	if err := WriteFileAtomic(path, []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "x\n" {
+		t.Fatalf("%q %v", data, err)
+	}
+	if entries, _ := os.ReadDir(filepath.Dir(path)); len(entries) != 1 {
+		t.Fatalf("expected only the file, got %v", entries)
+	}
+	// A file where a directory has to be.
+	blocked := filepath.Join(root, "plain")
+	if err := os.WriteFile(blocked, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(blocked, "fixture.yml")
+	err := WriteFileAtomic(target, []byte("x\n"), 0o644)
+	if err == nil || !strings.HasPrefix(err.Error(), "write "+target+": ") || strings.Contains(err.Error(), ".tmp") {
+		t.Fatalf("got %v", err)
+	}
+	// A directory where the file has to be: the rename fails, and the
+	// temporary file goes.
+	dirTarget := filepath.Join(root, "fixtures", "master")
+	err = WriteFileAtomic(dirTarget, []byte("x\n"), 0o644)
+	if err == nil || !strings.HasPrefix(err.Error(), "write "+dirTarget+": ") || strings.Contains(err.Error(), ".tmp") {
+		t.Fatalf("got %v", err)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(root, "fixtures")); len(entries) != 1 {
+		t.Fatalf("a temporary file was left behind: %v", entries)
+	}
+}
+
 // Several fixture files are one state, in their load order, under one
 // checksum.
 func TestAStateOfSeveralFiles(t *testing.T) {
@@ -333,5 +370,47 @@ func TestWhichMigrationsAStateIncludes(t *testing.T) {
 	}
 	if CompareMigrations("9_x", "10_x") <= 0 || CompareMigrations("", "1_a") >= 0 || CompareMigrations("1_a", "1_b") >= 0 {
 		t.Fatal("migrations compare as bun orders them: by name as a string, then the rest")
+	}
+}
+
+// The migration a state says it includes last: what a deleted migration is
+// checked against.
+func TestTheMigrationAStateCovers(t *testing.T) {
+	for _, c := range []struct {
+		state State
+		want  string
+	}{
+		{State{Format: 2, Migration: "2_fixture_b", Covers: "2_fixture_b", Base: "1_fixture_a"}, "2_fixture_b"},
+		{State{Format: 2, Migration: "baseline", Covers: "2_fixture_b", Base: "2_fixture_b"}, "2_fixture_b"},
+		{State{Format: 2, Migration: "baseline"}, ""},
+		{State{Format: 1, Migration: "2_fixture_b"}, "2_fixture_b"},
+		{State{Format: 1, Migration: "baseline"}, ""},
+		{State{Format: 1}, ""},
+	} {
+		if got := c.state.Covered(); got != c.want {
+			t.Errorf("%+v: got %q, want %q", c.state, got, c.want)
+		}
+	}
+	// And a conflict is told apart from every other state that does not read.
+	if _, err := DecodeState([]byte("<<<<<<< HEAD\n# format: 2\n=======\n>>>>>>> b\n")); !errors.Is(err, ErrStateConflict) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// The comment on top is nobody's to read, and a blank line in it changes
+// nothing; a file without a format line says so, not that a marker of an
+// older release is missing.
+func TestABlankLineInTheStateFilesComment(t *testing.T) {
+	data := string(State{Files: []FixtureFile{{Data: []byte(base)}}, Migration: "baseline"}.Encode())
+	edited := strings.Replace(data, "#\n", "\n", 1)
+	if edited == data {
+		t.Fatal("no blank comment line to replace")
+	}
+	if _, err := DecodeState([]byte(edited)); err != nil {
+		t.Fatalf("got %v", err)
+	}
+	if _, err := DecodeState([]byte("# a comment\n\n- model: Plan\n")); err == nil ||
+		!strings.Contains(err.Error(), `no "# format:" line`) {
+		t.Fatalf("got %v", err)
 	}
 }

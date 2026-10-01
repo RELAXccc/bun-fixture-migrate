@@ -16,7 +16,8 @@ func TestScaffoldWritesAConfigurationThatLoads(t *testing.T) {
 	data := Scaffold(testTables(), nil, "public", ScaffoldOptions{})
 	text := string(data)
 	for _, want := range []string{
-		"  Currency:\n    table: currencies\n",
+		"  Currency:\n    # GUESS: proposed because the schema has it. Delete this model unless",
+		"    table: currencies\n",
 		"    id: id\n",
 		"    serial: true\n", // plans.id is a sequence
 		"    key: [code]\n",  // from the unique index on currencies.code
@@ -140,5 +141,84 @@ func TestScaffoldLeavesOutWhatIsNotMasterData(t *testing.T) {
 	}
 	if _, err := LoadConfig(path); err != nil {
 		t.Fatalf("the scaffold has to load as a configuration: %v", err)
+	}
+}
+
+// Not every table is master data, and scaffold cannot tell which are. bun's
+// own two never are, so they are left out; every other model says it is a
+// guess to delete when the application writes the table; one with nothing to
+// guess a key from is written commented out; and the seed guard is guessed,
+// because without one a new database runs every fixture migration before its
+// seed and fails.
+func TestScaffoldMarksWhatItCannotKnow(t *testing.T) {
+	col := func(pos int, name, typ string) dbschema.Column {
+		return dbschema.Column{Name: name, Position: pos, Type: typ}
+	}
+	tables := testTables()
+	tables["public.bun_migrations"] = &dbschema.Table{Schema: "public", Name: "bun_migrations", PrimaryKey: []string{"id"},
+		Uniques: [][]string{{"id"}}, Columns: []dbschema.Column{col(1, "id", "int8"), col(2, "name", "varchar")}}
+	tables["public.bun_migration_locks"] = &dbschema.Table{Schema: "public", Name: "bun_migration_locks",
+		PrimaryKey: []string{"id"}, Uniques: [][]string{{"id"}, {"table_name"}},
+		Columns: []dbschema.Column{col(1, "id", "int8"), col(2, "table_name", "varchar")}}
+	tables["public.schema_migrations"] = &dbschema.Table{Schema: "public", Name: "schema_migrations",
+		PrimaryKey: []string{"id"}, Uniques: [][]string{{"id"}},
+		Columns: []dbschema.Column{col(1, "id", "int8"), col(2, "name", "varchar")}}
+	// No unique index besides the id, no name column, and a feature points
+	// at it.
+	tables["public.events"] = &dbschema.Table{Schema: "public", Name: "events", PrimaryKey: []string{"id"},
+		Uniques: [][]string{{"id"}}, Columns: []dbschema.Column{col(1, "id", "int8"), col(2, "payload", "jsonb")}}
+	tables["public.features"].ForeignKeys = append(tables["public.features"].ForeignKeys, dbschema.ForeignKey{
+		Columns: []string{"event_id"}, RefSchema: "public", RefTable: "events", RefColumns: []string{"id"}})
+	tables["public.features"].Columns = append(tables["public.features"].Columns, col(6, "event_id", "int8"))
+
+	text := string(Scaffold(tables, nil, "public", ScaffoldOptions{}))
+	for _, want := range []string{
+		"migrations_table: bun_migrations\n", "migration_locks_table: bun_migration_locks\n",
+		"# GUESS: currencies, the first table the other models point at.",
+		`seed_guard_table: "currencies"`,
+		"  # public.events has no unique index besides its primary key and no name column",
+		"  # Event:\n  #   # GUESS: proposed because the schema has it.",
+		"  #   table: events\n",
+		"      # event_id points at public.events, which is not in this configuration\n",
+		"  SchemaMigration:\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the scaffold is missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "    table: bun_migrations\n") || strings.Contains(text, "    table: bun_migration_locks\n") {
+		t.Errorf("bun's tables are no master data:\n%s", text)
+	}
+	path := filepath.Join(t.TempDir(), "fixture-migrate.yml")
+	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("the scaffold has to load as a configuration: %v\n%s", err, text)
+	}
+	if len(cfg.Models) != 4 || cfg.Models["Event"] != nil || cfg.SeedGuardTable != "currencies" {
+		t.Fatalf("models %v, guard %q", cfg.ModelNames(), cfg.SeedGuardTable)
+	}
+	if n := strings.Count(text, "\n    # GUESS: proposed because the schema has it."); n != len(cfg.Models) {
+		t.Errorf("%d models say they are a guess, of %d", n, len(cfg.Models))
+	}
+
+	// A migrator built WithTableName: its table is named, and left out.
+	text = string(Scaffold(tables, nil, "public", ScaffoldOptions{MigrationsTable: "schema_migrations"}))
+	if strings.Contains(text, "  SchemaMigration:") || !strings.Contains(text, "migrations_table: schema_migrations\n") ||
+		!strings.Contains(text, "    table: bun_migrations\n") {
+		t.Errorf("the configured migrations table:\n%s", text)
+	}
+	got := ScaffoldTables(tables, nil, "public", ScaffoldOptions{MigrationsTable: "public.schema_migrations"})
+	if strings.Join(got, ",") != "public.bun_migrations,public.currencies,public.events,public.features,public.plans" {
+		t.Errorf("tables %v", got)
+	}
+
+	// No model at all, no guard to guess.
+	text = string(Scaffold(map[string]*dbschema.Table{"public.events": tables["public.events"]}, nil, "public",
+		ScaffoldOptions{}))
+	if !strings.Contains(text, `seed_guard_table: ""`) || !strings.Contains(text, "# GUESS: no model to take it from") {
+		t.Errorf("no models:\n%s", text)
 	}
 }

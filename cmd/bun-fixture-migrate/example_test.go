@@ -56,4 +56,18 @@ func TestTheExampleProjectIsConsistent(t *testing.T) {
 	if string(again) != string(src) {
 		t.Fatalf("generate writes it differently now; regenerate the example:\n%s", again)
 	}
+
+	// So does the state file, comment and all: one in an older format, or
+	// with an older comment, would teach the merge advice that went with it.
+	statePath := filepath.Join("..", "..", "examples", "basic", "migrations", "fixture_state.yml")
+	state, err := fixturemigrate.ReadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Format != fixturemigrate.StateFormat || state.Covered() != "20260930165255_fixture_plan_prices" {
+		t.Fatalf("the example's state file: %+v", state)
+	}
+	if data, _ := os.ReadFile(statePath); string(data) != string(state.Encode()) {
+		t.Fatalf("the example's state file is not what the tool writes now:\n%s", state.Encode())
+	}
 }

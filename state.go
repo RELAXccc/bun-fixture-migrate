@@ -182,7 +182,7 @@ func DecodeState(data []byte) (State, error) {
 	data = normalizeNewlines(data)
 	s, err := decodeAnyState(data)
 	if err != nil && conflicted(data) {
-		return State{}, errStateConflict
+		return State{}, ErrStateConflict
 	}
 	return s, err
 }
@@ -196,6 +196,8 @@ func decodeAnyState(data []byte) (State, error) {
 			return decodeState(data[offset:])
 		case line == stateMarker || strings.HasPrefix(line, fileMarkerStart):
 			return decodeStateFormat1(data)
+		case strings.TrimSpace(line) == "":
+			// A blank line in the comment, which nothing reads.
 		case !strings.HasPrefix(line, "#"):
 			// The comment on top is over, and no field was in it.
 			return State{}, errNotState
@@ -205,11 +207,13 @@ func decodeAnyState(data []byte) (State, error) {
 	return State{}, errNotState
 }
 
-var errNotState = errors.New("this is not a state file bun-fixture-migrate wrote: the marker line is missing")
+var errNotState = errors.New("this is not a state file bun-fixture-migrate wrote: no \"# format:\" line follows " +
+	"the comment on top, nor the marker line of an older release")
 
-// errStateConflict is a merge that stopped in the state file, which it does
-// on purpose when two branches each generated a migration.
-var errStateConflict = errors.New("the state file holds git's conflict markers: two branches each generated a " +
+// ErrStateConflict is what DecodeState and ReadState return, wrapped, for a
+// merge that stopped in the state file, which it does on purpose when two
+// branches each generated a migration.
+var ErrStateConflict = errors.New("the state file holds git's conflict markers: two branches each generated a " +
 	"migration from the same state, and whichever runs second would find the other's changes. Keep the migration " +
 	"a database already applied and delete the other, take the state file as the one you kept left it " +
 	"(git checkout --ours or --theirs), then generate again on the merged fixture file")
@@ -425,6 +429,26 @@ func (s State) Unaccounted(fixtures []MigrationFile) (out []MigrationFile, known
 	return out, true
 }
 
+// Covered is the newest fixture migration whose changes the state says it
+// includes: Covers, or for a state file of format 1 the migration that wrote
+// it. "" when it names none, as a state baseline wrote before any fixture
+// migration, or one of format 1 that baseline wrote, says nothing.
+//
+// Unaccounted finds a migration the state does not include; this is the
+// other way round. Deleted from the directory, the migration is no longer
+// there to make its changes, while the state, which generate diffs against,
+// still says they are made: they reach no database, and every gate built on
+// the state stays green.
+func (s State) Covered() string {
+	if s.Format == 1 {
+		if s.Migration == "baseline" {
+			return ""
+		}
+		return s.Migration
+	}
+	return s.Covers
+}
+
 // CompareMigrations orders two migrations as bun runs them, by the name bun
 // records and then by the rest of the file name, as ReadMigrations lists
 // them: "20260921120000_fixture_prices". The empty string sorts first.
@@ -504,16 +528,36 @@ func WriteState(path string, s State) error {
 // new one, never half of either: a temporary file in the same directory,
 // synced, then renamed over the target. An interrupted export must not leave
 // half a fixture file behind for the next seed to load.
+//
+// The directory is created when it is not there yet, as a project adopting
+// the tool has neither its fixtures nor its migrations directory. An error
+// names the file being written, never the temporary one, which the person
+// reading it has never heard of.
 func WriteFileAtomic(path string, data []byte, perm os.FileMode) (err error) {
+	fail := func(err error) error {
+		var pathErr *os.PathError
+		var linkErr *os.LinkError
+		switch {
+		case errors.As(err, &linkErr):
+			err = linkErr.Err
+		case errors.As(err, &pathErr):
+			err = pathErr.Err
+		}
+		return fmt.Errorf("write %s: %w", path, err)
+	}
 	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fail(err)
+	}
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	defer func() {
 		if err != nil {
 			tmp.Close()
 			os.Remove(tmp.Name())
+			err = fail(err)
 		}
 	}()
 	if _, err = tmp.Write(data); err != nil {

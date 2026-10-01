@@ -33,7 +33,7 @@ plan:
     env: prod
     vars: [SAAS_LOCK_WAIT=0]
     exit: 1
-    known: "F7: bun's migrator lock does not wait, and a crashed deploy leaves it taken; the docs say it serialises replicas"
+    known: "F7: bun's migrator lock does not wait, and a crashed deploy leaves it taken; main.go retries it, and status reports a lock left behind"
     output: ["migrate: migrations table is already locked"]
   - sql: DELETE FROM bun_migration_locks
     env: prod

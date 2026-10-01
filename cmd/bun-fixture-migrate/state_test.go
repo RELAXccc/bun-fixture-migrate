@@ -441,6 +441,15 @@ func TestTwoBranchesGeneratingFromOneState(t *testing.T) {
 	// The newer one was deployed; the older one was not. Delete it, take the
 	// state file the newer one left, and generate again.
 	gitIn(t, dir, false, "rm", "-q", "-f", filepath.Join(dir, "migrations", "20261001100000_fixture_older.go"))
+	// Taking the state file the deleted one left is the mistake to catch:
+	// it says the deleted migration's changes are made.
+	gitIn(t, dir, false, "checkout", "--theirs", "--", state)
+	for _, args := range [][]string{{"generate", "-name", "older"}, {"baseline", "-force"}, {"status", "-offline"}} {
+		code, out, errs := call(t, append(args, "-config", cfg)...)
+		if code < 2 || !strings.Contains(out+errs, "includes the changes of 20261001100000_fixture_older, which is not in") {
+			t.Fatalf("%v with the state the deleted migration left: exit %d\n%s%s", args, code, out, errs)
+		}
+	}
 	gitIn(t, dir, false, "checkout", "--ours", "--", state)
 	if code, out, errs := call(t, "generate", "-config", cfg, "-name", "older", "-at", "20261001100000"); code != 0 {
 		t.Fatalf("exit %d\n%s%s", code, out, errs)
@@ -581,5 +590,227 @@ func TestStatusGroupsValuesOnlyTheDatabaseCanSettle(t *testing.T) {
 	}
 	if one := groupUndecided(single); len(one) != 1 || one[0] != single[0].String() {
 		t.Fatalf("got %q, want %q", one, single[0].String())
+	}
+}
+
+// Deleting the migration the state file includes last loses its changes: the
+// state, which generate diffs against, says they are made, and nothing makes
+// them. Every command built on the state says so, instead of "nothing
+// changed" and a green status.
+func TestADeletedMigrationTheStateIncludesIsFound(t *testing.T) {
+	cfg, _ := project(t, oldFixture, oldFixture)
+	dir := filepath.Dir(cfg)
+	statePath := filepath.Join(dir, "migrations", "fixture_state.yml")
+	if code, _, errs := call(t, "baseline", "-config", cfg); code != 0 {
+		t.Fatal(errs)
+	}
+	writeFixture(t, cfg, newFixture)
+	if code, out, errs := call(t, "generate", "-config", cfg, "-name", "a", "-at", "20261001100000"); code != 0 {
+		t.Fatalf("exit %d\n%s%s", code, out, errs)
+	}
+	state := readFile(t, statePath)
+	gen := filepath.Join(dir, "migrations", "20261001100000_fixture_a.go")
+	src := readFile(t, gen)
+	if err := os.Remove(gen); err != nil {
+		t.Fatal(err)
+	}
+	const want = "the state file includes the changes of 20261001100000_fixture_a, which is not in"
+
+	code, out, errs := call(t, "generate", "-config", cfg, "-name", "b")
+	if code != 2 || !strings.Contains(errs, want) || !strings.Contains(errs, "git checkout <rev> -- ") ||
+		strings.Contains(out, "nothing changed") {
+		t.Fatalf("generate: exit %d\n%s%s", code, out, errs)
+	}
+	if code, out, errs := call(t, "generate", "-config", cfg, "-name", "b", "-dry-run"); code != 0 ||
+		!strings.Contains(errs, "warning: "+want) {
+		t.Fatalf("generate -dry-run warns: exit %d\n%s%s", code, out, errs)
+	}
+	code, out, errs = call(t, "status", "-config", cfg, "-offline", "-json")
+	var report statusReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil || code != 3 ||
+		!strings.Contains(strings.Join(report.Problems, "\n"), want) {
+		t.Fatalf("status: exit %d, %v\n%s%s", code, err, out, errs)
+	}
+	for _, args := range [][]string{{"baseline", "-config", cfg}, {"baseline", "-config", cfg, "-force"}} {
+		if code, out, errs := call(t, args...); code != 2 || !strings.Contains(errs, want) {
+			t.Fatalf("%v: exit %d\n%s%s", args, code, out, errs)
+		}
+	}
+	if readFile(t, statePath) != state {
+		t.Fatal("the state file was rewritten")
+	}
+
+	// Put back, everything agrees again.
+	if err := os.WriteFile(gen, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, errs := call(t, "status", "-config", cfg, "-offline"); code != 0 {
+		t.Fatalf("exit %d\n%s%s", code, out, errs)
+	}
+}
+
+// A state file of format 1 that generate wrote names its migration in the
+// migration line, which is what has to be in the directory.
+func TestADeletedMigrationAStateOfFormat1Names(t *testing.T) {
+	const withFeature = config + `  Feature:
+    table: features
+    key: [plan_id, code]
+    references:
+      plan_id: Plan
+`
+	data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "state-format1-one-file.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := fixturemigrate.DecodeState(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := projectWith(t, withFeature, string(state.Files[0].Data), "")
+	dir := filepath.Dir(cfg)
+	if err := os.WriteFile(filepath.Join(dir, "migrations", "fixture_state.yml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errs := call(t, "status", "-config", cfg, "-offline")
+	if code != 3 || !strings.Contains(out, "includes the changes of 20260921120000_fixture_prices") {
+		t.Fatalf("exit %d\n%s%s", code, out, errs)
+	}
+	// Any migration under that name will do: what it is, status reads
+	// elsewhere.
+	if err := os.WriteFile(filepath.Join(dir, "migrations", "20260921120000_fixture_prices.go"),
+		[]byte("package migrations\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, errs := call(t, "status", "-config", cfg, "-offline"); code != 0 {
+		t.Fatalf("exit %d\n%s%s", code, out, errs)
+	}
+}
+
+// A state file that does not read is never passed over: a conflict is two
+// histories, and replacing it with either side unread would drop the other
+// one, and the lineage check with it.
+func TestAStateThatDoesNotReadIsNeverReplacedUnread(t *testing.T) {
+	cfg, base := project(t, newFixture, oldFixture)
+	dir := filepath.Dir(cfg)
+	statePath := filepath.Join(dir, "migrations", "fixture_state.yml")
+	if code, _, errs := call(t, "baseline", "-config", cfg, "-old", base); code != 0 {
+		t.Fatal(errs)
+	}
+	good := readFile(t, statePath)
+	conflicted := "<<<<<<< HEAD\n" + good + "=======\n" + good + ">>>>>>> other\n"
+	for _, c := range []struct {
+		state string
+		args  []string
+		code  int
+		want  string
+	}{
+		{conflicted, []string{"baseline", "-force"}, 2, "even with -force: take one side first, git checkout --ours -- "},
+		{conflicted, []string{"baseline"}, 2, "take one side first"},
+		{"garbage\n", []string{"baseline"}, 2, "nor the marker line of an older release; pass -force to replace it"},
+		{conflicted, []string{"generate", "-name", "x", "-old", base}, 1, "conflict markers"},
+		{conflicted, []string{"generate", "-name", "x", "-base", "HEAD"}, 1, "conflict markers"},
+		{conflicted, []string{"generate", "-name", "x", "-from-db"}, 1, "conflict markers"},
+		{"garbage\n", []string{"generate", "-name", "x", "-old", base}, 1, "is not a state file"},
+	} {
+		if err := os.WriteFile(statePath, []byte(c.state), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		code, out, errs := call(t, append(c.args, "-config", cfg)...)
+		lines := strings.Split(strings.TrimSpace(errs), "\n")
+		if code != c.code || !strings.Contains(errs, c.want) || len(lines) != 1 ||
+			!strings.HasPrefix(lines[0], "bun-fixture-migrate: ") {
+			t.Errorf("%v: exit %d\n%s%s", c.args, code, out, errs)
+		}
+		if readFile(t, statePath) != c.state {
+			t.Errorf("%v: the state file was replaced", c.args)
+		}
+		if len(migrationsOf(t, cfg)) != 0 {
+			t.Fatalf("%v: a migration was written", c.args)
+		}
+	}
+	// -force replaces a state that does not read for another reason.
+	if code, _, errs := call(t, "baseline", "-config", cfg, "-force"); code != 0 {
+		t.Fatalf("exit %d: %s", code, errs)
+	}
+}
+
+// The runbook for a lost state file exports from a database into a file of
+// its own and records that: the state names the fixture file, not the copy,
+// and the pending edits in the fixture file stay where they are.
+func TestABaselineOfAnotherFileRecordsTheFixtureFile(t *testing.T) {
+	cfg, _ := project(t, newFixture, oldFixture)
+	applied := filepath.Join(t.TempDir(), "applied.yml")
+	if err := os.WriteFile(applied, []byte(oldFixture), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, errs := call(t, "baseline", "-config", cfg, "-old", applied); code != 0 {
+		t.Fatalf("exit %d\n%s%s", code, out, errs)
+	}
+	state := readFile(t, filepath.Join(filepath.Dir(cfg), "migrations", "fixture_state.yml"))
+	if !strings.Contains(state, " lines of fixtures/fixture.yml -----\n") || strings.Contains(state, applied) {
+		t.Fatalf("the state names the copy:\n%s", state)
+	}
+	// The edit in the fixture file is still to be migrated.
+	if code, out, _ := call(t, "status", "-config", cfg, "-offline"); code != 3 || !strings.Contains(out, "Plan: 1 update") {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+
+	// With several fixture files, one file cannot stand in for them.
+	several := filesProject(t, filesConfig)
+	code, _, errs := call(t, "baseline", "-config", several, "-old", applied)
+	if code != 1 || !strings.Contains(errs, "export them in place, run baseline, then take them back with git checkout") {
+		t.Fatalf("exit %d: %s", code, errs)
+	}
+}
+
+// A revision from before the fixture file existed holds nothing to record:
+// recorded, the next generate would insert every row.
+func TestABaselineOfARevisionWithoutTheFixtureFileIsRefused(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	cfg, _ := project(t, oldFixture, oldFixture)
+	dir := filepath.Dir(cfg)
+	gitIn(t, dir, false, "init", "-q", "-b", "main")
+	gitIn(t, dir, false, "add", "fixture-migrate.yml")
+	gitIn(t, dir, false, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m", "config")
+	for _, args := range [][]string{{"-from", "HEAD"}, {"-from", "HEAD", "-force"}} {
+		code, out, errs := call(t, append([]string{"baseline", "-config", cfg}, args...)...)
+		if code != 2 || !strings.Contains(errs, "fixtures/fixture.yml is missing or empty as of HEAD") {
+			t.Fatalf("%v: exit %d\n%s%s", args, code, out, errs)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "migrations", "fixture_state.yml")); !os.IsNotExist(err) {
+		t.Fatalf("a state file was written: %v", err)
+	}
+}
+
+// A state file that is there and does not read is not one that does not
+// exist yet: status says which it is, and fails for that reason.
+func TestStatusSaysAStateFileDoesNotRead(t *testing.T) {
+	cfg, base := project(t, newFixture, oldFixture)
+	statePath := filepath.Join(filepath.Dir(cfg), "migrations", "fixture_state.yml")
+	if code, _, errs := call(t, "baseline", "-config", cfg, "-old", base); code != 0 {
+		t.Fatal(errs)
+	}
+	good := readFile(t, statePath)
+	for name, data := range map[string]string{
+		"conflicted": "<<<<<<< HEAD\n" + good + "=======\n" + good + ">>>>>>> other\n",
+		"edited":     strings.Replace(good, "price_cents: 2000", "price_cents: 2100", 1),
+	} {
+		if err := os.WriteFile(statePath, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		code, out, errs := call(t, "status", "-config", cfg, "-offline")
+		if code != 3 || strings.Contains(out, "does not exist yet") || !strings.Contains(out, statePath+" does not read: ") ||
+			!strings.HasSuffix(errs, "bun-fixture-migrate: the state file does not read, so nothing says what the fixture file changes\n") {
+			t.Errorf("%s: exit %d\n%s%s", name, code, out, errs)
+		}
+		_, out, _ = call(t, "status", "-config", cfg, "-offline", "-json")
+		var report statusReport
+		if err := json.Unmarshal([]byte(out), &report); err != nil || report.State == nil || !report.State.Exists ||
+			report.State.Error == "" || strings.HasPrefix(report.State.Error, statePath) {
+			t.Errorf("%s: %v\n%s", name, err, out)
+		}
 	}
 }

@@ -34,10 +34,13 @@ migration_locks_table: bun_migration_locks
 # generating twice never writes a change twice. Commit it. Default
 # <out>/fixture_state.yml.
 state: internal/migrations/fixture_state.yml
-# A table that is never empty in a seeded database. While it is empty a
-# generated migration does nothing at all: that database has not been seeded
-# yet, and dbfixture is about to load the new state by itself. Leave it out
-# only if your migration chain never runs before the seed.
+# A table that is never empty in a seeded database: the table of a model the
+# fixture file fills, which the application never empties. While it is empty
+# a generated migration does nothing at all: that database has not been seeded
+# yet, and dbfixture is about to load the new state by itself. Without one, a
+# new database runs every fixture migration before its seed and the first that
+# changes a row fails, so generate warns; leave it out only if your migration
+# chain never runs before the seed.
 seed_guard_table: plans
 # How long a generated migration waits for a lock another session holds on a
 # row it writes -- an admin's open transaction, a long batch job -- before it
@@ -47,9 +50,11 @@ seed_guard_table: plans
 # spelling: 500ms, 10s, 1min. Waiting for another replica running the same
 # migrations is not cut short by it.
 lock_timeout: 10s
-# Where export, check and generate -from-db connect. "env:NAME" reads the DSN
-# from an environment variable, which is how the password stays out of the
-# repository. PostgreSQL only.
+# Where the commands that read a database connect, unless -dsn names another:
+# export, check, status, plan and sync, and generate and baseline to check
+# values against the columns. "env:NAME" reads the DSN from an environment
+# variable, which is how the password stays out of the repository. PostgreSQL
+# only.
 database: env:DATABASE_URL
 # The schema tables are looked for in when they are written without one.
 schema: public
@@ -240,3 +245,6 @@ models:
     table: addons
     serial: true
     key: [name]
+    # policy.array_nulls for this model's array columns alone: its Go fields
+    # are []*string, which keep a null inside a sequence.
+    array_nulls: keep

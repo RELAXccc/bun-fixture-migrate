@@ -25,7 +25,7 @@ current directory unless `-config` or `$BUN_FIXTURE_MIGRATE_CONFIG` names it.
 
 **`model "X" is in the fixture file but not in the configuration`.** Every model the fixture files
 name needs an entry under `models:`. A model the tool silently skipped would be a change that never
-happens. `scaffold` writes entries for every table.
+happens. `scaffold` writes entries for every table but bun's own; keep those of master data.
 
 **`model "X": the configuration says Y, which is not a table in this database`.** `table:` names a
 table the database does not have in `schema` (default `public`). Qualify it, `billing.plans`, or set
@@ -39,6 +39,22 @@ it again.
 **`field X not found in type fixturemigrate.Config`.** An unknown key in the configuration. Keys are
 listed in the [reference](reference.md#configuration).
 
+**`model "X": its key is [name], and public.events has no column name`** (`export`, `check`,
+`generate -from-db`). The key, or `ref` when `key` is not set, names a column the table does not
+have. Set `key` to the columns that tell two rows apart, those of a unique index; a table with none
+is not master data this tool can migrate. **`model "X": references names C, and T has no such
+column`** is the same for a reference.
+
+**`-tables names plan, which is not a table of schema public`** (`scaffold`). A typo, a table of
+another schema (`-schema`), a partition, or bun's own table. **`schema S has no table to propose as a
+model`**: the schema does not exist, the role cannot see its tables, or it holds only bun's.
+
+**`warning: no seed_guard_table`** (`generate`). The migration is written, and on a database that was
+never seeded it runs before the seed and fails the deploy. Set `seed_guard_table` to a table the
+fixture file fills. **`warning: seed_guard_table X is the table of no model`**: the fixture files do
+not fill it, so a seeded database may hold it empty, and there every fixture migration does nothing
+and is recorded as applied. Name the table of a model.
+
 **`the models A, B reference each other in a circle`.** The `references:` form a cycle, so there is
 no order to insert them in. A self-reference is fine; a cycle across models needs one of the columns
 left out of `references` (and set by hand).
@@ -50,6 +66,8 @@ the configuration, usually `env:DATABASE_URL`, or pass `-dsn`.
 
 **`the database DSN is to be read from the environment variable DATABASE_URL, which is not set`.**
 `database: env:DATABASE_URL`, or `-dsn env:DATABASE_URL`, names an environment variable; set it.
+`generate` connects only to check the fixture file against the columns and respell its values;
+`generate -no-lint` writes the migration without it.
 
 **`the database DSN is not a URL pgdriver can read`.** Write it as
 `postgres://user:password@host:5432/dbname?sslmode=disable`. A keyword DSN (`host=... user=...`) is
@@ -69,6 +87,11 @@ connecting sees, and master data read through it would lack the rows it hides. C
 **`the database is a standby, which accepts no writes, so nothing can be planned`.** `plan` has to
 write to simulate. Point it at the primary or a writable copy; `check` and `status` work on a
 standby.
+
+**`the database starts every transaction of this connection read only`.** The role `plan` connects
+as, or its DSN, sets `default_transaction_read_only`: a read-only role. `plan` writes and rolls back,
+so connect it as a role with the rights the migrations need, such as the one the deploy uses; keep
+the read-only role for `check` and `status`.
 
 ## Reading the fixture file
 
@@ -133,12 +156,22 @@ why.
 **`the state file does not match its own checksum, so it was edited by hand`.** Or merged line by
 line. See [the runbook](production.md#the-state-file-was-edited-or-lost).
 
-**`this is not a state file bun-fixture-migrate wrote: the marker line is missing`.** `state:` points
-at a fixture file, or the file was replaced. Check the path.
+**`this is not a state file bun-fixture-migrate wrote: no "# format:" line follows the comment on top`.**
+`state:` points at a fixture file, or the file was replaced. Check the path. A blank line in the
+comment on top is not the cause: nothing reads the comment.
 
 **`the state file holds git's conflict markers`.** Two branches each generated a migration, and the
 merge stopped in the state file, as it is meant to. See
-[the runbook](production.md#the-state-file-conflicts-in-a-merge).
+[the runbook](production.md#the-state-file-conflicts-in-a-merge). `baseline -force` does not
+replace such a file either: take one side first, `git checkout --ours` or `--theirs`. `status` says
+`state file ... does not read` and exits 3.
+
+**`the state file includes the changes of X, which is not in internal/migrations`** (`status` and
+`plan`, exit 3; `generate` and `baseline`, exit 2). The migration the state file says it includes last
+was deleted or renamed, so the state says its changes are made and no migration makes them: they
+would reach no database. Put the file back under its name, or take the state file back from git as
+it was before that migration (`git checkout <rev> -- <state file>`) and generate again. In a merge,
+it is the state file of the side whose migration was deleted: take the other side.
 
 **`the state file is format 3, written by a newer bun-fixture-migrate than this one`.** Somebody
 generated with a newer release. Use the release the project pins. A state file written before the
@@ -153,6 +186,14 @@ Without a state file the base is git's `HEAD`, and git is not installed, or the 
 repository, or the fixture file was never committed. Nothing then says what the fixture file
 changes, so status does not pass it. Run `baseline` once the databases hold the fixture file, or
 run `status` in a checkout with git.
+
+**`-old records one file, and the configuration has N fixture files`** (`baseline`). Export the files
+in place, run `baseline -force`, and take them back with `git checkout`, as
+[the runbook](production.md#the-state-file-was-edited-or-lost) says.
+
+**`fixtures/fixture.yml is missing or empty as of <rev>`** (`baseline -from`, exit 2). The revision is
+from before the fixture file existed. Recorded, it would say the databases hold no master data, and
+the next `generate` would insert every row.
 
 **`baseline would record N changes as migrated with no migration to make them`.** The fixture file
 differs from the state, and no migration covers it. Run `generate`. Pass `-force` only when you
@@ -197,6 +238,10 @@ file would not compile there. Fix `package:` in the configuration.
 **`warning: no file in migrations declares the variable Migrations ...`.** The generated file
 registers with the variable named by `migrator:`. Declare it, or fix the name.
 
+**`note: the export does not keep the comments of fixtures/fixture.yml`** (`export`). The file is
+written anew from the database, so its comments are gone. Put back the ones to keep before you
+commit; the diff shows where they were.
+
 **`the migration is written, the state file is not`.** The file system refused the second write.
 Delete the migration it names and generate again once the cause is fixed: recording it with
 `baseline` instead is refused, because the state file's history does not include it.
@@ -218,6 +263,11 @@ declares.
 do, which the note under it names. Nothing is known about the migration. Try again, or raise
 `-lock-timeout`.
 
+**`the role plan connects as cannot write here; plan as the role the deploy uses`.** A change failed
+with `permission denied` or in a read-only transaction: the role plan connects as lacks a grant the
+deploy's role has, or a row-level security policy limits it. That says nothing about the deploy, so
+the plan is inconclusive (exit 1). Plan as the role the deploy migrates as.
+
 **`pending before it and not simulated: ...`.** Migrations the tool did not write, such as schema
 changes, run before this one in the deploy but not in the plan. If they change the tables the
 fixture migration touches, run `plan -with-sql` so SQL migrations run too, or plan against a copy
@@ -231,6 +281,9 @@ Plan with `-with-sql` if they are SQL migrations, or against a copy that has the
 a constraint declared `DEFERRABLE INITIALLY DEFERRED`, which PostgreSQL checks at `COMMIT`. Its
 statements succeed and the deploy fails when it commits, as in the plan. `sync` says the same as
 `the changes would fail when committed`.
+
+**`plan -file takes a fixture migration generate wrote, a .go file`.** A SQL migration is not planned
+by name: `plan -with-sql` runs the pending ones in bun's order with the fixture migrations.
 
 **`bufio.Scanner: token too long`.** A line of a SQL migration is longer than 64 KiB, and bun reads
 SQL migrations a line at a time. The deploy fails before running any of the file, and unless the

@@ -210,6 +210,10 @@ file, the newer truth. Three settings and one loop keep that safe:
 - `policy.changed_row: warn` (the default): a migration that finds a row changed since the file was
   written leaves it alone and says so, instead of overwriting the edit.
 - `check` on a schedule reports the difference, with exit code 3.
+- An admin UI that saves a row through bun, `db.NewUpdate().Model(row)`, writes `DEFAULT` rather than
+  NULL for a nil pointer or a zero in a `nullzero` field, since bun v1.2.17, as an insert does.
+  Clearing such a field leaves the column's default, so `check` reports the row against a file that
+  says `~`, and an export writes the default into the file.
 - To take the edits into the file, export from production and generate:
 
   ```
@@ -218,10 +222,13 @@ file, the newer truth. Three settings and one loop keep that safe:
   ```
 
   The migration brings every other database to the file; on production itself every change is
-  already made and reports `unchanged`. Review the export's diff like any other change: it holds
-  the columns and ids the file held, so it shows the edits and nothing else. The
-  read-only role has to see every row of the master data: one a row-level security policy limits
-  is refused, because an export without the rows it hides would delete them everywhere else.
+  already made and reports `unchanged`. Review the export's diff like any other change. It holds
+  the columns and ids the file held, but it is written anew from the database: models in
+  dependency order, values quoted the export's way, and no comments, which it says it dropped. So
+  against a file export wrote, the diff shows the edits and nothing else; against one edited by
+  hand, it shows that layout too, once. The read-only role has to see every row of the master
+  data: one a row-level security policy limits is refused, because an export without the rows it
+  hides would delete them everywhere else.
 
 `generate -from-db` is the other direction: it diffs a database against the file and writes the
 migration that makes that database match the file. It is the tool for "production is out of step and

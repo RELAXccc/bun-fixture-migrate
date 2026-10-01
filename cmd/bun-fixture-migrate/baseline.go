@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -45,9 +46,17 @@ func baseline(o streams, args []string) error {
 		files, err = s.gitFiles(*rev)
 		source = *rev + ":" + source
 	case *oldPath != "":
+		// The file stands in for the fixture file, and the state records it
+		// under the fixture file's path: the path of a copy in /tmp means
+		// nothing to the next generate.
+		if len(s.cfg.Fixtures) != 1 {
+			return fmt.Errorf("-old records one file, and the configuration has %d fixture files: export them in "+
+				"place, run baseline, then take them back with git checkout -- <the fixture files>",
+				len(s.cfg.Fixtures))
+		}
 		var data []byte
 		data, err = os.ReadFile(*oldPath)
-		files = []fixturemigrate.FixtureFile{{Path: *oldPath, Data: data}}
+		files = []fixturemigrate.FixtureFile{{Path: s.cfg.Fixtures[0], Data: data}}
 		source = *oldPath
 	default:
 		files, _, err = s.readFixture()
@@ -55,25 +64,53 @@ func baseline(o streams, args []string) error {
 	if err != nil {
 		return err
 	}
+	// A revision before the fixture files existed holds nothing, and a state
+	// of nothing says the databases hold no master data: every row would be
+	// an insert to the next generate.
+	if *rev != "" {
+		empty := true
+		for _, f := range files {
+			empty = empty && len(bytes.TrimSpace(f.Data)) == 0
+		}
+		if empty {
+			return exitError{2, fmt.Sprintf("%s is missing or empty as of %s, so there is nothing to record; name "+
+				"the revision whose fixture files the migrations leave a database holding", s.cfg.FixtureLabel(), *rev)}
+		}
+	}
 	next, err := s.snapshotOf(files, source)
 	if err != nil {
 		return err
 	}
-	fixtures, err := s.fixtureMigrations()
+	ms, err := s.migrations()
 	if err != nil {
 		return err
 	}
+	fixtures := ms.Fixtures()
 
+	// A conflicted state file is two histories, and replacing it with -force
+	// would drop one of them without a word, the lineage check with it: one
+	// side is taken first, and then baseline sees what that side says.
 	var prev *fixturemigrate.State
 	current, err := fixturemigrate.ReadState(s.statePath)
 	switch {
 	case errors.Is(err, fixturemigrate.ErrNoState):
+	case errors.Is(err, fixturemigrate.ErrStateConflict):
+		return exitError{2, fmt.Sprintf("%v; baseline does not replace a conflicted state file, even with -force: "+
+			"take one side first, git checkout --ours -- %s or git checkout --theirs -- %s",
+			err, s.statePath, s.statePath)}
 	case err != nil:
 		if !*force {
-			return fmt.Errorf("%w\npass -force to replace it", err)
+			return exitError{2, fmt.Sprintf("%v; pass -force to replace it", err)}
 		}
 	default:
 		prev = &current
+	}
+	// The migration the state says it includes last is gone, so what the
+	// state says is made, nothing makes; a baseline would make that final.
+	if prev != nil && s.outDir != "" {
+		if gone := coveredGone(prev, ms.List, s.outDir, s.statePath); gone != "" {
+			return exitError{2, gone + "; nothing written"}
+		}
 	}
 
 	// The history. A fixture migration generated on another branch cannot be

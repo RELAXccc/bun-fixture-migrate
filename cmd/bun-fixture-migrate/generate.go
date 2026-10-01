@@ -54,6 +54,9 @@ func generate(o streams, args []string) error {
 	}
 	// The state file is read whatever the base: the changes it records as
 	// left out and its history go on into the next one.
+	// A state file that does not read is never passed over, whatever the
+	// base: this run would overwrite it, and with it the history and the
+	// changes left out that it records, or the other side of a conflict.
 	var prev *fixturemigrate.State
 	if s.statePath != "" {
 		state, err := fixturemigrate.ReadState(s.statePath)
@@ -61,7 +64,7 @@ func generate(o streams, args []string) error {
 		case err == nil:
 			prev = &state
 		case errors.Is(err, fixturemigrate.ErrNoState):
-		case !*fromDB && *oldPath == "" && *base == "":
+		default:
 			return err
 		}
 	}
@@ -106,7 +109,8 @@ func generate(o streams, args []string) error {
 		if s.cfg.Database != "" && !*noLint {
 			db, err := s.connect(o.ctx)
 			if err != nil {
-				return err
+				return fmt.Errorf("%w; generate connects to check the fixture file against the columns and to "+
+					"respell its values as they hold them, and -no-lint generates without the database", err)
 			}
 			defer db.Close()
 			// Both sides are respelled by the database, so a value written two
@@ -149,7 +153,7 @@ func generate(o streams, args []string) error {
 		dir = s.outDir
 	}
 	var existing []string
-	var fixtures []fixturemigrate.MigrationFile
+	var fixtures, all []fixturemigrate.MigrationFile
 	var dirErr error
 	if dir != "" {
 		var ms *fixturemigrate.Migrations
@@ -157,26 +161,41 @@ func generate(o streams, args []string) error {
 			for _, m := range ms.List {
 				existing = append(existing, m.Name)
 			}
-			fixtures = ms.Fixtures()
+			fixtures, all = ms.Fixtures(), ms.List
 		}
 	}
 	// A fixture migration the state does not include was generated on another
 	// branch, or written by hand and not recorded. A migration generated now
 	// would expect rows as that one did not leave them, and the state would
-	// go on without it, so the history is put right first.
+	// go on without it, so the history is put right first. So is a state
+	// whose newest migration is gone: what it says is made, nothing makes.
 	if prev != nil {
-		if missing := unaccounted(prev, fixtures); len(missing) > 0 {
-			for _, m := range missing {
-				if *dryRun {
-					fmt.Fprintln(o.stderr, "warning:", lineageProblem(prev, m))
-				} else {
-					fmt.Fprintln(o.stderr, "refused:", lineageProblem(prev, m))
-				}
-			}
-			if !*dryRun {
-				return exitError{2, fmt.Sprintf("%s the state file does not include, nothing written",
-					plural(len(missing), "fixture migration"))}
-			}
+		label := "refused:"
+		if *dryRun {
+			label = "warning:"
+		}
+		missing := unaccounted(prev, fixtures)
+		for _, m := range missing {
+			fmt.Fprintln(o.stderr, label, lineageProblem(prev, m))
+		}
+		gone := ""
+		if dir != "" && (dirErr == nil || errors.Is(dirErr, os.ErrNotExist)) {
+			gone = coveredGone(prev, all, dir, s.statePath)
+		}
+		if gone != "" && *dryRun {
+			fmt.Fprintln(o.stderr, label, gone)
+		}
+		switch {
+		case *dryRun:
+		case gone != "" && len(missing) > 0:
+			fmt.Fprintln(o.stderr, label, gone)
+			return exitError{2, fmt.Sprintf("%s the state file does not include, and the one it includes last is "+
+				"gone, nothing written", plural(len(missing), "fixture migration"))}
+		case gone != "":
+			return exitError{2, gone + "; nothing written"}
+		case len(missing) > 0:
+			return exitError{2, fmt.Sprintf("%s the state file does not include, nothing written",
+				plural(len(missing), "fixture migration"))}
 		}
 	}
 	if len(res.Changes) == 0 {
@@ -234,6 +253,9 @@ func generate(o streams, args []string) error {
 		return err
 	}
 	for _, w := range fixturemigrate.RenderWarnings(res) {
+		fmt.Fprintln(o.stderr, "warning:", w)
+	}
+	if w := seedGuardWarning(s.cfg); w != "" {
 		fmt.Fprintln(o.stderr, "warning:", w)
 	}
 	if *dryRun {
@@ -327,4 +349,29 @@ func (s *setup) baseState(o streams, state *fixturemigrate.State, oldPath, rev s
 		return nil, "", fmt.Errorf("%w; or run baseline to record what the databases hold", err)
 	}
 	return files, "HEAD:" + s.cfg.FixtureLabel(), nil
+}
+
+// seedGuardWarning is what is wrong with the seed guard table for a migration
+// about to be written, "" when nothing is. Without one, a database that was
+// never seeded runs every fixture migration before its seed, against empty
+// tables, and the first that changes a row fails the deploy. One the fixture
+// files do not fill can be empty in a seeded database too, and there every
+// fixture migration does nothing and is recorded as applied.
+func seedGuardWarning(cfg *fixturemigrate.Config) string {
+	guard := cfg.SeedGuardTable
+	if guard == "" {
+		return "no seed_guard_table: on a database that was never seeded this migration runs before the seed and " +
+			"fails; set it to a table the fixture files fill"
+	}
+	if !strings.Contains(guard, ".") {
+		guard = cfg.Schema + "." + guard
+	}
+	for _, name := range cfg.ModelNames() {
+		if cfg.QualifiedTable(cfg.Models[name]) == guard {
+			return ""
+		}
+	}
+	return fmt.Sprintf("seed_guard_table %s is the table of no model, so the fixture files do not fill it: on a "+
+		"seeded database where it is empty, this migration does nothing and is recorded as applied all the same",
+		cfg.SeedGuardTable)
 }

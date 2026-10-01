@@ -16,8 +16,8 @@ configuration file: the one `-config` names, else the one `$BUN_FIXTURE_MIGRATE_
 `fixture-migrate.yml` in the current directory. Paths in it are relative to it. Every command takes
 `-h`.
 
-Every command that connects, `export`, `check`, `generate`, `status`, `plan` and `sync`, takes
-`-dsn`: the database to use instead of the configuration's `database`, as a URL or as `env:NAME` to
+Every command that connects, `export`, `check`, `generate`, `baseline`, `status`, `plan` and `sync`,
+takes `-dsn`: the database to use instead of the configuration's `database`, as a URL or as `env:NAME` to
 read one from the environment, which keeps the password out of the process list. Neither the
 command nor its errors repeat a password.
 
@@ -46,7 +46,19 @@ key, whether it is serial, the foreign keys to a table's id as `references`, the
 partition is part of its partitioned table, not a model of its own; a foreign key to another column,
 a code say, is an ordinary column. Timestamps the database writes with a row, from a default such as
 `now()` or, on a table with a `BEFORE` row trigger, an `updated_at`, are proposed for `ignore`, and
-the triggers are named. Every guess is marked.
+the triggers are named. Every guess is marked `# GUESS:`.
+
+Which tables are master data only you know. bun's migrations and locks tables are left out and named
+as `migrations_table` and `migration_locks_table`; every other table is proposed, each model with a
+`# GUESS:` to delete it when the application writes the table, as it does users, orders or sessions.
+Kept, such a table is exported into the fixture file and is drift after every deploy. A table with
+neither a unique index besides its primary key nor a `name` column has nothing a key can be guessed
+from and is written commented out, with a sentence saying why. `seed_guard_table` is guessed as the
+first table, in dependency order, that another model points at, and marked; it has to stay the table
+of a model the fixture files fill.
+
+Refused (exit 1): a table in `-tables` that is not in the schema, a partition or the migrator's own;
+and a schema with no table to propose.
 
 | Flag | |
 | --- | --- |
@@ -54,6 +66,8 @@ the triggers are named. Every guess is marked.
 | `-o` | write to this file, which must not exist; default standard output |
 | `-schema` | the schema to read, default `public` |
 | `-tables` | comma-separated tables; default all of them |
+| `-migrations-table` | the migrator's table, left out and written into the configuration; default `bun_migrations` |
+| `-migration-locks-table` | the migrator's locks table, likewise; default `bun_migration_locks` |
 
 ### export
 
@@ -64,8 +78,9 @@ the notation that loads back as the same value. Rows pointing at each other in a
 `dbfixture` cannot load them in any order. With several fixture files, each model goes back into the file that holds it and a new
 one into the last. Refuses (exit 2) to write a file `dbfixture` would not load back as the database,
 such as a zero bun would replace with a column default. Two exports of one database are the same
-bytes: the header holds no time. Output that cannot all be written, to a full disk or a closed pipe,
-is exit 1.
+bytes: the header holds no time. The file is written anew, not edited: comments in the file it
+replaces are not kept, and a note says how many lines of them it dropped. Output that cannot all be
+written, to a full disk or a closed pipe, is exit 1.
 
 For a model the fixture files hold, it writes what they hold: the columns their rows use, with the
 key and the `ref` column, and the ids only when the rows name them. A column the files never wrote
@@ -74,17 +89,22 @@ into the file, either would be a change of every row to `generate`. A model the 
 yet is written whole, ids included, unless a default other than a sequence makes its ids up, as
 `gen_random_uuid()` does. Fixture files that cannot be read are replaced whole, with a note.
 
+Before it reads a row, it checks the configuration against the catalog: a key column or a reference
+column the table does not have is a sentence naming the model and the column (exit 1), as it is for
+`check` and `generate -from-db`.
+
 | Flag | |
 | --- | --- |
 | `-o` | write here instead, with one fixture file only |
-| `-stdout` | write to standard output |
+| `-stdout` | write to standard output; with several fixture files, each one after a line `# ==> <path> <==`, in load order, as `head` prints several files |
 | `-all-columns` | write every column of every model, not only those the fixture files use |
 
 ### check
 
 Compares the database with the fixture files and reports every difference, every finding and every
 difference `generate` would refuse. Exit 3 for a difference, a refusal or a finding the policy makes
-an error; a finding the policy makes a warning is reported and leaves the exit code 0.
+an error; a finding the policy makes a warning is reported and leaves the exit code 0. A column the
+fixture files write and the table does not have is not read: it is the `unknown column` finding.
 
 | Flag | |
 | --- | --- |
@@ -104,10 +124,13 @@ state file on. The base is the state file; while there is none, git's `HEAD`.
 | `-out <dir>` | write the migration here instead of `out` |
 | `-dry-run` | print the migration and write nothing |
 | `-allow-partial` | write what was accepted when something else was refused |
-| `-no-lint` | skip the checks against the database's columns and defaults |
+| `-no-lint` | skip the checks against the database's columns and defaults, and do not connect for them |
+| `-at <time>` | name the migration as of this time, `YYYYMMDDHHMMSS` or RFC 3339, instead of now: for output that is the same on every run |
 
-The migration is named one second after the newest migration in the directory, never earlier than
-now and never the name of another one. A migration whose name sorts after it is warned about.
+The migration is named with the current time, or one second after the newest migration when that is
+not earlier, and never with the name of another one. A migration whose name sorts after it is warned
+about. So is a migration without a `seed_guard_table`, which on a database that was never seeded
+runs before the seed and fails, and one whose seed guard is the table of no model.
 
 With a database configured, both sides are respelled by it first, so a value written two ways (`1.10`
 and `1.1` in a numeric column) is no change. When the fixture files differ from the state file but
@@ -118,10 +141,14 @@ With `-allow-partial`, the refused changes are recorded in the state file as lef
 `generate` does not see them again, and `status` fails on them until `baseline -force`.
 
 Refused (exit 2), whatever else it finds: a finding in the fixture files that the policy makes an
-error, such as two rows sharing a natural key, as `sync` refuses one; and a fixture migration in the
+error, such as two rows sharing a natural key, as `sync` refuses one; a fixture migration in the
 directory that the state file's history does not include, which is one generated on another branch
-against an older state, or one written by hand and not recorded with `baseline -force`. See
-[the runbook](production.md#the-state-file-conflicts-in-a-merge).
+against an older state, or one written by hand and not recorded with `baseline -force`; and a state
+file whose newest migration is no longer in the directory, deleted or renamed, whose changes the
+state says are made and no migration makes. See
+[the runbook](production.md#the-state-file-conflicts-in-a-merge). With `-dry-run` these two are
+warnings, and the migration is printed. A state file that does not read is an error (exit 1)
+whichever base is asked for, because this run would overwrite it.
 
 The changes run in this order: renames, deletes, updates, inserts, and last the updates that point
 at a row inserted in the same migration. A delete or an update can free what an insert takes: a
@@ -141,32 +168,38 @@ nobody migrated is how a change gets lost. A difference only the column types ca
 `1.10` against `1.1`, is asked of the database when one is configured, as `generate` asks it: when it
 is no change, the state is replaced without `-force`.
 
-Also refused without `-force`: a state that records changes `generate -allow-partial` left out, and a
-fixture migration in the directory that is not in the state's history and was written by hand.
-Refused even with `-force`: a fixture migration generated against another state, on another branch,
-which has to be generated again (see [the runbook](production.md#the-state-file-conflicts-in-a-merge)),
-and a finding in the fixture files that the policy makes an error.
+Also refused without `-force`: a state that records changes `generate -allow-partial` left out, a
+fixture migration in the directory that is not in the state's history and was written by hand, and
+a state file that does not read. Refused even with `-force`: a fixture migration generated against
+another state, on another branch, which has to be generated again (see
+[the runbook](production.md#the-state-file-conflicts-in-a-merge)); a state whose newest migration is
+gone from the directory; a state file holding git's conflict markers, of which one side is taken
+first; and a finding in the fixture files that the policy makes an error.
 
 | Flag | |
 | --- | --- |
-| `-from <rev>` | record the fixture files as of a git revision |
-| `-old <file>` | record this file |
+| `-from <rev>` | record the fixture files as of a git revision; refused (exit 2) when they are missing or empty there |
+| `-old <file>` | record this file as the fixture file, under the fixture file's path; with one fixture file only |
 | `-force` | replace a differing state, and clear what was left out: a migration you wrote covers the difference |
 | `-offline` | do not ask the database whether a difference is only in how values are written |
+| `-dsn` | the database to ask, instead of the configuration's |
 
 ### status
 
 Lists the fixture files, the state file and what the fixture files change that no migration makes,
 then the migrations directory with, when a database is asked, what it applied. With a database, both
-sides are respelled by it first, as `generate` does; a difference that is only spelling is a note.
+sides are respelled by it first and the fixture files are checked against the columns, as `generate`
+does; a difference that is only spelling is a note, and what the check finds is a finding.
 
 Exit 3 when:
 
+- the state file is there and does not read: it holds git's conflict markers, or its checksum does
+  not match;
 - the fixture files change something no migration makes, or the state file records a change
   `generate -allow-partial` left out;
 - the fixture files have a finding the policy makes an error;
 - the directory holds two migrations bun would record under one name, or a fixture migration the state
-  file's history does not include;
+  file's history does not include, or no longer holds the one the state file includes last;
 - with a database, bun's locks table holds the lock on the migrations table;
 - with `-require-applied`, a migration is not applied;
 - with `-strict-order`, a pending migration sorts before one the database applied.
@@ -187,7 +220,9 @@ Runs the pending fixture migrations against the database, in bun's order, in one
 always rolled back, and reports every change. Constraints PostgreSQL defers to `COMMIT` are checked
 where the deploy commits: after each migration, and after each statement of a SQL migration bun runs
 without a transaction. Pending migrations it did not write are named, and so is where they would
-run. Refused against a standby.
+run. Refused against a standby, and as a role whose transactions start read only
+(`default_transaction_read_only`): it writes, so it connects as a role with the rights the
+migrations need, such as the one the deploy migrates as.
 
 | Flag | |
 | --- | --- |
@@ -209,7 +244,8 @@ moved, in the database plan ran against; plan notes such a migration.
 Exit 3 when a migration would fail, or with `-strict` be skipped; exit 1 when the plan could not
 finish (a lock waited for too long, a lost connection, a SQL migration that cannot run in a
 transaction, an enum value a migration in the same plan added, a table or column missing after a
-migration plan did not run), which says nothing about the migration.
+migration plan did not run, a write the role plan connects as may not make), which says nothing
+about the migration.
 
 ### sync
 
@@ -233,7 +269,7 @@ Exit 2 when a finding the policy makes an error, or a difference `generate` woul
 | 0 | done; for `check`, `status` and `plan`: nothing found. A finding the policy makes a warning is reported and is not a failure |
 | 1 | the command could not do its job: a bad flag, no connection, an unreadable file, output that could not be written, a plan that could not finish, nothing for `status` to compare the fixture files with |
 | 2 | refused: a difference that needs a hand-written migration, a finding the policy makes an error, a state `baseline` will not replace, a fixture migration the state file does not include (`generate`, `baseline`), a file `export` will not write |
-| 3 | found something: drift (`check`), a change no migration makes, a change left out, a migration not applied or out of order, a leftover lock (`status`), a migration that would fail or skip (`plan`), a problem in the migrations directory (`status`, `plan`) |
+| 3 | found something: drift (`check`), a change no migration makes, a change left out, a state file that does not read, a migration not applied or out of order, a leftover lock (`status`), a migration that would fail or skip (`plan`), a problem in the migrations directory or the state file's history of it (`status`, `plan`) |
 
 A pipeline can tell "the database drifted" (3) from "the check could not run" (1). Whatever the
 code, unless it is 0, the last line on standard error says why, starting with `bun-fixture-migrate:`.
@@ -255,7 +291,8 @@ what changing it does. Unknown keys are an error.
 | `migrations_table` | `bun_migrations` | the migrator's table, when it is built `WithTableName`; may be schema-qualified |
 | `migration_locks_table` | `bun_migration_locks` | the migrator's locks table, when it is built `WithLocksTableName`; `status` reports a lock left in it |
 | `state` | `<out>/fixture_state.yml` | the state file |
-| `seed_guard_table` | | a table never empty in a seeded database; while it is empty a fixture migration does nothing. Written into the migration in `schema` when it names none and `schema` is not `public` |
+| `seed_guard_table` | | a table never empty in a seeded database; while it is empty a fixture migration does nothing. Written into the migration in `schema` when it names none and `schema` is not `public`. Without one, `generate` warns: on a database that was never seeded, the migration runs before the seed and fails |
+| `lock_timeout` | | how long a generated migration waits for a row lock another session holds before it fails and rolls back, in PostgreSQL's spelling (`500ms`, `10s`, `1min`); written into the migration. Empty waits as long as the other session holds it |
 | `database` | | a DSN, or `env:NAME` to read one from the environment |
 | `schema` | `public` | the schema of tables named without one. A generated migration names such a table with this schema unless it is `public`, because the application's `search_path` may not include it |
 | `policy` | | see below |
@@ -279,6 +316,7 @@ listed stops every command.
 | `derived` | | columns the application recalculates: never compared, written or exported |
 | `ignore` | | columns that take no part |
 | `deletes` | `policy.deletes` | `allow`, `refuse` or `cascade` |
+| `array_nulls` | `policy.array_nulls` | `refuse` or `keep`, for the model's array columns |
 | `where` | | an SQL predicate limiting which rows are master data; your SQL, used as written. A generated migration carries it: every statement, natural-key lookup and reference for the model sees only those rows, and a row it writes must hold it. A `;` or a parenthesis it does not open is refused |
 
 ### policy
@@ -296,14 +334,15 @@ listed stops every command.
 | `array_nulls` | refuse, keep | refuse | a null inside a sequence in an array column: `refuse` reports it and refuses a change carrying it, because a `[]string` field drops it and a `[]*string` one keeps it; `keep` says the models' array fields keep it. A model can override it |
 
 `id_drift`, `missing_row` and `changed_row` are copied into every generated migration, so changing
-them later does not change what an existing migration does.
+them later does not change what an existing migration does. A model overrides `deletes` and
+`array_nulls` with keys of the same names.
 
 ## JSON output
 
 `check`, `status`, `plan` and `sync` take `-json`. Values are strings as the database spells them,
 NULL is `null`, and a reference is `{"model": "Currency", "key": "USD"}`, so neither can be mistaken
-for a string. Lists are `[]` rather than `null` when empty. Fields may be added; none will change
-meaning.
+for a string. Lists are `[]` rather than `null` when empty, except the fields this page marks as
+left out when empty. Fields may be added; none will change meaning.
 
 ### check output
 
@@ -313,6 +352,7 @@ meaning.
   "findings": [{"kind": "zero against a default", "level": "warn", "model": "Plan", "row": "Plan/name=free",
                 "detail": "..."}],
   "refusals": [{"model": "Plan", "key": "Plan/name=old", "reason": "..."}],
+  "warnings": [{"model": "Plan", "key": "Plan/name=team", "reason": "..."}],
   "changes": [
     {"model": "Plan", "kind": "update", "key": {"name": "team"},
      "database": {"price_cents": "2200"}, "file": {"price_cents": "2500"}}
@@ -323,7 +363,9 @@ meaning.
 `agree` is what the exit code says: `true` for 0. A finding's `level` is what the policy makes of its
 kind, `error` or `warn`; a `warn` finding is listed and leaves `agree` true. A change is what a
 migration from the database to the file would do: an `insert` is a row only the file has, a `delete`
-one only the database has.
+one only the database has. A change's `database` and `file` are left out when empty: an insert has
+no `database`, a delete no `file`. `warnings` are differences the policy lets a migration carry on
+past, such as a renumbered row under `id_drift: warn`; they leave `agree` as it is.
 
 The `row` of a finding and the `key` of a refusal name the row for a person, as
 `Model/column=value/…`, with a NULL as `NULL` and a reference as `Model(key)`. Two rows can read
@@ -344,6 +386,7 @@ field's type could settle, such as a null inside a sequence), `unknown column`.
   "base": "the state file",
   "uncovered": [],
   "refused": [],
+  "warnings": [],
   "left_out": [],
   "findings": [],
   "directory": "migrations",
@@ -361,13 +404,14 @@ field's type could settle, such as a null inside a sequence), `unknown column`.
 
 | Field | |
 | --- | --- |
-| `state` | `null` when no state file is configured. `format` is 1 for a file written before the format was numbered. `covers` is the newest fixture migration whose changes the state includes, `base` what that one was generated against |
+| `state` | `null` when no state file is configured. `exists` is whether the file is there, and `error` why one that is there does not read, such as a merge that stopped in it; nothing is compared then. `format` is 1 for a file written before the format was numbered. `covers` is the newest fixture migration whose changes the state includes, `base` what that one was generated against |
 | `base` | what `uncovered` was worked out against: `the state file`, or `HEAD` while there is none |
 | `uncovered`, `refused` | what the fixture files change that no migration makes, one line per model, and what of it `generate` would refuse |
+| `warnings` | what `generate` would report about those changes and carry on past |
 | `left_out` | changes `generate -allow-partial` refused and recorded in the state file, until `baseline -force` |
 | `findings` | as in [check](#check-output), the ones the policy does not ignore |
 | `migrations` | `applied` is `null` for a pending migration and for all of them without a database; `out_of_order` is a pending one that sorts before `newest_applied` |
-| `not_in_state` | fixture migrations of the directory the state's history does not include; `problems` says why |
+| `not_in_state` | fixture migrations of the directory the state's history does not include; `problems` says why, and says when the one the state includes last is gone |
 | `database` | `null` when none was asked. `locked` is a row in `locks_table` naming `table`: a migrator running now, or one that died and left it |
 
 ### plan output
@@ -390,21 +434,25 @@ field's type could settle, such as a null inside a sequence), `unknown column`.
 
 `result` is `succeeds`, `fails`, `unseeded`, `not reached` (after one that fails), or `inconclusive`
 when the plan itself could not finish. `kind` is `fixture`, or `sql` for a migration `-with-sql`
-ran. `after` names pending migrations that were not simulated and run before this one. A
-migration's `notes`, when there are any, say what its `result` and `error` do not: why the plan
+ran. `after` names pending migrations that were not simulated and run before this one, and is left
+out when there are none; `error` is left out when there is none. A migration's `notes`, left out
+when there are none, say what its `result` and `error` do not: why the plan
 could not tell, or where the deploy can differ from the plan. The top-level `notes` say why a
 migration `-with-sql` would have run is in `not_simulated`. `problems` are those `status` reports in
-the migrations directory, each of which fails the plan. `rows_locked` is how many rows the fixture
+the migrations directory, each of which fails the plan: two migrations under one name, a generated
+file that does not read, a fixture migration the state file's history does not include, and the
+one it includes last gone from the directory. `rows_locked` is how many rows the fixture
 migrations wrote and held locked until the rollback, and `locked_seconds` how long the plan's
 transaction was open.
 
 ### sync output
 
 ```json
-{"applied": true, "dry_run": false, "findings": [], "refusals": [], "changes": [ ... ]}
+{"applied": true, "dry_run": false, "findings": [], "refusals": [], "warnings": [], "changes": [ ... ]}
 ```
 
-`findings` are as in [check](#check-output), with a `level` each.
+`findings` are as in [check](#check-output), with a `level` each, and so are `refusals` and
+`warnings`: what stopped the sync, and what the policy let it carry on past.
 
 ### Outcomes
 

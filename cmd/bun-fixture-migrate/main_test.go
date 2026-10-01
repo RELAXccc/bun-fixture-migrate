@@ -354,9 +354,10 @@ func TestABadFlagIsOneError(t *testing.T) {
 		!strings.Contains(stderr, "-with-sql") {
 		t.Fatalf("exit %d\n%s", code, stderr)
 	}
-	// baseline never connects, so it has no -dsn to ignore.
-	if code, _, stderr := call(t, "baseline", "-config", cfg, "-dsn", "postgres://x/y"); code != 1 ||
-		!strings.Contains(stderr, "not defined: -dsn") {
+	// baseline connects to ask whether a difference is only spelling, so it
+	// takes -dsn like every command that connects.
+	code, _, stderr = call(t, "baseline", "-h")
+	if code != 0 || !strings.Contains(stderr, "-dsn") {
 		t.Fatalf("exit %d\n%s", code, stderr)
 	}
 }
@@ -365,7 +366,8 @@ func TestABadFlagIsOneError(t *testing.T) {
 // DSN with a password in it.
 func TestAStrayArgumentDoesNotRepeatAPassword(t *testing.T) {
 	cfg, _ := project(t, oldFixture, oldFixture)
-	for _, arg := range []string{"postgres://app:s3cret@db/x", "host=db password=s3cret", "postgres://app:s3cret@[::1/x"} {
+	for _, arg := range []string{"postgres://app:s3cret@db/x", "host=db password=s3cret", "postgres://app:s3cret@[::1/x",
+		"app:s3cret@db:5432/x"} {
 		code, _, stderr := call(t, "check", "-config", cfg, arg)
 		if code != 1 || !strings.Contains(stderr, "unexpected argument") || strings.Contains(stderr, "s3cret") {
 			t.Errorf("%s: exit %d\n%s", arg, code, stderr)
@@ -416,12 +418,18 @@ func TestDSNWinsOverTheConfiguration(t *testing.T) {
 			}
 		}
 	}
+	// baseline asks the database whether a difference is only spelling.
+	writeFixture(t, cfg, newFixture)
+	code, _, stderr := call(t, "baseline", "-config", cfg, "-dsn", "env:BFM_TEST_FLAG_DSN")
+	if code != 1 || !strings.Contains(stderr, "connect to postgres://app:xxxxx@127.0.0.1:3") {
+		t.Errorf("baseline -dsn: exit %d\n%s", code, stderr)
+	}
 	// A project without a database in its configuration gets one.
 	none, _ := project(t, oldFixture, oldFixture)
 	if code, _, stderr := call(t, "baseline", "-config", none); code != 0 {
 		t.Fatal(stderr)
 	}
-	code, _, stderr := call(t, "status", "-config", none, "-require-applied", "-dsn", "postgres://app@127.0.0.1:4/z")
+	code, _, stderr = call(t, "status", "-config", none, "-require-applied", "-dsn", "postgres://app@127.0.0.1:4/z")
 	if code != 1 || !strings.Contains(stderr, "127.0.0.1:4") {
 		t.Errorf("status -require-applied -dsn: exit %d\n%s", code, stderr)
 	}
@@ -460,3 +468,82 @@ func TestWriteOutFailsWithTheWriter(t *testing.T) {
 type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("no space left on device") }
+
+// A migration without a seed guard runs on a database that was never seeded,
+// before the seed, and fails there; one guarded by a table the fixture files
+// do not fill does nothing on a seeded database where that table is empty.
+// generate says so, and writes the migration all the same.
+func TestGenerateWarnsAboutTheSeedGuard(t *testing.T) {
+	for guard, want := range map[string]string{
+		"seed_guard_table: plans\n":        "",
+		"seed_guard_table: public.plans\n": "",
+		"":                                 "warning: no seed_guard_table: on a database that was never seeded this migration runs before the seed and fails",
+		"seed_guard_table: \"\"\n":         "warning: no seed_guard_table",
+		"seed_guard_table: users\n":        "warning: seed_guard_table users is the table of no model",
+	} {
+		cfg, base := projectWith(t, strings.Replace(config, "seed_guard_table: plans\n", guard, 1), newFixture, oldFixture)
+		code, out, errs := call(t, "generate", "-config", cfg, "-old", base, "-name", "x")
+		if code != 0 || (want == "") != !strings.Contains(errs, "seed_guard_table") || !strings.Contains(errs, want) {
+			t.Errorf("%q: exit %d\n%s%s", guard, code, out, errs)
+		}
+	}
+}
+
+// The last line of a failed command says why, starting with the command's
+// name, however many lines the error came in.
+func TestAnErrorIsOneLine(t *testing.T) {
+	cfg, _ := projectWith(t, strings.Replace(config, "package: migrations\n",
+		"package: migrations\nseed_guard_tabel: plans\nmigrator_name: M\n", 1), oldFixture, oldFixture)
+	code, _, stderr := call(t, "status", "-config", cfg, "-offline")
+	if code != 1 || strings.Count(stderr, "\n") != 1 || !strings.Contains(stderr, "field seed_guard_tabel not found") ||
+		!strings.Contains(stderr, "; line ") {
+		t.Fatalf("exit %d\n%s", code, stderr)
+	}
+	if got := oneLine("a\n  b\n\nc"); got != "a; b; c" {
+		t.Fatal(got)
+	}
+	// git's own sentence, in the middle of one of ours, keeps one period.
+	if _, err := exec.LookPath("git"); err != nil {
+		return
+	}
+	cfg, _ = project(t, oldFixture, oldFixture)
+	gitIn(t, filepath.Dir(cfg), false, "init", "-q")
+	code, _, stderr = call(t, "status", "-config", cfg, "-offline")
+	if code != 1 || !strings.Contains(stderr, "invalid object name 'HEAD'. So nothing says") {
+		t.Fatalf("exit %d\n%s", code, stderr)
+	}
+}
+
+// Small things a message gets right: the flag that would have helped, the
+// file plan -file takes, where a configuration nobody named on the command
+// line came from.
+func TestMessagesSayWhatToDo(t *testing.T) {
+	cfg, base := projectWith(t, config+"database: env:BFM_TEST_UNSET_DATABASE_URL\n", newFixture, oldFixture)
+	code, _, stderr := call(t, "generate", "-config", cfg, "-old", base, "-name", "x")
+	if code != 1 || !strings.Contains(stderr, "BFM_TEST_UNSET_DATABASE_URL, which is not set") ||
+		!strings.Contains(stderr, "-no-lint generates without the database") {
+		t.Errorf("exit %d\n%s", code, stderr)
+	}
+	if code, _, stderr := call(t, "generate", "-config", cfg, "-old", base, "-name", "x", "-no-lint"); code != 0 {
+		t.Errorf("exit %d\n%s", code, stderr)
+	}
+
+	sql := filepath.Join(filepath.Dir(cfg), "migrations", "20260101000000_schema.up.sql")
+	if err := os.WriteFile(sql, []byte("CREATE TABLE x (id int);\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, _, stderr = call(t, "plan", "-config", cfg, "-file", sql)
+	if code != 1 || !strings.Contains(stderr, "plan -file takes a fixture migration generate wrote, a .go file") {
+		t.Errorf("exit %d\n%s", code, stderr)
+	}
+
+	t.Setenv("BUN_FIXTURE_MIGRATE_CONFIG", filepath.Join(t.TempDir(), "nowhere.yml"))
+	code, _, stderr = call(t, "status", "-offline")
+	if code != 1 || !strings.Contains(stderr, "nowhere.yml") || !strings.Contains(stderr, "$BUN_FIXTURE_MIGRATE_CONFIG") {
+		t.Errorf("exit %d\n%s", code, stderr)
+	}
+	// Named with -config, it is not the variable's.
+	if _, _, stderr := call(t, "status", "-offline", "-config", filepath.Join(t.TempDir(), "x.yml")); strings.Contains(stderr, "$BUN_") {
+		t.Errorf("%s", stderr)
+	}
+}
