@@ -150,3 +150,40 @@ func TestTheJSONReadingIsWhatAnAnyFieldMarshalsTo(t *testing.T) {
 		t.Errorf("JSONText %q", got)
 	}
 }
+
+// A merge key inside a mapping is merged the way yaml.v3 merges it into the
+// map[string]any dbfixture decodes a jsonb column into.
+func TestAMergeKeyIsMergedAsYAMLMergesIt(t *testing.T) {
+	for _, in := range []string{
+		`{m: &m {k: 1, j: 2}, n: {<<: *m, j: 3}}`,
+		`{a: &a {x: 1}, b: &b {x: 2, y: 2}, n: {<<: [*a, *b], z: 3}}`,
+		`{n: {<<: {a: 1, <<: {a: 0, z: 9}}, b: 2}}`,
+		`{1: own, <<: {1: merged, 2: two}}`,
+		`{"1": own, <<: {1: merged}}`,
+		`{n: {<<: {k: ~}, j: [1, {<<: {q: 1}}]}}`,
+	} {
+		var v map[string]any
+		if err := yaml.Unmarshal([]byte(in), &v); err != nil {
+			t.Fatal(err)
+		}
+		want, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var n yaml.Node
+		if err := yaml.Unmarshal([]byte(in), &n); err != nil {
+			t.Fatal(err)
+		}
+		got, err := yamlJSON(&n)
+		if err != nil || got != string(want) {
+			t.Errorf("%s:\n got %s %v\nwant %s", in, got, err, want)
+		}
+	}
+	var n yaml.Node
+	if err := yaml.Unmarshal([]byte(`{<<: [1, 2]}`), &n); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := yamlJSON(&n); err == nil || !strings.Contains(err.Error(), "not a mapping") {
+		t.Errorf("a merge of something else than mappings: %v", err)
+	}
+}

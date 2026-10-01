@@ -302,6 +302,129 @@ func jsonScalar(n *yaml.Node) (string, bool) {
 	return "", false
 }
 
+// jsonPair is one key of a mapping and its value, as a map[string]any holds
+// them.
+type jsonPair struct {
+	key   string
+	value *yaml.Node
+}
+
+// mappingPairs is what a map[string]any field gets from a mapping, with
+// yaml.v3's merge keys applied the way yaml.v3 applies them (decode.go,
+// mapping and merge): a key as it is written; a key the mapping writes
+// itself wins over a merged one, but only a key that is a string to YAML,
+// because yaml.v3 holds the mapping's own keys by what they resolve to and a
+// merged one by its text; and of several mappings merged, the first to
+// write a key wins, the mappings they merge in turn after their own keys.
+func mappingPairs(n *yaml.Node) ([]jsonPair, error) {
+	var pairs []jsonPair
+	index := map[string]int{}
+	set := func(k string, v *yaml.Node) {
+		if i, ok := index[k]; ok {
+			pairs[i].value = v
+			return
+		}
+		index[k] = len(pairs)
+		pairs = append(pairs, jsonPair{k, v})
+	}
+	// own reads a mapping's keys other than its merge key, and that.
+	own := func(m *yaml.Node) (keys []*yaml.Node, values []*yaml.Node, merge *yaml.Node, err error) {
+		for i := 0; i+1 < len(m.Content); i += 2 {
+			key := m.Content[i]
+			if key.Kind == yaml.AliasNode && key.Alias != nil {
+				key = key.Alias
+			}
+			if key.Kind == yaml.ScalarNode && key.Value == "<<" && key.ShortTag() == "!!merge" {
+				if merge != nil {
+					return nil, nil, nil, fmt.Errorf("line %d: a second merge key in one mapping, which yaml.v3 "+
+						"refuses as a key defined twice", key.Line)
+				}
+				merge = m.Content[i+1]
+				continue
+			}
+			if key.Kind != yaml.ScalarNode || key.ShortTag() == "!!null" {
+				return nil, nil, nil, fmt.Errorf("line %d: a mapping key JSON cannot hold", key.Line)
+			}
+			keys, values = append(keys, key), append(values, m.Content[i+1])
+		}
+		return keys, values, merge, nil
+	}
+	keys, values, merge, err := own(n)
+	if err != nil {
+		return nil, err
+	}
+	taken := map[string]bool{}
+	for i, key := range keys {
+		k := mapKey(key)
+		set(k, values[i])
+		if tag := key.ShortTag(); tag == "!!str" || tag == "!!binary" {
+			taken[k] = true
+		}
+	}
+	var mergeFrom func(src *yaml.Node, depth int) error
+	mergeMapping := func(m *yaml.Node, depth int) error {
+		keys, values, merge, err := own(m)
+		if err != nil {
+			return err
+		}
+		for i, key := range keys {
+			k := mapKey(key)
+			if taken[k] {
+				continue
+			}
+			taken[k] = true
+			set(k, values[i])
+		}
+		if merge != nil {
+			return mergeFrom(merge, depth+1)
+		}
+		return nil
+	}
+	mergeFrom = func(src *yaml.Node, depth int) error {
+		if depth > 100 {
+			return fmt.Errorf("line %d: merge keys that merge each other without end", src.Line)
+		}
+		src = resolveAlias(src)
+		if src == nil {
+			return fmt.Errorf("a merge key of an alias of nothing")
+		}
+		switch src.Kind {
+		case yaml.MappingNode:
+			return mergeMapping(src, depth)
+		case yaml.SequenceNode:
+			for _, item := range src.Content {
+				item := resolveAlias(item)
+				if item == nil || item.Kind != yaml.MappingNode {
+					return fmt.Errorf("line %d: a merge key whose value is not a mapping or a sequence of "+
+						"mappings, which yaml.v3 refuses", src.Line)
+				}
+				if err := mergeMapping(item, depth); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		return fmt.Errorf("line %d: a merge key whose value is not a mapping or a sequence of mappings, "+
+			"which yaml.v3 refuses", src.Line)
+	}
+	if merge != nil {
+		if err := mergeFrom(merge, 0); err != nil {
+			return nil, err
+		}
+	}
+	return pairs, nil
+}
+
+// mapKey is a mapping key as a map[string]any gets it: as it is written,
+// whatever it resolves to, so 017 stays "017"; !!binary as the text it
+// encodes.
+func mapKey(key *yaml.Node) string {
+	if key.ShortTag() == "!!binary" {
+		return scalarText(Cell{Text: key.Value, Tag: "!!binary"})
+	}
+	return key.Value
+}
+
 // writeYAMLJSON writes n as JSON; inMapping is true for a value as an any or
 // map field holds it, false for an element of an array column.
 func writeYAMLJSON(b *strings.Builder, n *yaml.Node, inMapping bool) error {
@@ -314,26 +437,9 @@ func writeYAMLJSON(b *strings.Builder, n *yaml.Node, inMapping bool) error {
 	case yaml.AliasNode:
 		return writeYAMLJSON(b, n.Alias, inMapping)
 	case yaml.MappingNode:
-		type pair struct {
-			key   string
-			value *yaml.Node
-		}
-		pairs := make([]pair, 0, len(n.Content)/2)
-		for i := 0; i+1 < len(n.Content); i += 2 {
-			key := n.Content[i]
-			if key.Kind == yaml.AliasNode && key.Alias != nil {
-				key = key.Alias
-			}
-			if key.Kind != yaml.ScalarNode || key.ShortTag() == "!!merge" || key.ShortTag() == "!!null" {
-				return fmt.Errorf("line %d: a mapping key JSON cannot hold", key.Line)
-			}
-			// A map[string]any gets a key as it is written, whatever it
-			// resolves to: 017 stays "017".
-			k := key.Value
-			if key.ShortTag() == "!!binary" {
-				k = scalarText(Cell{Text: key.Value, Tag: "!!binary"})
-			}
-			pairs = append(pairs, pair{k, n.Content[i+1]})
+		pairs, err := mappingPairs(n)
+		if err != nil {
+			return err
 		}
 		sort.SliceStable(pairs, func(i, j int) bool { return pairs[i].key < pairs[j].key })
 		b.WriteByte('{')

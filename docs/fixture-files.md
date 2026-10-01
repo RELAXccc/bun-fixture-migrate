@@ -128,7 +128,9 @@ written (`017: x` is the key `"017"`), a number as a `float64` (`0.1234567890123
 makes of it (`2026-01-01` is `"2026-01-01T00:00:00Z"`, an offset is kept), `!!binary` as the text it
 encodes. So `[2026-01-01T10:00:00+02:00]` is `["2026-01-01T10:00:00+02:00"]` there, where a
 `timestamptz[]` column holds that instant. Two documents are compared as `jsonb` compares them, with
-every number written canonically, so `{"a": 1.0}` written by SQL and `{a: 1}` in the file agree.
+every number written canonically, so `{"a": 1.0}` written by SQL and `{a: 1}` in the file agree. A
+YAML merge key `<<` inside a mapping is merged as yaml.v3 merges it: a key the mapping writes itself
+wins over a merged one, and of several mappings merged, the first.
 
 A scalar is read the same way: a timestamp, a date and a float are what an `any` field makes of them
 (`2026-01-01T10:00:00+02:00` is the JSON string `"2026-01-01T10:00:00+02:00"`, `2026-01-01` is

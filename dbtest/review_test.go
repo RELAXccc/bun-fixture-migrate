@@ -81,3 +81,28 @@ func TestReviewTopLevelJSONAndDatesReadAsDbfixtureStoresThem(t *testing.T) {
 		})
 	}
 }
+
+type RvDoc struct {
+	bun.BaseModel `bun:"table:rv_doc"`
+	ID            int64          `bun:"id,pk"`
+	Name          string         `bun:"name,notnull"`
+	Meta          map[string]any `bun:"meta,type:jsonb"`
+}
+
+// A merge key inside a jsonb mapping is merged the way yaml.v3 merges it for
+// dbfixture, rather than refusing the file.
+func TestReviewAMergeKeyInsideAJSONMapping(t *testing.T) {
+	l := newLab(t, map[string]*fixturemigrate.Model{"RvDoc": {Table: "rv_doc", Key: []string{"name"}}}, "rv_doc",
+		[]string{"DROP TABLE IF EXISTS rv_doc", "CREATE TABLE rv_doc (id bigint PRIMARY KEY, name text NOT NULL UNIQUE, meta jsonb)"},
+		`SELECT string_agg(concat_ws('|', name, meta::text), E'\n' ORDER BY name) FROM rv_doc`, (*RvDoc)(nil))
+	v1 := "- model: RvDoc\n  rows:\n    - {id: 1, name: a, meta: {k: 1}}\n    - {id: 2, name: b, meta: {k: 1}}\n"
+	v2 := `- model: RvDoc
+  rows:
+    - {id: 1, name: a, meta: &m {k: 1, j: 2, deep: &d {x: 1}}}
+    - {id: 2, name: b, meta: {<<: [*m, {k: 0, z: 9}], j: 3, deep: {<<: *d, y: 2}}}
+`
+	l.fidelity(v1, v2)
+	if got := l.current(); got != `a|{"j": 2, "k": 1, "deep": {"x": 1}}`+"\n"+`b|{"j": 3, "k": 1, "z": 9, "deep": {"x": 1, "y": 2}}` {
+		t.Fatalf("dbfixture stored %s", got)
+	}
+}
