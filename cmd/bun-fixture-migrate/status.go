@@ -26,6 +26,10 @@ type statusReport struct {
 	// one line per model; Refused is what generate would refuse of it.
 	Uncovered []string `json:"uncovered"`
 	Refused   []string `json:"refused"`
+	// LeftOut are the changes generate -allow-partial refused and recorded in
+	// the state file. No migration makes them until baseline -force says one
+	// written by hand does.
+	LeftOut []string `json:"left_out"`
 	// Directory is the migrations directory, "" when none is configured.
 	Directory  string          `json:"directory"`
 	Migrations []migrationInfo `json:"migrations"`
@@ -135,7 +139,7 @@ func status(o streams, args []string) error {
 
 	if *asJSON {
 		// A program reads an empty list as [], not as null.
-		for _, list := range []*[]string{&r.Uncovered, &r.Refused, &r.Problems, &r.Notes} {
+		for _, list := range []*[]string{&r.Uncovered, &r.Refused, &r.LeftOut, &r.Problems, &r.Notes} {
 			if *list == nil {
 				*list = []string{}
 			}
@@ -156,6 +160,9 @@ func status(o streams, args []string) error {
 	var failures []string
 	if n := len(r.Uncovered) + len(r.Refused); n > 0 {
 		failures = append(failures, "the fixture file has changes no migration makes")
+	}
+	if len(r.LeftOut) > 0 {
+		failures = append(failures, plural(len(r.LeftOut), "change")+" left out of a generated migration and not migrated yet")
 	}
 	if len(r.Problems) > 0 {
 		failures = append(failures, plural(len(r.Problems), "problem")+" in the migrations directory")
@@ -192,6 +199,7 @@ func (s *setup) uncovered(r *statusReport) error {
 		switch {
 		case err == nil:
 			r.State.Exists, r.State.Migration = true, state.Migration
+			r.LeftOut = state.LeftOut
 			files, r.Base, found = state.Files, "the state file", true
 		case errors.Is(err, fixturemigrate.ErrNoState):
 		default:
@@ -250,6 +258,7 @@ func printStatus(o streams, r *statusReport) {
 	}
 	switch {
 	case r.Base == "":
+	case len(r.Uncovered)+len(r.Refused) == 0 && len(r.LeftOut) > 0:
 	case len(r.Uncovered)+len(r.Refused) == 0:
 		fmt.Fprintf(w, "not migrated\tnothing: every change since %s has a migration\n", r.Base)
 	default:
@@ -259,6 +268,15 @@ func printStatus(o streams, r *statusReport) {
 			label = ""
 		}
 		fmt.Fprintf(w, "\trun: bun-fixture-migrate generate -name <what changed>\n")
+	}
+	if len(r.LeftOut) > 0 {
+		label := "left out"
+		for _, line := range r.LeftOut {
+			fmt.Fprintf(w, "%s\t%s\n", label, line)
+			label = ""
+		}
+		fmt.Fprintf(w, "\tgenerate -allow-partial left this out; write the migration by hand, then run: "+
+			"bun-fixture-migrate baseline -force\n")
 	}
 	w.Flush()
 

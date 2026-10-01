@@ -275,3 +275,65 @@ func TestStatusWithNothingToCompareWithFails(t *testing.T) {
 		t.Fatalf("exit %d\n%s%s", code, out, errs)
 	}
 }
+
+// generate -allow-partial writes what it can and records the rest as left out.
+// The next generate does not write the accepted change again, and status keeps
+// failing on the refused one until baseline -force says a migration somebody
+// wrote makes it.
+func TestWhatAPartialGenerateLeftOutStaysVisible(t *testing.T) {
+	edited := strings.Replace(newFixture, `symbol: "E"`, `symbol: "€"`, 1)
+	edited = strings.Replace(edited, "name: team", "name: crew", 1)
+	cfg, _ := project(t, oldFixture, oldFixture)
+	if code, _, errs := call(t, "baseline", "-config", cfg); code != 0 {
+		t.Fatal(errs)
+	}
+	writeFixture(t, cfg, edited)
+	if code, out, errs := call(t, "generate", "-config", cfg, "-name", "symbol"); code != 2 {
+		t.Fatalf("without -allow-partial a refusal writes nothing: exit %d\n%s%s", code, out, errs)
+	}
+	code, out, errs := call(t, "generate", "-config", cfg, "-name", "symbol", "-allow-partial")
+	if code != 0 || !strings.Contains(errs, "refused:") || !strings.Contains(out, "1 change left out") {
+		t.Fatalf("exit %d\n%s%s", code, out, errs)
+	}
+	if files := migrationsOf(t, cfg); len(files) != 1 {
+		t.Fatalf("got %v", files)
+	}
+
+	code, out, errs = call(t, "status", "-config", cfg, "-offline")
+	if code != 3 || !strings.Contains(out, "left out") || !strings.Contains(out, "renamed from") ||
+		!strings.Contains(out, "baseline -force") || !strings.Contains(errs, "1 change left out") {
+		t.Fatalf("a refused change has to stay visible: exit %d\n%s%s", code, out, errs)
+	}
+	_, out, _ = call(t, "status", "-config", cfg, "-offline", "-json")
+	var report statusReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil || len(report.LeftOut) != 1 ||
+		!strings.Contains(report.LeftOut[0], "renamed from") {
+		t.Fatalf("%v\n%s", err, out)
+	}
+
+	// The accepted change is not generated a second time.
+	code, out, _ = call(t, "generate", "-config", cfg, "-name", "again", "-allow-partial")
+	if code != 0 || !strings.Contains(out, "nothing changed") || len(migrationsOf(t, cfg)) != 1 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	// Another change carries what was left out forward.
+	writeFixture(t, cfg, strings.Replace(edited, "price_cents: 2500", "price_cents: 2600", 1))
+	if code, out, errs := call(t, "generate", "-config", cfg, "-name", "price"); code != 0 {
+		t.Fatalf("exit %d\n%s%s", code, out, errs)
+	}
+	if code, _, _ := call(t, "status", "-config", cfg, "-offline"); code != 3 {
+		t.Fatalf("exit %d: what was left out is still not migrated", code)
+	}
+
+	// The migration for it is written by hand; baseline says so.
+	code, out, errs = call(t, "baseline", "-config", cfg)
+	if code != 2 || !strings.Contains(out, "left out: Plan") || !strings.Contains(errs, "-force") {
+		t.Fatalf("exit %d\n%s%s", code, out, errs)
+	}
+	if code, _, errs := call(t, "baseline", "-config", cfg, "-force"); code != 0 {
+		t.Fatal(errs)
+	}
+	if code, out, errs := call(t, "status", "-config", cfg, "-offline"); code != 0 {
+		t.Fatalf("exit %d\n%s%s", code, out, errs)
+	}
+}

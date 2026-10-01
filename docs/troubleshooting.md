@@ -136,6 +136,10 @@ run `status` in a checkout with git.
 differs from the state, and no migration covers it. Run `generate`. Pass `-force` only when you
 wrote the migration yourself.
 
+**`left out`** (`status`, exit 3) **/ `the state records N changes generate left out`** (`baseline`,
+exit 2). `generate -allow-partial` wrote the rest of a change and recorded these in the state file.
+Write their migration by hand, then `baseline -force`.
+
 ## Generating
 
 **`nothing changed in fixtures/fixture.yml since the state after ...`.** The file and the state agree.

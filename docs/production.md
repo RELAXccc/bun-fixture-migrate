@@ -21,7 +21,7 @@ against production itself: it runs in a transaction PostgreSQL holds to `READ ON
 
 | When | Command | Fails on |
 | --- | --- | --- |
-| every change | `status -offline` | a fixture edit without its migration; two migrations bun would record under one name |
+| every change | `status -offline` | a fixture edit without its migration; a change `generate -allow-partial` left out and nobody migrated; two migrations bun would record under one name |
 | before a deploy | `plan -strict` against a recent copy of production | a migration that would fail or skip a change |
 | the deploy | your migrator, then the seed of an empty database | a fixture migration that cannot do what it says |
 | after it | `status -require-applied` | a migration the database did not apply |
@@ -132,10 +132,12 @@ a natural key two rows share, a column one side sets and the other leaves out wi
 
 1. Often the configuration can say it: `renames: update`, a `defaults` entry, `deletes: cascade` on
    the model. Then generate again.
-2. Otherwise write that one migration by hand, in the same package, dated after the last one, and
-   `generate -allow-partial` for the rest if there is any.
-3. Record that your migration covers it: `bun-fixture-migrate baseline -force`.
-4. `plan` against a copy of production, as always.
+2. Otherwise `generate -allow-partial` writes the rest, and records what it refused in the state
+   file as left out. The next `generate` does not see those changes again; `status` lists them and
+   fails until step 4.
+3. Write the migration for what was left out by hand, in the same package, dated after the last one.
+4. Record that your migration covers it: `bun-fixture-migrate baseline -force`.
+5. `plan` against a copy of production, as always.
 
 ## The state file conflicts in a merge
 

@@ -84,26 +84,36 @@ state file on. The base is the state file; while there is none, git's `HEAD`.
 The migration is named one second after the newest migration in the directory, never earlier than
 now and never the name of another one. A migration whose name sorts after it is warned about.
 
+With `-allow-partial`, the refused changes are recorded in the state file as left out: the next
+`generate` does not see them again, and `status` fails on them until `baseline -force`.
+
 ### baseline
 
 Records the fixture files, as they are, as what the migrations leave a database holding. A state
 that differs in content is only replaced with `-force` (exit 2 otherwise), because recording a change
-nobody migrated is how a change gets lost.
+nobody migrated is how a change gets lost. A state that records changes `generate -allow-partial`
+left out is replaced only with `-force` too.
 
 | Flag | |
 | --- | --- |
 | `-from <rev>` | record the fixture files as of a git revision |
 | `-old <file>` | record this file |
-| `-force` | replace a differing state: a migration you wrote covers the difference |
+| `-force` | replace a differing state, and clear what was left out: a migration you wrote covers the difference |
 
 ### status
 
 Lists the fixture files, the state file and what the fixture files change that no migration makes,
-then the migrations directory with, when a database is asked, what it applied. Exit 3 when something
-is not migrated, when the directory holds two migrations bun would record under one name, and with
-`-require-applied` when a migration is not applied. Exit 1 when there is no state file and git
-cannot read the fixture files as of `HEAD` (it is not installed, or this is not a repository):
-nothing then says what the files change.
+then the migrations directory with, when a database is asked, what it applied.
+
+Exit 3 when:
+
+- the fixture files change something no migration makes, or the state file records a change
+  `generate -allow-partial` left out;
+- the directory holds two migrations bun would record under one name;
+- with `-require-applied`, a migration is not applied.
+
+Exit 1 when there is no state file and git cannot read the fixture files as of `HEAD` (it is not
+installed, or this is not a repository): nothing then says what the files change.
 
 | Flag | |
 | --- | --- |
@@ -149,7 +159,7 @@ Exit 2 when a finding the policy makes an error, or a difference `generate` woul
 | 0 | done; for `check`, `status` and `plan`: nothing found |
 | 1 | the command could not do its job: a bad flag, no connection, an unreadable file, a plan that could not finish, nothing for `status` to compare the fixture files with |
 | 2 | refused: a difference that needs a hand-written migration, a finding the policy makes an error, a state `baseline` will not replace, a file `export` will not write |
-| 3 | found something: drift (`check`), a change no migration makes or a migration not applied (`status`), a migration that would fail or skip (`plan`) |
+| 3 | found something: drift (`check`), a change no migration makes, a change left out or a migration not applied (`status`), a migration that would fail or skip (`plan`) |
 
 A pipeline can tell "the database drifted" (3) from "the check could not run" (1).
 
@@ -247,6 +257,7 @@ Finding kinds: `duplicate key`, `zero against a default`, `null against a defaul
   "base": "the state after 20260930165255_fixture_plan_prices",
   "uncovered": [],
   "refused": [],
+  "left_out": [],
   "directory": "migrations",
   "migrations": [
     {"id": "20260930165255_fixture_plan_prices", "name": "20260930165255", "fixture": true, "changes": 3,
@@ -259,7 +270,8 @@ Finding kinds: `duplicate key`, `zero against a default`, `null against a defaul
 ```
 
 `applied` is `null` for a pending migration and for all of them without a database; `database` is
-`null` when none was asked.
+`null` when none was asked. `left_out` is the changes `generate -allow-partial` refused and recorded
+in the state file, until `baseline -force`.
 
 ### plan output
 

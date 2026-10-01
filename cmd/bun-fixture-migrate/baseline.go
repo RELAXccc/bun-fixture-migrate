@@ -57,13 +57,20 @@ func baseline(o streams, args []string) error {
 	}
 
 	current, err := fixturemigrate.ReadState(s.statePath)
+	if err == nil && len(current.LeftOut) > 0 && !*force {
+		for _, line := range current.LeftOut {
+			fmt.Fprintln(o.stdout, "left out:", line)
+		}
+		return exitError{2, fmt.Sprintf("the state records %s generate left out, which no migration makes yet. "+
+			"Write their migration by hand, then pass -force", plural(len(current.LeftOut), "change"))}
+	}
 	switch {
 	case errors.Is(err, fixturemigrate.ErrNoState):
 	case err != nil:
 		if !*force {
 			return fmt.Errorf("%w\npass -force to replace it", err)
 		}
-	case fixturemigrate.SameFiles(current.Files, files):
+	case fixturemigrate.SameFiles(current.Files, files) && len(current.LeftOut) == 0:
 		fmt.Fprintf(o.stdout, "%s already records %s\n", s.statePath, source)
 		return nil
 	default:

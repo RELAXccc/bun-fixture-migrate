@@ -5,7 +5,7 @@ The checks worth running, and ready-made jobs for GitHub Actions and GitLab CI. 
 
 | Job | Needs a database | Fails when |
 | --- | --- | --- |
-| `status -offline` | no | a fixture edit came without its migration; two migrations share a name |
+| `status -offline` | no | a fixture edit came without its migration; a change `generate -allow-partial` left out is not migrated; two migrations share a name |
 | `plan -strict` | a copy of production, or production | a pending fixture migration would fail or skip a change |
 | `status -require-applied` | the deployed database | a migration in the directory is not applied |
 | `check` | the deployed database | the database and the fixture file disagree (exit 3) |
