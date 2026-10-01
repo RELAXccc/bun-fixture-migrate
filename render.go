@@ -171,6 +171,9 @@ func Render(cfg *Config, name, stamp string, res *Result) ([]byte, error) {
 		if t.Where != "" {
 			fmt.Fprintf(&b, ", Where: %s", goString(t.Where))
 		}
+		if t.SoftDelete != "" {
+			fmt.Fprintf(&b, ", SoftDelete: %q", t.SoftDelete)
+		}
 		// On a line of its own: the policies are what a reviewer looks
 		// for, and the line would be long.
 		if t.Policy != nil {

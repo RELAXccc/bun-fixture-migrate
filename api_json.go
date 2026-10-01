@@ -57,16 +57,21 @@ type jsonCheckChange struct {
 	New   map[string]any `json:"file,omitempty"`
 	// Hints say, per column, why a value differs where check can tell.
 	Hints map[string]string `json:"hints,omitempty"`
+	// SoftDeleted is, for a row only the files hold, when the database's
+	// newest soft-deleted row holding its key was deleted.
+	SoftDeleted string `json:"soft_deleted,omitempty"`
 }
 
 // jsonLeftAlone is what a comparison left to the database in one model,
 // because the configuration says the database owns it; see LeftAlone.
 type jsonLeftAlone struct {
-	Model   string         `json:"model"`
-	Mode    string         `json:"mode"`
-	Rows    int            `json:"rows"`
-	Changed int            `json:"changed"`
-	Columns map[string]int `json:"columns,omitempty"`
+	Model           string         `json:"model"`
+	Mode            string         `json:"mode"`
+	Rows            int            `json:"rows"`
+	Changed         int            `json:"changed"`
+	Columns         map[string]int `json:"columns,omitempty"`
+	SoftDeleted     int            `json:"soft_deleted,omitempty"`
+	FileSoftDeleted int            `json:"file_soft_deleted,omitempty"`
 }
 
 func jsonLeftAlones(res *Result) []jsonLeftAlone {
@@ -75,7 +80,8 @@ func jsonLeftAlones(res *Result) []jsonLeftAlone {
 		return out
 	}
 	for _, a := range res.LeftAlone {
-		out = append(out, jsonLeftAlone{a.Model, string(a.Mode), a.Rows, a.Changed, a.Columns})
+		out = append(out, jsonLeftAlone{a.Model, string(a.Mode), a.Rows, a.Changed, a.Columns, a.SoftDeleted,
+			a.FileSoftDeleted})
 	}
 	return out
 }
@@ -120,7 +126,7 @@ func (r CheckReport) MarshalJSON() ([]byte, error) {
 		out.Refusals, out.Warnings = jsonRefusals(r.Diff.Refusals), jsonRefusals(r.Diff.Warnings)
 		for i, c := range r.Diff.Changes {
 			out.Changes = append(out.Changes, jsonCheckChange{c.Model, string(c.Kind), jsonValues(c.Key),
-				jsonValues(c.Old), jsonValues(c.New), r.Hints[i]})
+				jsonValues(c.Old), jsonValues(c.New), r.Hints[i], r.Diff.SoftDeleted[i]})
 		}
 	}
 	return json.Marshal(out)

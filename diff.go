@@ -61,9 +61,14 @@ type Result struct {
 	Base, Head string
 	// LeftAlone counts, per model in model order, the differences the
 	// configuration gives to the database (mode upsert and insert, and
-	// insert_only columns), which are no change and no drift. Only a model
-	// with something to count is in it.
+	// insert_only columns), which are no change and no drift, and the rows
+	// soft_delete leaves out. Only a model with something to count is in it.
 	LeftAlone []LeftAlone
+	// SoftDeleted holds, by the index in Changes of an insert, the time the
+	// base, a database, holds the row's natural key soft-deleted since: the
+	// newest such row of a model with a soft_delete. A migration restores it
+	// rather than insert a new row, if it holds the change's values.
+	SoftDeleted map[int]string
 
 	alone map[string]*LeftAlone
 }
@@ -84,6 +89,13 @@ type LeftAlone struct {
 	// Columns is, per insert_only column, how many rows both states hold
 	// with another value in it.
 	Columns map[string]int
+	// SoftDeleted is how many rows of a model with a soft_delete the base, a
+	// database, holds soft-deleted, which are no master data and no drift.
+	SoftDeleted int
+	// FileSoftDeleted is how many rows of the head, the fixture files, set
+	// the soft_delete column: dbfixture seeds them soft-deleted, so they are
+	// no master data either.
+	FileSoftDeleted int
 }
 
 // leftAlone is the count of a model, made on first use.
@@ -114,6 +126,18 @@ func (r *Result) LeftAloneLines() []string {
 		for _, col := range sortedKeysOfCounts(a.Columns) {
 			out = append(out, fmt.Sprintf("%s: %s with another %s in %s, which insert_only leaves to the database",
 				a.Model, plural(a.Columns[col], "row"), col, r.Base))
+		}
+		if a.SoftDeleted > 0 {
+			out = append(out, fmt.Sprintf("%s: %s soft-deleted in %s, which soft_delete leaves out of the master data",
+				a.Model, plural(a.SoftDeleted, "row"), r.Base))
+		}
+		if a.FileSoftDeleted > 0 {
+			verb := "rows of %s are"
+			if a.FileSoftDeleted == 1 {
+				verb = "row of %s is"
+			}
+			out = append(out, fmt.Sprintf("%s: %d "+verb+" soft-deleted (the soft_delete column set) and not master data",
+				a.Model, a.FileSoftDeleted, r.Head))
 		}
 	}
 	return out
@@ -173,7 +197,9 @@ func (r *Result) Summary() []string {
 		if k.upd > 0 {
 			parts = append(parts, plural(k.upd, "update"))
 		}
-		if k.del > 0 {
+		if k.del > 0 && r.Tables[model].SoftDelete != "" {
+			parts = append(parts, plural(k.del, "soft delete"))
+		} else if k.del > 0 {
 			parts = append(parts, plural(k.del, "delete"))
 		}
 		out = append(out, model+": "+strings.Join(parts, ", "))
@@ -538,6 +564,7 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 	res.Changes, notes = orderChanges(cfg, uniqueIndexes(cfg, old, next), renames, deletes, updates, inserts)
 	res.Warnings = append(res.Warnings, notes...)
 	res.Tables = tablesFor(cfg, res.Changes)
+	noteSoftDeleted(res, order, old, next)
 	for _, model := range order {
 		if a := res.alone[model]; a != nil {
 			a.Mode = cfg.Models[model].Mode
@@ -553,6 +580,31 @@ func Compute(cfg *Config, old, next *Snapshot) (*Result, error) {
 		})
 	}
 	return res, nil
+}
+
+// noteSoftDeleted counts the rows soft_delete leaves out of the two states,
+// a database's on the left and the fixture files' on the right, and says of
+// every insert whose key the database holds soft-deleted since when.
+func noteSoftDeleted(res *Result, order []string, old, next *Snapshot) {
+	for _, model := range order {
+		if n := old.softDeleted[model]; n > 0 && old.database {
+			res.leftAlone(model).SoftDeleted = n
+		}
+		if n := next.softDeleted[model]; n > 0 && !next.database {
+			res.leftAlone(model).FileSoftDeleted = n
+		}
+	}
+	for i, c := range res.Changes {
+		if c.Kind != fixturechange.Insert {
+			continue
+		}
+		if at, ok := old.deleted[c.Model][keyString(c.Model, c.Key)]; ok {
+			if res.SoftDeleted == nil {
+				res.SoftDeleted = map[int]string{}
+			}
+			res.SoftDeleted[i] = at
+		}
+	}
 }
 
 // identity settles what happened to a row's name and its id before anything
@@ -1903,12 +1955,15 @@ func tablesFor(cfg *Config, changes []fixturechange.Change) fixturechange.Tables
 	add := func(model string, referenced bool) {
 		m := cfg.Models[model]
 		t := fixturechange.Table{
-			Name:    cfg.RunTimeTable(m.Table),
-			ID:      m.ID,
-			Serial:  m.Serial,
-			Cascade: m.Deletes == DeleteCascade && m.Mode == OwnSync,
-			Where:   m.Where,
-			Policy:  cfg.TablePolicy(model),
+			Name:   cfg.RunTimeTable(m.Table),
+			ID:     m.ID,
+			Serial: m.Serial,
+			// A soft delete reaches no row through a foreign key, whatever
+			// the policy block's deletes says.
+			Cascade:    m.Deletes == DeleteCascade && m.Mode == OwnSync && m.SoftDelete == "",
+			Where:      m.Where,
+			Policy:     cfg.TablePolicy(model),
+			SoftDelete: m.SoftDelete,
 		}
 		if referenced {
 			t.Key = m.Ref

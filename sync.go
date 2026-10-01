@@ -88,6 +88,7 @@ func Sync(ctx context.Context, db *bun.DB, cfg *Config, files []FixtureFile, opt
 	LintColumns(cfg, head, tables)
 	LintZeroDefaults(cfg, head, tables)
 	LintNullDefaults(cfg, head, tables)
+	LintSoftDelete(cfg, head, tables)
 	mode, findings := cfg.Worst(head.Findings)
 	res := &SyncResult{Findings: findings}
 	if mode == ModeError {

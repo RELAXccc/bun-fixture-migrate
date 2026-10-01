@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
@@ -304,6 +305,11 @@ func (ix *index) refByID(model, col, target, id string) (reading, error) {
 // It is read the way the row's own column is, with both readings of a value
 // such as 0012 kept, and the ref column as the one whose type decides.
 func (ix *index) refTo(model, col, text, target string, tm *Model, trow Row) (reading, error) {
+	if at, gone := softDeletedRow(tm, trow); gone {
+		return reading{}, fmt.Errorf("%s.%s: %s points at a row of %s that is soft-deleted (%s = %s), which is no "+
+			"master data: bun loads a soft-deleted row through no relation. Restore it, or point the row elsewhere",
+			model, col, text, target, tm.SoftDelete, at)
+	}
 	c, ok := trow[tm.Ref]
 	if !ok || c.IsNull || scalarText(c) == "" {
 		return reading{}, fmt.Errorf("%s.%s: %s points at a row of %s without a %s", model, col, text, target, tm.Ref)
@@ -372,6 +378,49 @@ func floatReading(c Cell) string {
 	return canon
 }
 
+// softDeletedRow says whether a fixture row sets its model's soft_delete
+// column, with the value: dbfixture writes it as it stands, so the row is
+// seeded soft-deleted (R1). An absent column or a ~ is a live row, and so is
+// the zero time, which zeroTimeRow reports.
+func softDeletedRow(m *Model, row Row) (string, bool) {
+	if m == nil || m.SoftDelete == "" {
+		return "", false
+	}
+	c, ok := row[m.SoftDelete]
+	if !ok || c.IsNull || zeroTime(c.Text) {
+		return "", false
+	}
+	return strings.TrimSpace(c.Text), true
+}
+
+// zeroTimeRow says whether a fixture row's soft_delete column holds the zero
+// time, which means live to a nullzero field and deleted to a pointer one.
+func zeroTimeRow(m *Model, row Row) bool {
+	if m == nil || m.SoftDelete == "" {
+		return false
+	}
+	c, ok := row[m.SoftDelete]
+	return ok && !c.IsNull && zeroTime(c.Text)
+}
+
+// zeroTime reports a value that is Go's zero time.Time, in a spelling YAML or
+// PostgreSQL gives it: 0001-01-01, 0001-01-01T00:00:00Z,
+// 0001-01-01 00:00:00+00.
+func zeroTime(text string) bool {
+	text = strings.TrimSpace(text)
+	if !strings.HasPrefix(text, "0001-") && !strings.HasPrefix(text, "0000-") {
+		return false
+	}
+	for _, layout := range []string{"2006-1-2T15:4:5.999999999Z07:00", "2006-1-2t15:4:5.999999999Z07:00",
+		"2006-1-2 15:4:5.999999999Z07:00", "2006-1-2 15:4:5.999999999Z07", "2006-1-2 15:4:5.999999999 -07:00",
+		"2006-1-2 15:4:5.999999999", "2006-1-2T15:4:5.999999999", "2006-1-2"} {
+		if t, err := time.Parse(layout, text); err == nil {
+			return t.Equal(time.Time{})
+		}
+	}
+	return false
+}
+
 func isZero(v fixturechange.Value) bool {
 	if v.Ref != nil {
 		return false
@@ -396,9 +445,23 @@ func FixtureSnapshot(cfg *Config, doc Doc, source string) (*Snapshot, error) {
 			snap.Entries[dm.Name] = nil
 		}
 		for _, row := range dm.Rows {
+			// dbfixture seeds a row that sets its soft_delete column
+			// soft-deleted, so it is no master data; it is there all the
+			// same, for the rows below it to name.
+			if _, gone := softDeletedRow(m, row); gone {
+				snap.noteSoftDeleted(dm.Name)
+				ix.loaded(dm.Name, m, row)
+				continue
+			}
 			e, err := ix.entry(dm.Name, m, row)
 			if err != nil {
 				return nil, err
+			}
+			if zeroTimeRow(m, row) {
+				snap.Findings = append(snap.Findings, Finding{Kind: FindingAmbiguousValue, Model: dm.Name,
+					Row: e.label(dm.Name), Detail: fmt.Sprintf("%s is the zero time, which a nullzero field "+
+						"writes as NULL, so the row is live, and a pointer field writes as it is, so the row is "+
+						"soft-deleted: write ~ for a live row, or the time it was deleted", m.SoftDelete)})
 			}
 			snap.Entries[dm.Name] = append(snap.Entries[dm.Name], e)
 			ix.loaded(dm.Name, m, row)
@@ -725,4 +788,49 @@ func lintColumns(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table,
 		}
 	}
 	return gone
+}
+
+// LintSoftDelete reports every model whose soft_delete column the table does
+// not have as the tool needs it: a nullable timestamptz or timestamp column,
+// without a default, in which NULL means live. Each is an error whatever the
+// policy says: with any other column, the tool and bun disagree about which
+// rows are live.
+func LintSoftDelete(cfg *Config, snap *Snapshot, tables map[string]*dbschema.Table) {
+	for _, model := range snap.Order {
+		m := cfg.Models[model]
+		if m == nil || m.SoftDelete == "" {
+			continue
+		}
+		table := tables[cfg.QualifiedTable(m)]
+		if table == nil {
+			continue
+		}
+		if problem := softDeleteProblem(m, table); problem != "" {
+			snap.Findings = append(snap.Findings, Finding{Kind: FindingSoftDelete, Model: model, Row: m.SoftDelete,
+				Detail: problem})
+		}
+	}
+}
+
+// softDeleteProblem says what is wrong with a model's soft_delete column in
+// its table, "" for nothing.
+func softDeleteProblem(m *Model, table *dbschema.Table) string {
+	c, ok := table.Column(m.SoftDelete)
+	switch {
+	case !ok:
+		return fmt.Sprintf("soft_delete names %s, which %s does not have", m.SoftDelete, table.Qualified())
+	case c.Type != "timestamptz" && c.Type != "timestamp":
+		return fmt.Sprintf("soft_delete names %s, a %s column, and only a timestamptz or timestamp column, NULL for "+
+			"a live row, works: bun's int64 soft-delete field does not work on PostgreSQL, where it writes a time "+
+			"into the column", m.SoftDelete, c.FullType)
+	case !c.Nullable:
+		return fmt.Sprintf("soft_delete names %s, which is NOT NULL, so no row could be live: bun's soft delete "+
+			"needs a nullable column, NULL for a live row", m.SoftDelete)
+	}
+	if def, ok := c.NonNullDefault(); ok {
+		return fmt.Sprintf("soft_delete names %s, which defaults to %s: bun writes DEFAULT for a nullzero field's "+
+			"zero and for a nil pointer, so every row bun inserts is born soft-deleted. Drop the default",
+			m.SoftDelete, def)
+	}
+	return ""
 }

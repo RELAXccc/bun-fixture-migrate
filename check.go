@@ -153,12 +153,12 @@ func (c *CheckResult) Lines() []string {
 		}
 	}
 
-	var ins, del []fixturechange.Change
-	var upd []int
+	var del []fixturechange.Change
+	var ins, upd []int
 	for i, ch := range c.Changes {
 		switch ch.Kind {
 		case fixturechange.Insert:
-			ins = append(ins, ch)
+			ins = append(ins, i)
 		case fixturechange.Update:
 			upd = append(upd, i)
 		default:
@@ -167,8 +167,9 @@ func (c *CheckResult) Lines() []string {
 	}
 	if len(ins) > 0 {
 		out = append(out, "", "In the fixture file, not in the database:")
-		for _, ch := range ins {
-			out = append(out, "  "+ch.Model+" "+keyLabelOf(ch.Key))
+		for _, i := range ins {
+			ch := c.Changes[i]
+			out = append(out, "  "+ch.Model+" "+keyLabelOf(ch.Key)+softDeletedNote(c.SoftDeleted, i))
 		}
 	}
 	if len(del) > 0 {
@@ -203,6 +204,17 @@ func (c *CheckResult) Lines() []string {
 		}
 	}
 	return out[1:]
+}
+
+// softDeletedNote is what check adds to a row the fixture files hold and the
+// database holds soft-deleted, by the change's index: when it was deleted,
+// and that a migration brings it back.
+func softDeletedNote(deleted map[int]string, i int) string {
+	at, ok := deleted[i]
+	if !ok {
+		return ""
+	}
+	return " (soft-deleted there at " + at + "; a migration restores it)"
 }
 
 func keyLabelOf(key fixturechange.Values) string {
