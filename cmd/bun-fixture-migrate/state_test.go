@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
 )
 
 func migrationsOf(t *testing.T, cfg string) []string {
@@ -335,5 +337,31 @@ func TestWhatAPartialGenerateLeftOutStaysVisible(t *testing.T) {
 	}
 	if code, out, errs := call(t, "status", "-config", cfg, "-offline"); code != 0 {
 		t.Fatalf("exit %d\n%s%s", code, out, errs)
+	}
+}
+
+// A fixture file edited without a change to any value, a comment here, is no
+// migration; the state takes the new text, so it stays the file verbatim.
+func TestGenerateRecordsAnEditThatChangesNoValue(t *testing.T) {
+	cfg, _ := project(t, oldFixture, oldFixture)
+	if code, _, errs := call(t, "baseline", "-config", cfg); code != 0 {
+		t.Fatal(errs)
+	}
+	commented := "# Plans and the currencies they are sold in.\n" + oldFixture
+	writeFixture(t, cfg, commented)
+	code, out, errs := call(t, "generate", "-config", cfg, "-name", "x", "-dry-run")
+	if code != 0 || strings.Contains(out, "wrote") {
+		t.Fatalf("a dry run writes nothing: exit %d\n%s%s", code, out, errs)
+	}
+	code, out, errs = call(t, "generate", "-config", cfg, "-name", "x")
+	if code != 0 || !strings.Contains(out, "nothing changed") || !strings.Contains(out, "only in how it is written") {
+		t.Fatalf("exit %d\n%s%s", code, out, errs)
+	}
+	if len(migrationsOf(t, cfg)) != 0 {
+		t.Fatal("no migration for no change")
+	}
+	state, err := fixturemigrate.ReadState(filepath.Join(filepath.Dir(cfg), "migrations", "fixture_state.yml"))
+	if err != nil || string(state.Files[0].Data) != commented || state.Migration != "baseline" {
+		t.Fatalf("%v %+v", err, state)
 	}
 }

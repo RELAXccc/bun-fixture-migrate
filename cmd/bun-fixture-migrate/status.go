@@ -11,6 +11,7 @@ import (
 	"time"
 
 	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
+	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
 
 	"github.com/uptrace/bun"
 )
@@ -81,17 +82,23 @@ func status(o streams, args []string) error {
 	if err != nil {
 		return err
 	}
-	if *required && (*offline || s.cfg.Database == "") {
+	useDB := !*offline && s.cfg.Database != ""
+	if *required && !useDB {
 		return fmt.Errorf("-require-applied needs the database")
 	}
 	r := &statusReport{Fixture: s.cfg.FixtureLabel(), Directory: s.outDir}
-	if err := s.uncovered(r); err != nil {
+	_, head, err := s.readFixture()
+	if err != nil {
+		return err
+	}
+	old, err := s.statusBase(r)
+	if err != nil {
 		return err
 	}
 
-	var ms *fixturemigrate.Migrations
 	if s.outDir != "" {
-		if ms, err = fixturemigrate.ReadMigrations(s.outDir); err != nil {
+		ms, err := fixturemigrate.ReadMigrations(s.outDir)
+		if err != nil {
 			return fmt.Errorf("the migrations directory: %w", err)
 		}
 		r.Problems = append(r.Problems, ms.Problems...)
@@ -106,7 +113,8 @@ func status(o streams, args []string) error {
 		r.Notes = append(r.Notes, "no out directory in the configuration, so no migrations to list")
 	}
 
-	if !*offline && s.cfg.Database != "" {
+	var res *fixturemigrate.Result
+	if useDB {
 		db, err := s.connect(o.ctx)
 		if err != nil {
 			return err
@@ -115,6 +123,11 @@ func status(o streams, args []string) error {
 		var applied map[string]fixturemigrate.Applied
 		info := &databaseInfo{Table: s.cfg.MigrationsTable}
 		err = readOnly(o.ctx, db, func(tx bun.Tx) error {
+			if old != nil {
+				if res, err = s.uncoveredInDB(o, tx, r, old, head); err != nil {
+					return err
+				}
+			}
 			applied, info.TableExists, err = fixturemigrate.ReadApplied(o.ctx, tx, s.cfg.MigrationsTable)
 			return err
 		})
@@ -135,6 +148,16 @@ func status(o streams, args []string) error {
 			}
 		}
 		sort.Strings(info.NotInDirectory)
+	} else if old != nil {
+		if res, err = fixturemigrate.Compute(s.cfg, old, head); err != nil {
+			return err
+		}
+	}
+	if res != nil {
+		r.Uncovered = res.Summary()
+		for _, ref := range res.Refusals {
+			r.Refused = append(r.Refused, ref.String())
+		}
 	}
 
 	if *asJSON {
@@ -184,31 +207,27 @@ func status(o streams, args []string) error {
 	return nil
 }
 
-// uncovered works out what the fixture file changes against the state the
-// migrations leave a database in: the same base generate would use.
-func (s *setup) uncovered(r *statusReport) error {
-	_, head, err := s.readFixture()
-	if err != nil {
-		return err
-	}
+// statusBase reads what the fixture file is compared with: the state file, or
+// git's HEAD while there is none, the base generate would use. With neither
+// there is nothing to say what the fixture file changes, and a gate that
+// passes on that would pass anything.
+func (s *setup) statusBase(r *statusReport) (*fixturemigrate.Snapshot, error) {
 	var files []fixturemigrate.FixtureFile
 	found := false
 	if s.statePath != "" {
 		r.State = &stateInfo{Path: s.statePath}
-		state, err := fixturemigrate.ReadState(s.statePath)
+		read, err := fixturemigrate.ReadState(s.statePath)
 		switch {
 		case err == nil:
-			r.State.Exists, r.State.Migration = true, state.Migration
-			r.LeftOut = state.LeftOut
-			files, r.Base, found = state.Files, "the state file", true
+			r.State.Exists, r.State.Migration = true, read.Migration
+			r.LeftOut = read.LeftOut
+			files, r.Base, found = read.Files, "the state file", true
 		case errors.Is(err, fixturemigrate.ErrNoState):
 		default:
 			r.Problems = append(r.Problems, err.Error())
-			return nil
+			return nil, nil
 		}
 	}
-	// With neither a state file nor git's HEAD there is nothing to say what the
-	// fixture file changes, and a gate that passes on that would pass anything.
 	if !found {
 		gitFiles, err := s.gitFiles("HEAD")
 		if err != nil {
@@ -223,26 +242,42 @@ func (s *setup) uncovered(r *statusReport) error {
 			case strings.Contains(why, "is not in a git repository"):
 				why = "it is not in a git repository"
 			}
-			return fmt.Errorf("%s, and git cannot say what %s was at HEAD: %s. So nothing says what the "+
+			return nil, fmt.Errorf("%s, and git cannot say what %s was at HEAD: %s. So nothing says what the "+
 				"fixture file changes, and status will not pass it. Run bun-fixture-migrate baseline once the "+
 				"databases hold it, or run status where git is installed and the fixture file is committed",
 				where, s.cfg.FixtureLabel(), why)
 		}
 		files, r.Base = gitFiles, "HEAD"
 	}
-	old, err := s.snapshotOf(files, r.Base)
+	return s.snapshotOf(files, r.Base)
+}
+
+// uncoveredInDB works out what the fixture file changes with both sides
+// respelled by the database, as generate does, so a value written 1.10 in one
+// and 1.1 in the other of a numeric column is no change. It says so when
+// that is all there is, because status -offline cannot tell until the state
+// file has the new spelling.
+func (s *setup) uncoveredInDB(o streams, tx bun.Tx, r *statusReport, old, head *fixturemigrate.Snapshot) (*fixturemigrate.Result, error) {
+	offline, err := fixturemigrate.Compute(s.cfg, old, head)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	tables, err := dbschema.Load(o.ctx, tx, s.cfg.Schema)
+	if err != nil {
+		return nil, err
+	}
+	if err := canonical(o, tx, s.cfg, tables, head, old); err != nil {
+		return nil, err
 	}
 	res, err := fixturemigrate.Compute(s.cfg, old, head)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	r.Uncovered = res.Summary()
-	for _, ref := range res.Refusals {
-		r.Refused = append(r.Refused, ref.String())
+	if len(res.Changes)+len(res.Refusals) == 0 && len(offline.Changes)+len(offline.Refusals) > 0 {
+		r.Notes = append(r.Notes, "the fixture file differs from "+r.Base+" only in how values are written, which "+
+			"status -offline cannot tell from a change; run bun-fixture-migrate generate to record the new spelling")
 	}
-	return nil
+	return res, nil
 }
 
 func printStatus(o streams, r *statusReport) {

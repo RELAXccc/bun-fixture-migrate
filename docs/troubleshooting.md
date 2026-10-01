@@ -134,16 +134,24 @@ run `status` in a checkout with git.
 
 **`baseline would record N changes as migrated with no migration to make them`.** The fixture file
 differs from the state, and no migration covers it. Run `generate`. Pass `-force` only when you
-wrote the migration yourself.
+wrote the migration yourself. A value written another way, `1.10` for `1.1` in a numeric column, is
+not counted when a database is configured: `baseline` asks it, unless `-offline`.
 
 **`left out`** (`status`, exit 3) **/ `the state records N changes generate left out`** (`baseline`,
 exit 2). `generate -allow-partial` wrote the rest of a change and recorded these in the state file.
 Write their migration by hand, then `baseline -force`.
 
+**`the fixture file differs from the state file only in how values are written`** (`status` note).
+A value is spelled differently, `1.10` for `1.1` in a numeric column, which only the database can
+tell from a change; `status -offline` fails on it until the state file has the new spelling. Run
+`generate`: it writes no migration and records the new spelling.
+
 ## Generating
 
 **`nothing changed in fixtures/fixture.yml since the state after ...`.** The file and the state agree.
-If you expected a change, check the file was saved, and that `status -offline` agrees.
+If you expected a change, check the file was saved, and that `status -offline` agrees. When the file
+differs from the state only in comments or in how values are written, `generate` says it wrote the
+state file with the new text.
 
 **`warning: migration 3_backfill sorts after 20260930165255, so bun runs it after this one`.** bun
 orders migrations by name as strings. A migration named with a short number sorts after every

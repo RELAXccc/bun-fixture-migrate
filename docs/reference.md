@@ -21,7 +21,7 @@ paths in it are relative to it. Every command takes `-h`.
 | `export` | reads | the fixture files |
 | `check` | reads | nothing |
 | `generate` | reads with `-from-db`, and to lint when one is configured | a migration, the state file |
-| `baseline` | none | the state file |
+| `baseline` | reads, unless `-offline`, when one is configured and the files differ from the state | the state file |
 | `status` | reads unless `-offline` or none is configured | nothing |
 | `plan` | writes, and rolls back | nothing |
 | `sync` | writes with `-yes` | the database |
@@ -84,6 +84,11 @@ state file on. The base is the state file; while there is none, git's `HEAD`.
 The migration is named one second after the newest migration in the directory, never earlier than
 now and never the name of another one. A migration whose name sorts after it is warned about.
 
+With a database configured, both sides are respelled by it first, so a value written two ways (`1.10`
+and `1.1` in a numeric column) is no change. When the fixture files differ from the state file but
+change no value, nothing is generated and the state file takes the new text, so `status -offline`
+agrees.
+
 With `-allow-partial`, the refused changes are recorded in the state file as left out: the next
 `generate` does not see them again, and `status` fails on them until `baseline -force`.
 
@@ -91,19 +96,23 @@ With `-allow-partial`, the refused changes are recorded in the state file as lef
 
 Records the fixture files, as they are, as what the migrations leave a database holding. A state
 that differs in content is only replaced with `-force` (exit 2 otherwise), because recording a change
-nobody migrated is how a change gets lost. A state that records changes `generate -allow-partial`
-left out is replaced only with `-force` too.
+nobody migrated is how a change gets lost. A difference only the column types can settle, such as
+`1.10` against `1.1`, is asked of the database when one is configured, as `generate` asks it: when it
+is no change, the state is replaced without `-force`. A state that records changes
+`generate -allow-partial` left out is replaced only with `-force` too.
 
 | Flag | |
 | --- | --- |
 | `-from <rev>` | record the fixture files as of a git revision |
 | `-old <file>` | record this file |
 | `-force` | replace a differing state, and clear what was left out: a migration you wrote covers the difference |
+| `-offline` | do not ask the database whether a difference is only in how values are written |
 
 ### status
 
 Lists the fixture files, the state file and what the fixture files change that no migration makes,
-then the migrations directory with, when a database is asked, what it applied.
+then the migrations directory with, when a database is asked, what it applied. With a database, both
+sides are respelled by it first, as `generate` does; a difference that is only spelling is a note.
 
 Exit 3 when:
 

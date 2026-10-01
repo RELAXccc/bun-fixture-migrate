@@ -62,6 +62,7 @@ func generate(o streams, args []string) error {
 	}
 
 	var old *fixturemigrate.Snapshot
+	fromState := false
 	if *fromDB {
 		db, err := s.connect(o.ctx)
 		if err != nil {
@@ -93,6 +94,7 @@ func generate(o streams, args []string) error {
 		if err != nil {
 			return err
 		}
+		fromState = *oldPath == "" && *base == "" && prev != nil
 		if old, err = s.snapshotOf(files, source); err != nil {
 			return err
 		}
@@ -136,6 +138,19 @@ func generate(o streams, args []string) error {
 			return refused(len(res.Refusals))
 		}
 		fmt.Fprintf(o.stdout, "nothing changed in %s since %s\n", s.cfg.FixtureLabel(), res.Base)
+		// The file was edited without changing a value: a comment, or a value
+		// written another way, 1.1 for 1.10 in a numeric column. The state
+		// takes the new text, or status -offline, which cannot tell such a
+		// spelling from a change, would fail on it until the next migration.
+		if fromState && !*dryRun && !fixturemigrate.SameFiles(prev.Files, headData) {
+			next := *prev
+			next.Files = headData
+			if err := fixturemigrate.WriteState(s.statePath, next); err != nil {
+				return err
+			}
+			fmt.Fprintf(o.stdout, "wrote %s: %s differs from it only in how it is written, which the state now "+
+				"records too\n", s.statePath, s.cfg.FixtureLabel())
+		}
 		noteLeftOut(o, prev)
 		return nil
 	}
