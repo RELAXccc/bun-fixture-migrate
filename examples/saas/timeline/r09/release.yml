@@ -1,0 +1,70 @@
+description: |
+  The category tree is rearranged. The integrations root becomes the platform
+  root: its slug changes under renames: update, so its children keep pointing
+  at it. The analytics subtree (analytics, dashboards, exports) moves under it;
+  only the subtree root's parent changes. A developer tools root with an SDKs
+  child is added. In production an admin renames the dashboards category
+  meanwhile, which check reports as drift after the deploy. Production is
+  deployed from three replicas at once: bun's migrator lock does not wait, so
+  the application retries it (SAAS_LOCK_WAIT), and exactly one replica
+  migrates. The probe moves the API subtree under the new developer tools
+  category instead, which every command that reads the database then fails on.
+steps:
+  - overlay: .
+  - generate: {name: platform categories, at: "20260824100000"}
+    output: ["Category: 2 inserts, 3 updates"]
+deploy: [prod]
+replicas: 3
+before_deploy:
+  prod:
+    - UPDATE categories SET name = 'Dashboards & reports' WHERE slug = 'dashboards'
+plan:
+  - cli: [plan, -strict]
+    env: prod
+    output:
+      - "applied Category slug=integrations update (1 row)"
+      - "applied Category slug=developer-tools insert (1 row)"
+      - "applied Category slug=analytics update (1 row)"
+  # A replica is in the middle of a deploy, or died in one: bun's lock row
+  # is there. bun's Lock fails at once rather than wait for it.
+  - sql: INSERT INTO bun_migration_locks (table_name) VALUES ('bun_migrations')
+    env: prod
+  - app: [migrate]
+    env: prod
+    vars: [SAAS_LOCK_WAIT=0]
+    exit: 1
+    known: "F7: bun's migrator lock does not wait, and a crashed deploy leaves it taken; main.go retries it, and status reports a lock left behind"
+    output: ["migrate: migrations table is already locked"]
+  - sql: DELETE FROM bun_migration_locks
+    env: prod
+expect:
+  check:
+    prod:
+      exit: 3
+      output: ["Category slug=dashboards", "name: database Dashboards & reports, file Dashboards"]
+probes:
+  # A subtree moved under a category numbered after it: the database snapshot
+  # reads the tree whatever the order of its ids, and export writes parents
+  # first, so dbfixture can load what it wrote.
+  - name: the API subtree under a new category
+    from: start
+    when: before-deploy
+    clone: prod
+    steps:
+      - overlay: probe-api-subtree
+      - generate: {name: developer tools, at: "20260824100000"}
+        env: prod
+        output: ["Category: 1 insert, 1 update"]
+      - app: [migrate]
+        env: clone
+        output: ["Category slug=api update: applied (1 row)"]
+      # Only the admin's rename of dashboards, which this release leaves to
+      # the next one.
+      - cli: [check]
+        env: clone
+        exit: 3
+        output: ["Category slug=dashboards", "name: database Dashboards & reports, file Dashboards"]
+        absent: ["does not hold"]
+      - cli: [export, -stdout]
+        env: clone
+        absent: ["does not hold"]

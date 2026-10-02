@@ -17,12 +17,14 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
 
 	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
 	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
+	"github.com/RELAXccc/bun-fixture-migrate/fixtureapply"
 
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dbfixture"
@@ -138,11 +140,25 @@ func loadFixture(t *testing.T, db *bun.DB, text string) {
 	}
 	// dbfixture writes explicit ids straight past the sequence, so the next
 	// ordinary insert would reuse one. Every seeder has to do this.
-	if _, err := db.ExecContext(context.Background(),
-		"SELECT setval(pg_get_serial_sequence('items', 'id'), GREATEST((SELECT COALESCE(MAX(id), 0) FROM items), 1))"); err != nil {
+	var tables []string
+	if err := db.NewRaw("SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "+
+		"WHERE n.nspname = 'public' AND c.relkind = 'r'").Scan(context.Background(), &tables); err != nil {
+		t.Fatal(err)
+	}
+	var plain []string
+	for _, table := range tables {
+		if identifier.MatchString(table) {
+			plain = append(plain, table)
+		}
+	}
+	if _, err := fixtureapply.SyncSequences(context.Background(), db, plain...); err != nil {
 		t.Fatal(err)
 	}
 }
+
+// identifier is a table name SyncSequences takes; other tests leave tables
+// with names built to break quoting behind.
+var identifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_$]*$`)
 
 func schemaOf(t *testing.T, db *bun.DB) map[string]*dbschema.Table {
 	t.Helper()
@@ -457,8 +473,25 @@ func TestARefValueTwoRowsShareIsReported(t *testing.T) {
 	if found == nil {
 		t.Fatalf("expected the shared code to be reported, got %+v", snap.Findings)
 	}
-	if !strings.Contains(found.Detail, "1, 3") || !strings.Contains(found.Detail, "unique index") {
+	if !strings.Contains(found.Detail, "2 rows share this code (1, 3)") || !strings.Contains(found.Detail, "unique index") {
 		t.Fatalf("the finding names the colliding rows and the cure: %s", found.Detail)
+	}
+}
+
+// Rows are read in the order of their ids as numbers: 9 before 10. The id is
+// selected as text, and an ORDER BY naming it bare sorted that text, 10
+// before 9, which put a child before its parent in an export and changed the
+// order of every exported file once ids reached two digits.
+func TestTheDatabaseIsReadInTheOrderOfItsIDs(t *testing.T) {
+	db := itemDB(t)
+	run(t, db, "INSERT INTO regions (id, code, name) VALUES (10, 'X', 'ten'), (9, 'N', 'nine'), (2, 'B', 'two'), (1, 'A', 'one')")
+	snap := databaseSnapshot(t, db, itemConfig(t), fixturemigrate.SnapshotOptions{})
+	var ids []string
+	for _, e := range snap.Entries["Region"] {
+		ids = append(ids, e.ID)
+	}
+	if got := strings.Join(ids, ","); got != "1,2,9,10" {
+		t.Fatalf("read in the order %s", got)
 	}
 }
 
@@ -496,3 +529,27 @@ func itoa(v int64) string { return strconv.FormatInt(v, 10) }
 func ftoa(v float64) string { return strconv.FormatFloat(v, 'g', -1, 64) }
 
 func btoa(v bool) string { return strconv.FormatBool(v) }
+
+// A row with two dangling references is reported for the same one on every
+// run, the first by column name.
+func TestADanglingReferenceIsReportedTheSameEveryTime(t *testing.T) {
+	db := connect(t)
+	run(t, db, "DROP TABLE IF EXISTS dangles, dangle_targets",
+		"CREATE TABLE dangle_targets (id bigint PRIMARY KEY, name text UNIQUE NOT NULL)",
+		"CREATE TABLE dangles (id bigint PRIMARY KEY, name text UNIQUE NOT NULL, a_id bigint, b_id bigint)",
+		"INSERT INTO dangles VALUES (1, 'x', 7, 8)")
+	cfg := &fixturemigrate.Config{Schema: "public", Models: map[string]*fixturemigrate.Model{
+		"Target": {Table: "dangle_targets"},
+		"Dangle": {Table: "dangles", References: map[string]string{"a_id": "Target", "b_id": "Target"}},
+	}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	tables := schemaOf(t, db)
+	for i := 0; i < 20; i++ {
+		_, err := fixturemigrate.DatabaseSnapshot(context.Background(), db, cfg, tables, fixturemigrate.SnapshotOptions{})
+		if err == nil || !strings.Contains(err.Error(), "a_id = 7") {
+			t.Fatalf("run %d: expected a_id to be named, got %v", i, err)
+		}
+	}
+}

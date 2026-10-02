@@ -1,0 +1,65 @@
+description: |
+  A hotfix, applied by hand. Austria halves its reduced VAT rate from
+  1 August, announced three weeks ahead, and the next deploy window is after
+  that. The developer generates the migration as always; ops run it against
+  production with apply, first without -yes, which plans it, then with -yes
+  -record, which applies it and writes bun's record of it in one transaction,
+  under bun's own lock: tried while a deploy holds that lock, it refuses and
+  changes nothing. The regular deploy then finds nothing to run in production,
+  and staging, two releases behind, gets the same migration from the migrator.
+steps:
+  - overlay: .
+  - generate: {name: austrian reduced vat, at: "20270720100000"}
+    output: ["TaxRate: 1 insert, 1 update"]
+deploy: [prod, staging]
+plan:
+  - cli: [apply, -file, migrations/20270720100000_fixture_austrian_reduced_vat.go]
+    env: prod
+    output:
+      - "20270720100000_fixture_austrian_reduced_vat: would succeed"
+      - "applied TaxRate country_id=Country(AT),tax_class=reduced,valid_from=1984-01-01 update (1 row)"
+      - "applied TaxRate country_id=Country(AT),tax_class=reduced,valid_from=2027-08-01 insert (1 row)"
+  # A deploy is migrating, or one died holding bun's lock.
+  - sql: INSERT INTO bun_migration_locks (table_name) VALUES ('bun_migrations')
+    env: prod
+  - cli: [apply, -file, migrations/20270720100000_fixture_austrian_reduced_vat.go, -yes, -record]
+    env: prod
+    exit: 2
+    output: ["bun_migration_locks holds the lock on bun_migrations"]
+  - cli: [status]
+    env: prod
+    exit: 3
+    output: ["locked"]
+  - sql: DELETE FROM bun_migration_locks
+    env: prod
+  - cli: [apply, -file, migrations/20270720100000_fixture_austrian_reduced_vat.go, -yes, -record]
+    env: prod
+    output:
+      - "applied TaxRate country_id=Country(AT),tax_class=reduced,valid_from=2027-08-01 insert (1 row)"
+      - "recorded"
+  - cli: [status, -require-applied]
+    env: prod
+    output: ["20270720100000_fixture_austrian_reduced_vat: applied"]
+  # Once is enough: a second -record is refused.
+  - cli: [apply, -file, migrations/20270720100000_fixture_austrian_reduced_vat.go, -yes, -record]
+    env: prod
+    exit: 2
+    output: ["is recorded in bun_migrations already"]
+expect:
+  migrate:
+    prod:
+      output: ["no migrations to run"]
+    staging:
+      output:
+        - "20270705100000_fixture_autumn_campaign"
+        - "20270720100000_fixture_austrian_reduced_vat"
+after:
+  # Between this release and the next, production is edited by hand.
+  - sql: >-
+      UPDATE catalog.categories SET name = '{"en": "Kids & teens", "de": "Kinder & Jugendliche", "fr": "Enfant"}'
+      WHERE slug = 'kids'
+    env: prod
+  - sql: UPDATE sender_identities SET display_name = 'Shop news' WHERE code = 'newsletter'
+    env: prod
+  - sql: UPDATE menu_items SET url = '/returns' WHERE menu = 'footer' AND slug = 'returns'
+    env: prod

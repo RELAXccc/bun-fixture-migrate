@@ -1,0 +1,101 @@
+name: bun-fixture-migrate
+description: >-
+  Run a bun-fixture-migrate command in a workflow: status to fail a pull request whose fixture
+  file has changes no migration makes, plan to dry-run the pending fixture migrations against a
+  database, check to report drift.
+author: RELAXccc
+branding:
+  icon: database
+  color: blue
+
+inputs:
+  command:
+    description: >-
+      The command to run: status, check, plan, generate, baseline, export, sync or version.
+    required: true
+  args:
+    description: >-
+      Further arguments, split on whitespace, for example "-offline -json". Quote nothing: an
+      argument with a space in it cannot be passed this way.
+    required: false
+    default: ""
+  config:
+    description: >-
+      The configuration file, relative to working-directory. Empty leaves it to the command:
+      $BUN_FIXTURE_MIGRATE_CONFIG when the job sets it, else fixture-migrate.yml.
+    required: false
+    default: ""
+  working-directory:
+    description: The directory the command runs in, usually where the configuration sits.
+    required: false
+    default: .
+  version:
+    description: >-
+      The version to install with go install, for example v1.2.0 or latest. Empty builds the
+      command from the checkout of the action itself, which is the version the workflow's
+      "uses:" line names.
+    required: false
+    default: ""
+  go-version:
+    description: >-
+      The Go version to set up. Empty uses the Go already on the runner, which has to be 1.24 or
+      newer.
+    required: false
+    default: ""
+
+outputs:
+  exit-code:
+    description: >-
+      The command's exit code: 0 for success, 2 for a refusal, 3 for a check that found
+      something, 1 for anything else. The step fails unless it is 0.
+    value: ${{ steps.run.outputs.exit-code }}
+
+runs:
+  using: composite
+  steps:
+    - if: inputs.go-version != ''
+      uses: actions/setup-go@v6
+      with:
+        go-version: ${{ inputs.go-version }}
+        cache: false
+
+    # Inputs reach the scripts through the environment, never by being pasted
+    # into the script text, so a value holding a quote or a $( ) stays a value.
+    - name: install bun-fixture-migrate
+      shell: bash
+      env:
+        BFM_VERSION: ${{ inputs.version }}
+        BFM_SOURCE: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        bin="$RUNNER_TEMP/bun-fixture-migrate-bin"
+        mkdir -p "$bin"
+        if [ -n "$BFM_VERSION" ]; then
+          GOBIN="$bin" go install "github.com/RELAXccc/bun-fixture-migrate/cmd/bun-fixture-migrate@$BFM_VERSION"
+        else
+          (cd "$BFM_SOURCE" && go build -trimpath -o "$bin/bun-fixture-migrate" ./cmd/bun-fixture-migrate)
+        fi
+        echo "$bin" >> "$GITHUB_PATH"
+        "$bin/bun-fixture-migrate" version
+
+    - id: run
+      name: bun-fixture-migrate ${{ inputs.command }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        BFM_COMMAND: ${{ inputs.command }}
+        BFM_ARGS: ${{ inputs.args }}
+        BFM_CONFIG: ${{ inputs.config }}
+      # -config only when the input names one, so that a job's
+      # BUN_FIXTURE_MIGRATE_CONFIG is the command's default as everywhere else.
+      run: |
+        set -uo pipefail
+        read -r -a extra <<< "$BFM_ARGS" || true
+        case "$BFM_COMMAND" in
+          version) set -- version ;;
+          *) set -- "$BFM_COMMAND" ${BFM_CONFIG:+-config "$BFM_CONFIG"} "${extra[@]}" ;;
+        esac
+        code=0
+        "$RUNNER_TEMP/bun-fixture-migrate-bin/bun-fixture-migrate" "$@" || code=$?
+        echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+        exit "$code"

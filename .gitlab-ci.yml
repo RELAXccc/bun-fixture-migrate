@@ -1,0 +1,153 @@
+# The checks of .github/workflows/test.yml, for a mirror of this repository on
+# GitLab, plus a run of the job templates in ci/gitlab that projects include.
+
+stages: [lint, test]
+
+variables:
+  # The Go an image carries is the Go a job tests with; see the GitHub
+  # workflow for why.
+  GOTOOLCHAIN: local
+  GOPATH: $CI_PROJECT_DIR/.go
+  GOFLAGS: -modcacherw
+  POSTGRES_PASSWORD: pg
+  BUN_FIXTURE_MIGRATE_POSTGRES: postgres://postgres:pg@postgres:5432/postgres?sslmode=disable
+
+default:
+  image: golang:1.24
+  cache:
+    key:
+      files: [go.sum, dbtest/go.sum]
+    paths: [.go/pkg/mod/]
+  interruptible: true
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+
+.postgres:
+  services:
+    - name: postgres:$PG_VERSION
+      alias: postgres
+
+lint:
+  stage: lint
+  script:
+    # The module cache lives in the project directory, so only the files git
+    # tracks are checked.
+    - unformatted=$(git ls-files '*.go' | xargs gofmt -l)
+    - if [ -n "$unformatted" ]; then echo "not gofmt-clean:"; echo "$unformatted"; exit 1; fi
+    - go mod tidy -diff
+    - for m in examples/basic examples/saas examples/commerce; do (cd "$m" && go mod tidy -diff); done
+    - for m in . dbtest examples/basic examples/saas examples/commerce; do (cd "$m" && go vet ./...); done
+    - go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
+    - for m in . dbtest examples/basic examples/saas examples/commerce; do (cd "$m" && "$GOPATH/bin/staticcheck" ./...); done
+
+# govulncheck reports the standard library of the Go it runs under, and only
+# supported releases get fixes, so it runs under the current one.
+vulncheck:
+  stage: lint
+  image: golang:1
+  script:
+    # Unpinned on purpose: govulncheck has to understand the Go it runs under.
+    - go install golang.org/x/vuln/cmd/govulncheck@latest
+    - for m in . examples/basic examples/saas examples/commerce; do (cd "$m" && "$GOPATH/bin/govulncheck" ./...); done
+
+unit:
+  stage: test
+  image: golang:$GO_VERSION
+  parallel:
+    matrix:
+      - GO_VERSION: ["1.24", "1.26", "1"]
+  script:
+    - go test -race -coverprofile=coverage.out ./...
+    - go tool cover -func=coverage.out | tail -1
+  coverage: '/total:\s+\(statements\)\s+(\d+\.\d+)%/'
+
+fuzz:
+  stage: test
+  image: golang:1
+  script:
+    - for pkg in . ./cmd/bun-fixture-migrate; do for target in $(go test -list '^Fuzz' "$pkg" | grep '^Fuzz'); do go test -run '^$' -fuzz "^${target}\$" -fuzztime 20s "$pkg" || exit 1; done; done
+  artifacts:
+    when: on_failure
+    paths: [testdata/fuzz/, cmd/bun-fixture-migrate/testdata/fuzz/]
+
+postgres:
+  stage: test
+  extends: .postgres
+  image: golang:$GO_VERSION
+  parallel:
+    matrix:
+      - PG_VERSION: ["12", "13", "14", "15", "16", "17", "18"]
+        BUN_FIXTURE_MIGRATE_DRIVER: pgdriver
+        GO_VERSION: "1"
+      - PG_VERSION: ["12", "18"]
+        BUN_FIXTURE_MIGRATE_DRIVER: pgx
+        GO_VERSION: "1"
+      - PG_VERSION: "18"
+        BUN_FIXTURE_MIGRATE_DRIVER: pgdriver
+        GO_VERSION: "1.24"
+  script:
+    - cd dbtest
+    - go test -race ./...
+
+# The next PostgreSQL release, from its first beta: allowed to fail until it
+# ships.
+postgres next:
+  extends: postgres
+  parallel:
+    matrix:
+      - PG_VERSION: 19beta4
+        BUN_FIXTURE_MIGRATE_DRIVER: pgdriver
+        GO_VERSION: "1"
+  allow_failure: true
+
+# bun's master branch: every premise the tool rests on has a test, so a change
+# upstream shows here before it ships. The cause of a failure is outside this
+# repository, but it is still the signal to read.
+bun-master:
+  stage: test
+  extends: .postgres
+  image: golang:1
+  allow_failure: true
+  variables:
+    PG_VERSION: "18"
+    GOTOOLCHAIN: auto
+  script:
+    - bun="github.com/uptrace/bun@master github.com/uptrace/bun/dialect/pgdialect@master github.com/uptrace/bun/driver/pgdriver@master"
+    - go get $bun && go mod tidy
+    - for m in dbtest examples/basic examples/saas examples/commerce; do (cd "$m" && go get $bun github.com/uptrace/bun/dbfixture@master && go mod tidy); done
+    - go vet ./... && go test -race ./...
+    - cd dbtest && go vet ./... && go test -race ./...
+
+include:
+  - local: ci/gitlab/bun-fixture-migrate.gitlab-ci.yml
+
+# The templates, as a project would extend them, on the example project and
+# with the command built from this checkout.
+.example:
+  stage: test
+  variables:
+    BFM_SOURCE: $CI_PROJECT_DIR
+    BFM_DIR: examples/basic
+
+template status:
+  extends: [.bun-fixture-migrate:status, .example]
+
+template deploy and check:
+  extends: [.bun-fixture-migrate:check, .postgres, .example]
+  variables:
+    PG_VERSION: "18"
+    DATABASE_URL: postgres://postgres:pg@postgres:5432/postgres?sslmode=disable
+  script:
+    - (cd examples/basic && go run . migrate)
+    - cd "$BFM_DIR"
+    - bun-fixture-migrate status -require-applied
+    - bun-fixture-migrate check
+  # Drift is a warning in the template; here the database was just seeded, so
+  # anything but a clean check is a failure.
+  allow_failure: false

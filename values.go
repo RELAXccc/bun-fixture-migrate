@@ -1,0 +1,724 @@
+package fixturemigrate
+
+import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"math/big"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
+
+	"gopkg.in/yaml.v3"
+)
+
+// A value's text is what gets compared and what a migration writes, so it has
+// to be exactly the value, spelled one way.
+//
+// For a fixture scalar the YAML type decides, because that is what decides
+// what dbfixture hands bun: a string is kept byte for byte, so "01234" stays a
+// postcode and "  x  " keeps its spaces; an integer is resolved the way YAML
+// resolves it, so 017 is 15 and 0x1F is 31, as dbfixture stores them; a
+// decimal is written out exactly, never through float64, so 9007199254740993
+// stays itself. On the database side the column type decides: numbers are
+// written the same way, everything else is PostgreSQL's own text.
+
+// scalarText is the text of a fixture scalar by its YAML type.
+func scalarText(c Cell) string {
+	switch c.Tag {
+	case "!!int":
+		if s, ok := yamlInt(c.Text); ok {
+			return s
+		}
+	case "!!float":
+		if s, ok := yamlFloat(c.Text); ok {
+			return s
+		}
+	case "!!bool":
+		return strings.ToLower(c.Text)
+	case "!!timestamp":
+		if s, ok := yamlTimestamp(c.Text); ok {
+			return s
+		}
+	case "!!binary":
+		// yaml.v3 hands a string field the bytes the base64 stands for,
+		// and so dbfixture stores those. Text that is not base64 fails to
+		// load at all, and is kept as written for the database to refuse.
+		if b, err := base64.StdEncoding.DecodeString(c.Text); err == nil {
+			return string(b)
+		}
+	}
+	return c.Text
+}
+
+// yamlTimestampLayouts are yaml.v3's (resolve.go, allowedTimestampFormats).
+var yamlTimestampLayouts = []string{
+	"2006-1-2T15:4:5.999999999Z07:00",
+	"2006-1-2t15:4:5.999999999Z07:00",
+	"2006-1-2 15:4:5.999999999",
+	"2006-1-2",
+}
+
+// yamlTimestamp resolves a YAML timestamp the way yaml.v3 does and writes it
+// one way: a date alone as 2006-01-02, anything with a time as RFC 3339 in
+// UTC. A timestamp without a zone is UTC to yaml.v3, and so to dbfixture, and
+// bun writes the time.Time it becomes with its offset: that instant is what
+// the database holds.
+func yamlTimestamp(text string) (string, bool) {
+	for _, layout := range yamlTimestampLayouts {
+		t, err := time.Parse(layout, text)
+		if err != nil {
+			continue
+		}
+		if layout == "2006-1-2" {
+			return t.Format("2006-01-02"), true
+		}
+		return t.UTC().Format(time.RFC3339Nano), true
+	}
+	return "", false
+}
+
+// exportTimestamp writes a date or a timestamp from the database as a YAML
+// timestamp, which yaml.v3 decodes into a time.Time field; a quoted string it
+// only decodes when it is RFC 3339. The second result is false for a value
+// that is not one, such as infinity, which stays a string.
+func exportTimestamp(typ, text string) (string, bool) {
+	switch typ {
+	case "date":
+		if t, err := time.Parse("2006-01-02", text); err == nil {
+			return t.Format("2006-01-02"), true
+		}
+	case "timestamp", "timestamptz":
+		// Written in RFC 3339 with a Z, which is how a YAML timestamp without
+		// a zone resolves anyway: then the value reads back as written, and
+		// nothing has to ask the column's type what 2026-01-01 10:00:00 is.
+		return instantText(text)
+	}
+	return "", false
+}
+
+// yamlInt resolves a YAML integer exactly: the sign, the 0x, 0o and 0b
+// prefixes, a leading 0 as octal and the underscores yaml.v3 accepts, with no
+// limit on the size. yaml.v3 parses with strconv.ParseInt(plain, 0, 64), which
+// has the same rules as big.Int.SetString(plain, 0).
+func yamlInt(text string) (string, bool) {
+	plain := strings.ReplaceAll(text, "_", "")
+	n, ok := new(big.Int).SetString(plain, 0)
+	if !ok {
+		return "", false
+	}
+	return n.String(), true
+}
+
+// yamlFloat resolves a YAML float exactly, and spells infinity and NaN the way
+// PostgreSQL does, which is what bun writes for a float64 holding one.
+func yamlFloat(text string) (string, bool) {
+	switch text {
+	case ".inf", ".Inf", ".INF", "+.inf", "+.Inf", "+.INF":
+		return "Infinity", true
+	case "-.inf", "-.Inf", "-.INF":
+		return "-Infinity", true
+	case ".nan", ".NaN", ".NAN":
+		return "NaN", true
+	}
+	return canonicalDecimal(strings.ReplaceAll(text, "_", ""))
+}
+
+// maxExponent bounds the exponent canonicalDecimal expands, so "1e999999999"
+// cannot make it write a billion zeros.
+const maxExponent = 1000
+
+// canonicalDecimal writes a decimal number in one spelling: no sign for zero
+// or a positive number, no leading zeros, no trailing zeros after the point,
+// no point for an integer, no exponent. It is exact: "1.0", "1e0" and "10e-1"
+// are all "1", and 9007199254740993 stays 9007199254740993. The second result
+// is false for anything that is not a decimal number.
+func canonicalDecimal(s string) (string, bool) {
+	if s == "" {
+		return "", false
+	}
+	neg := false
+	switch s[0] {
+	case '+':
+		s = s[1:]
+	case '-':
+		neg, s = true, s[1:]
+	}
+	mantissa, exponent := s, 0
+	if i := strings.IndexAny(s, "eE"); i >= 0 {
+		mantissa = s[:i]
+		e, err := strconv.Atoi(s[i+1:])
+		if err != nil || e > maxExponent || e < -maxExponent {
+			return "", false
+		}
+		exponent = e
+	}
+	intPart, fracPart := mantissa, ""
+	if i := strings.IndexByte(mantissa, '.'); i >= 0 {
+		intPart, fracPart = mantissa[:i], mantissa[i+1:]
+	}
+	if intPart == "" && fracPart == "" {
+		return "", false
+	}
+	for _, part := range []string{intPart, fracPart} {
+		for i := 0; i < len(part); i++ {
+			if part[i] < '0' || part[i] > '9' {
+				return "", false
+			}
+		}
+	}
+	// digits × 10^scale, with the point moved into the exponent.
+	digits := strings.TrimLeft(intPart+fracPart, "0")
+	scale := exponent - len(fracPart)
+	if digits == "" {
+		return "0", true
+	}
+	for len(digits) > 1 && digits[len(digits)-1] == '0' {
+		digits = digits[:len(digits)-1]
+		scale++
+	}
+	var out string
+	switch {
+	case scale >= 0:
+		out = digits + strings.Repeat("0", scale)
+	case -scale < len(digits):
+		out = digits[:len(digits)+scale] + "." + digits[len(digits)+scale:]
+	default:
+		out = "0." + strings.Repeat("0", -scale-len(digits)) + digits
+	}
+	if neg {
+		out = "-" + out
+	}
+	return out, true
+}
+
+// numericType reports a PostgreSQL type whose values compare as numbers.
+func numericType(typ string) bool {
+	switch typ {
+	case "int2", "int4", "int8", "numeric", "float4", "float8", "money", "oid":
+		return true
+	}
+	return false
+}
+
+// columnText is how a value of a column is compared and written once
+// PostgreSQL has spelled it: a number canonically, the numbers inside JSON and
+// inside an array canonically, anything else as it is.
+//
+// A timestamp is written in RFC 3339, in UTC, which is how the fixture file's
+// own unquoted timestamp reads without the database: a migration writes the
+// same text whether generate read the column's type or not. So is one inside
+// an array, which to_jsonb writes with "+00:00", or with no zone at all for a
+// timestamp without one.
+func columnText(c dbschema.Column, text string) string {
+	switch {
+	case numericType(c.Type):
+		if s, ok := canonicalDecimal(text); ok {
+			return s
+		}
+	case c.Type == "timestamp" || c.Type == "timestamptz":
+		if s, ok := instantText(text); ok {
+			return s
+		}
+	case c.Type == "json" || c.Type == "jsonb":
+		return normalJSON(text)
+	case c.Category == "A":
+		text = normalJSON(text)
+		if c.ElemType == "timestamp" || c.ElemType == "timestamptz" {
+			return instantsInJSON(text)
+		}
+		return text
+	}
+	return text
+}
+
+// instantLayouts are the spellings PostgreSQL writes a timestamp in: its own
+// text in the ISO DateStyle, and to_jsonb's ISO 8601, with a zone or without.
+var instantLayouts = []string{
+	"2006-01-02 15:04:05.999999999Z07",
+	"2006-01-02 15:04:05.999999999Z07:00",
+	"2006-01-02 15:04:05.999999999Z07:00:00",
+	"2006-01-02 15:04:05.999999999",
+	"2006-01-02T15:04:05.999999999Z07:00",
+	"2006-01-02T15:04:05.999999999",
+}
+
+// instantText writes a timestamp PostgreSQL wrote in RFC 3339 in UTC, and
+// false for anything else, such as infinity or a year before Christ.
+func instantText(text string) (string, bool) {
+	for _, layout := range instantLayouts {
+		if t, err := time.Parse(layout, text); err == nil {
+			return t.UTC().Format(time.RFC3339Nano), true
+		}
+	}
+	return "", false
+}
+
+// instantsInJSON writes every string of a JSON array that is a timestamp in
+// RFC 3339 in UTC; see columnText.
+func instantsInJSON(text string) string {
+	var v any
+	if err := json.Unmarshal([]byte(text), &v); err != nil {
+		return text
+	}
+	changed := false
+	var walk func(v any) any
+	walk = func(v any) any {
+		switch v := v.(type) {
+		case []any:
+			for i, e := range v {
+				v[i] = walk(e)
+			}
+		case string:
+			if s, ok := instantText(v); ok && s != v {
+				changed = true
+				return s
+			}
+		}
+		return v
+	}
+	v = walk(v)
+	if !changed {
+		return text
+	}
+	return normalJSON(mustJSON(v))
+}
+
+// mustJSON is a value decoded from JSON, encoded again.
+func mustJSON(v any) string {
+	var b strings.Builder
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return ""
+	}
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// sameScalar reports whether two texts are the same value when either could
+// be a number: the zero checks compare a value with "0", "false" or "".
+func sameScalar(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ca, okA := canonicalDecimal(a)
+	cb, okB := canonicalDecimal(b)
+	return okA && okB && ca == cb
+}
+
+// yamlJSON writes a YAML mapping or sequence as JSON, one way: keys sorted
+// the way encoding/json sorts a map's, no spaces, every scalar by its YAML
+// type -- an integer exactly, a timestamp as RFC 3339 -- so two spellings of
+// the same structure compare equal. It is what an array column is compared
+// and written as, and a mapping in a jsonb column; PostgreSQL turns the JSON
+// into either.
+//
+// Inside a mapping a value is what dbfixture's map[string]any hands
+// encoding/json: a key as it is written, a timestamp as the time.Time yaml.v3
+// makes of it (RFC 3339 in its own offset, a date at midnight UTC), a float
+// as a float64, !!binary as the text it encodes. A sequence that is not
+// inside a mapping is an array column's, whose elements a slice field gets
+// the way a column gets a scalar; yamlAnyJSON reads it as an any field does.
+func yamlJSON(n *yaml.Node) (string, error) {
+	var b strings.Builder
+	if err := writeYAMLJSON(&b, n, false); err != nil {
+		return "", err
+	}
+	return b.String(), nil
+}
+
+// yamlAnyJSON writes a YAML mapping or sequence as JSON the way an any, slice
+// or map field of a json or jsonb column holds it, every value as it would be
+// inside a mapping; see yamlJSON.
+func yamlAnyJSON(n *yaml.Node) (string, error) {
+	var b strings.Builder
+	if err := writeYAMLJSON(&b, n, true); err != nil {
+		return "", err
+	}
+	return b.String(), nil
+}
+
+// jsonScalar is the text of a scalar as a json or jsonb column holds it from
+// an any field: a timestamp is the time.Time yaml.v3 makes of it, written by
+// encoding/json in its own offset, a date alone at midnight UTC, and a float
+// is a float64. A timestamp's text is unquoted, as a string's is everywhere,
+// and is also the instant a time.Time field writes. ok is false for any other
+// scalar, whose JSON is its text.
+func jsonScalar(n *yaml.Node) (string, bool) {
+	switch n.ShortTag() {
+	case "!!timestamp":
+		if t, ok := yamlTime(n.Value); ok {
+			if j, err := t.MarshalJSON(); err == nil {
+				return strings.Trim(string(j), `"`), true
+			}
+		}
+	case "!!float":
+		f, err := strconv.ParseFloat(strings.ReplaceAll(n.Value, "_", ""), 64)
+		if err != nil {
+			return "", false
+		}
+		j, err := json.Marshal(f)
+		if err != nil {
+			return "", false
+		}
+		if canon, ok := canonicalDecimal(string(j)); ok {
+			return canon, true
+		}
+	}
+	return "", false
+}
+
+// jsonPair is one key of a mapping and its value, as a map[string]any holds
+// them.
+type jsonPair struct {
+	key   string
+	value *yaml.Node
+}
+
+// mappingPairs is what a map[string]any field gets from a mapping, with
+// yaml.v3's merge keys applied the way yaml.v3 applies them (decode.go,
+// mapping and merge): a key as it is written; a key the mapping writes
+// itself wins over a merged one, but only a key that is a string to YAML,
+// because yaml.v3 holds the mapping's own keys by what they resolve to and a
+// merged one by its text; and of several mappings merged, the first to
+// write a key wins, the mappings they merge in turn after their own keys.
+func mappingPairs(n *yaml.Node) ([]jsonPair, error) {
+	var pairs []jsonPair
+	index := map[string]int{}
+	set := func(k string, v *yaml.Node) {
+		if i, ok := index[k]; ok {
+			pairs[i].value = v
+			return
+		}
+		index[k] = len(pairs)
+		pairs = append(pairs, jsonPair{k, v})
+	}
+	// own reads a mapping's keys other than its merge key, and that.
+	own := func(m *yaml.Node) (keys []*yaml.Node, values []*yaml.Node, merge *yaml.Node, err error) {
+		for i := 0; i+1 < len(m.Content); i += 2 {
+			key := m.Content[i]
+			if key.Kind == yaml.AliasNode && key.Alias != nil {
+				key = key.Alias
+			}
+			if key.Kind == yaml.ScalarNode && key.Value == "<<" && key.ShortTag() == "!!merge" {
+				if merge != nil {
+					return nil, nil, nil, fmt.Errorf("line %d: a second merge key in one mapping, which yaml.v3 "+
+						"refuses as a key defined twice", key.Line)
+				}
+				merge = m.Content[i+1]
+				continue
+			}
+			if key.Kind != yaml.ScalarNode || key.ShortTag() == "!!null" {
+				return nil, nil, nil, fmt.Errorf("line %d: a mapping key JSON cannot hold", key.Line)
+			}
+			keys, values = append(keys, key), append(values, m.Content[i+1])
+		}
+		return keys, values, merge, nil
+	}
+	keys, values, merge, err := own(n)
+	if err != nil {
+		return nil, err
+	}
+	taken := map[string]bool{}
+	for i, key := range keys {
+		k := mapKey(key)
+		set(k, values[i])
+		if tag := key.ShortTag(); tag == "!!str" || tag == "!!binary" {
+			taken[k] = true
+		}
+	}
+	var mergeFrom func(src *yaml.Node, depth int) error
+	mergeMapping := func(m *yaml.Node, depth int) error {
+		keys, values, merge, err := own(m)
+		if err != nil {
+			return err
+		}
+		for i, key := range keys {
+			k := mapKey(key)
+			if taken[k] {
+				continue
+			}
+			taken[k] = true
+			set(k, values[i])
+		}
+		if merge != nil {
+			return mergeFrom(merge, depth+1)
+		}
+		return nil
+	}
+	mergeFrom = func(src *yaml.Node, depth int) error {
+		if depth > 100 {
+			return fmt.Errorf("line %d: merge keys that merge each other without end", src.Line)
+		}
+		src = resolveAlias(src)
+		if src == nil {
+			return fmt.Errorf("a merge key of an alias of nothing")
+		}
+		switch src.Kind {
+		case yaml.MappingNode:
+			return mergeMapping(src, depth)
+		case yaml.SequenceNode:
+			for _, item := range src.Content {
+				item := resolveAlias(item)
+				if item == nil || item.Kind != yaml.MappingNode {
+					return fmt.Errorf("line %d: a merge key whose value is not a mapping or a sequence of "+
+						"mappings, which yaml.v3 refuses", src.Line)
+				}
+				if err := mergeMapping(item, depth); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		return fmt.Errorf("line %d: a merge key whose value is not a mapping or a sequence of mappings, "+
+			"which yaml.v3 refuses", src.Line)
+	}
+	if merge != nil {
+		if err := mergeFrom(merge, 0); err != nil {
+			return nil, err
+		}
+	}
+	return pairs, nil
+}
+
+// mapKey is a mapping key as a map[string]any gets it: as it is written,
+// whatever it resolves to, so 017 stays "017"; !!binary as the text it
+// encodes.
+func mapKey(key *yaml.Node) string {
+	if key.ShortTag() == "!!binary" {
+		return scalarText(Cell{Text: key.Value, Tag: "!!binary"})
+	}
+	return key.Value
+}
+
+// writeYAMLJSON writes n as JSON; inMapping is true for a value as an any or
+// map field holds it, false for an element of an array column.
+func writeYAMLJSON(b *strings.Builder, n *yaml.Node, inMapping bool) error {
+	switch n.Kind {
+	case yaml.DocumentNode:
+		if len(n.Content) != 1 {
+			return fmt.Errorf("an empty document")
+		}
+		return writeYAMLJSON(b, n.Content[0], inMapping)
+	case yaml.AliasNode:
+		return writeYAMLJSON(b, n.Alias, inMapping)
+	case yaml.MappingNode:
+		pairs, err := mappingPairs(n)
+		if err != nil {
+			return err
+		}
+		sort.SliceStable(pairs, func(i, j int) bool { return pairs[i].key < pairs[j].key })
+		b.WriteByte('{')
+		for i, p := range pairs {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(jsonString(p.key))
+			b.WriteByte(':')
+			if err := writeYAMLJSON(b, p.value, true); err != nil {
+				return err
+			}
+		}
+		b.WriteByte('}')
+	case yaml.SequenceNode:
+		b.WriteByte('[')
+		for i, item := range n.Content {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			if err := writeYAMLJSON(b, item, inMapping); err != nil {
+				return err
+			}
+		}
+		b.WriteByte(']')
+	case yaml.ScalarNode:
+		text := scalarText(Cell{Text: n.Value, Tag: n.ShortTag()})
+		switch n.ShortTag() {
+		case "!!null":
+			b.WriteString("null")
+		case "!!bool", "!!int":
+			b.WriteString(text)
+		case "!!float":
+			if _, ok := canonicalDecimal(text); !ok {
+				return fmt.Errorf("line %d: %s has no JSON spelling", n.Line, n.Value)
+			}
+			if inMapping {
+				// map[string]any holds a float as a float64, so
+				// 0.1234567890123456789 is stored as 0.12345678901234568.
+				f, err := strconv.ParseFloat(strings.ReplaceAll(n.Value, "_", ""), 64)
+				if err != nil {
+					return fmt.Errorf("line %d: %s has no JSON spelling", n.Line, n.Value)
+				}
+				j, err := json.Marshal(f)
+				if err != nil {
+					return fmt.Errorf("line %d: %s has no JSON spelling", n.Line, n.Value)
+				}
+				b.Write(j)
+				return nil
+			}
+			b.WriteString(text)
+		case "!!timestamp":
+			if inMapping {
+				if t, ok := yamlTime(n.Value); ok {
+					j, err := t.MarshalJSON()
+					if err != nil {
+						return fmt.Errorf("line %d: %s: %w", n.Line, n.Value, err)
+					}
+					b.Write(j)
+					return nil
+				}
+			}
+			b.WriteString(jsonString(text))
+		default:
+			b.WriteString(jsonString(text))
+		}
+	default:
+		return fmt.Errorf("line %d: a YAML node JSON cannot hold", n.Line)
+	}
+	return nil
+}
+
+// yamlTime is the time.Time yaml.v3 makes of a timestamp.
+func yamlTime(text string) (time.Time, bool) {
+	for _, layout := range yamlTimestampLayouts {
+		if t, err := time.Parse(layout, text); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// jsonString quotes a string for JSON, without encoding/json's escaping of
+// <, > and &, which is for HTML and would only make the text harder to read.
+func jsonString(s string) string {
+	if !utf8.ValidString(s) {
+		// encoding/json writes U+FFFD for every byte that is not UTF-8.
+		var v strings.Builder
+		for i := 0; i < len(s); {
+			r, size := utf8.DecodeRuneInString(s[i:])
+			if r == utf8.RuneError && size == 1 {
+				v.WriteRune(utf8.RuneError)
+			} else {
+				v.WriteString(s[i : i+size])
+			}
+			i += size
+		}
+		s = v.String()
+	}
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	enc.Encode(s)
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// normalJSON is JSON text in one spelling, whoever wrote it: compact, the
+// keys of every object sorted the way encoding/json sorts a map's, every
+// number canonical (see canonicalDecimal), strings as encoding/json writes
+// them. jsonb keeps the scale a number was written with, so {"a": 1.0}
+// written by SQL reads back as 1.0 where the fixture file's {a: 1} reads
+// back as 1; jsonb's equality, and every application reading it, hold them
+// the same, and so, after this, does the text. It is what a value of a json,
+// jsonb or array column is compared as, and what a generated migration
+// writes, with the database at hand or without: the fixture file's own
+// reading of a mapping or a sequence is spelled this way too. Text that is
+// not JSON comes back unchanged.
+func normalJSON(text string) string {
+	if !json.Valid([]byte(text)) {
+		return text
+	}
+	dec := json.NewDecoder(strings.NewReader(text))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return text
+	}
+	var canon func(v any) any
+	canon = func(v any) any {
+		switch v := v.(type) {
+		case json.Number:
+			if s, ok := canonicalDecimal(v.String()); ok {
+				return json.Number(s)
+			}
+		case map[string]any:
+			for k, e := range v {
+				v[k] = canon(e)
+			}
+		case []any:
+			for i, e := range v {
+				v[i] = canon(e)
+			}
+		}
+		return v
+	}
+	var b strings.Builder
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(canon(v)); err != nil {
+		return text
+	}
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// jsonbText writes JSON text the way jsonb's own text writes it, which is
+// how an export spells a document: the keys of an object shortest first and
+// then in byte order, a space after every comma and colon, numbers as they
+// are. Text that is not JSON comes back unchanged.
+func jsonbText(text string) string {
+	dec := json.NewDecoder(strings.NewReader(text))
+	dec.UseNumber()
+	var v any
+	if !json.Valid([]byte(text)) || dec.Decode(&v) != nil {
+		return text
+	}
+	var b strings.Builder
+	var write func(v any)
+	write = func(v any) {
+		switch v := v.(type) {
+		case map[string]any:
+			keys := make([]string, 0, len(v))
+			for k := range v {
+				keys = append(keys, k)
+			}
+			sort.Slice(keys, func(i, j int) bool {
+				if len(keys[i]) != len(keys[j]) {
+					return len(keys[i]) < len(keys[j])
+				}
+				return keys[i] < keys[j]
+			})
+			b.WriteByte('{')
+			for i, k := range keys {
+				if i > 0 {
+					b.WriteString(", ")
+				}
+				b.WriteString(jsonString(k) + ": ")
+				write(v[k])
+			}
+			b.WriteByte('}')
+		case []any:
+			b.WriteByte('[')
+			for i, e := range v {
+				if i > 0 {
+					b.WriteString(", ")
+				}
+				write(e)
+			}
+			b.WriteByte(']')
+		case json.Number:
+			b.WriteString(v.String())
+		case string:
+			b.WriteString(jsonString(v))
+		case bool:
+			b.WriteString(strconv.FormatBool(v))
+		case nil:
+			b.WriteString("null")
+		}
+	}
+	write(v)
+	return b.String()
+}

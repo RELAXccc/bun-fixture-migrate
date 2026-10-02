@@ -1,0 +1,121 @@
+# The configuration of the example SaaS application. See
+# fixture-migrate.example.yml at the top of the repository for every setting.
+# The master data is split by subject. The application loads the files with
+# one dbfixture Load, in this order, and so does every command here.
+fixtures:
+  - fixtures/reference.yml
+  - fixtures/catalog.yml
+  - fixtures/access.yml
+  - fixtures/i18n.yml
+out: migrations
+package: migrations
+migrator: Migrations
+seed_guard_table: plans
+database: env:DATABASE_URL
+
+policy:
+  # An admin UI edits master data in production; its edits win.
+  changed_row: warn
+  # A permission or a role is renamed in place: the grants that point at it,
+  # and the users who hold it, keep pointing at it.
+  renames: update
+
+models:
+  Currency:
+    table: currencies
+    serial: true
+    key: [code]
+    ref: code
+
+  Country:
+    table: countries
+    serial: true
+    key: [code]
+    ref: code
+    references:
+      currency_id: Currency
+
+  # The uuid is drawn by each database, so plans are named by code and the
+  # fixture file never writes an id.
+  Plan:
+    table: plans
+    key: [code]
+    ref: code
+    defaults:
+      # The plans that existed before the column hold its backfill.
+      trial_days: "14"
+    deletes: allow
+
+  PlanPrice:
+    table: plan_prices
+    serial: true
+    key: [plan_id, currency_id, valid_from]
+    references:
+      plan_id: Plan
+      currency_id: Currency
+    deletes: allow
+
+  Feature:
+    table: features
+    serial: true
+    key: [code]
+    ref: code
+    defaults:
+      unit: ~
+
+  # A join table with a composite primary key and no id.
+  PlanFeature:
+    table: plan_features
+    key: [plan_id, feature_id]
+    references:
+      plan_id: Plan
+      feature_id: Feature
+    defaults:
+      quota: ~
+
+  # Master roles have no tenant. A tenant's custom roles share the table and
+  # its sequence, and are not master data.
+  Role:
+    table: roles
+    serial: true
+    key: [code]
+    ref: code
+    where: tenant_id IS NULL
+    # Master roles have none. Said here because export writes the column,
+    # and generate refuses a column one side writes and the other leaves out
+    # (known: F1).
+    defaults:
+      tenant_id: ~
+    deletes: refuse
+
+  Permission:
+    table: permissions
+    serial: true
+    key: [code]
+    ref: code
+
+  RolePermission:
+    table: role_permissions
+    key: [role_id, permission_id]
+    references:
+      role_id: Role
+      permission_id: Permission
+    where: role_id IN (SELECT id FROM roles WHERE tenant_id IS NULL)
+
+  Translation:
+    table: translations
+    serial: true
+    key: [locale, key]
+    defaults:
+      context: ~
+
+  # A tree: parent_id points into the same table.
+  Category:
+    table: categories
+    serial: true
+    key: [slug]
+    ref: slug
+    references:
+      parent_id: Category
+    defaults:
+      parent_id: ~

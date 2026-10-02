@@ -1,0 +1,11 @@
+- model: Currency
+  rows:
+    - {_id: eur, id: 1, code: EUR, symbol: "€"}
+    - {_id: usd, id: 2, code: USD, symbol: "$"}
+    - {_id: gbp, id: 3, code: GBP, symbol: "£"}
+- model: Plan
+  rows:
+    - {_id: free, id: 1, name: free, currency_id: '{{ $.Currency.eur.ID }}', price_cents: 100}
+    - {_id: legacy, id: 3, name: legacy, currency_id: '{{ $.Currency.usd.ID }}', price_cents: 900}
+    - {_id: pro, name: pro, currency_id: '{{ $.Currency.usd.ID }}', price_cents: 6000}
+    - {_id: scale, name: scale, currency_id: '{{ $.Currency.gbp.ID }}', price_cents: 9000}

@@ -1,0 +1,60 @@
+description: |
+  The category tree is restructured. A shoes category goes in between women
+  and men, so men and kids move down one; an outdoor root is added and the
+  garden category moves under it; cameras move to the front of electronics, a
+  rotation of three siblings. Siblings' positions are unique under a
+  DEFERRABLE constraint, so the rotation is one migration, checked once at its
+  end. Every category gets its French name in the jsonb names, and the new
+  ones get their search-engine texts, rows keyed by the category's id (id:
+  none), inserted after the category they belong to. The outdoor page has no
+  meta description yet: NULL in a nullable jsonb column, which the model
+  writes through a nullzero map and the tool cannot tell from the JSON null.
+steps:
+  - overlay: .
+  - generate: {name: category tree, at: "20270301100000"}
+    known: F2
+    output:
+      - "Category: 2 inserts, 12 updates"
+      - "CategorySEO: 2 inserts, 2 updates"
+      - "null against a default: CategorySEO/category_id=Category(outdoor): meta_description is null"
+deploy: [prod]
+plan:
+  - cli: [plan, -strict]
+    env: prod
+    output:
+      - "applied Category slug=cameras update (1 row)"
+      - "applied Category slug=outdoor insert (1 row)"
+      - "applied CategorySEO category_id=Category(outdoor) insert (1 row)"
+      - "applied Category slug=garden update (1 row)"
+after:
+  - sql: >-
+      SELECT string_agg(c.slug || '@' || c.position, ',' ORDER BY c.position)
+      FROM catalog.categories c JOIN catalog.categories p ON p.id = c.parent_id WHERE p.slug = 'electronics'
+    env: prod
+    want: "cameras@1,phones@2,TV-Audio@3"
+  - sql: SELECT coalesce(meta_description::text, 'NULL') FROM catalog.category_seo s JOIN catalog.categories c ON c.id = s.category_id WHERE c.slug = 'outdoor'
+    env: prod
+    want: "NULL"
+known:
+  - "F2: a NULL in a nullable jsonb column, written through a nullzero map, can only be said with the global policy.null_default: warn, and every command then warns about the row"
+probes:
+  # The translator has not done garden's French name yet, and the file says
+  # so with a null. The models' maps are map[string]string, which load a null
+  # as "", so a database seeded from the file holds "" there, and the first
+  # check after the seed reports the row.
+  - name: a translation not there yet
+    clone: fresh
+    known: F1
+    steps:
+      - overlay: probe-untranslated
+      - generate: {name: category tree, at: "20270301100000"}
+        absent: ["fr is", "ambiguous"]
+      - app: [migrate]
+        env: clone
+        output: ["seeded the database"]
+      - cli: [check]
+        env: clone
+        exit: 3
+        output:
+          - "Category slug=garden"
+          - 'name: database {"de":"Garten","en":"Garden","fr":""}, file {"de":"Garten","en":"Garden","fr":null}'

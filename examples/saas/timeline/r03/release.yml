@@ -1,0 +1,39 @@
+description: |
+  Trial days and a new locale. A SQL migration adds plans.trial_days NOT NULL
+  DEFAULT 14, and the model mirrors the default. The fixture gives the free
+  plan no trial (0) and the bigger plans 30 days. generate refuses: bun writes
+  DEFAULT for a zero in a field with a default, so a new database would give
+  the free plan 14 days. The developer drops the column default and the tag
+  instead, and states every plan's trial. French, and a Swiss franc, arrive.
+steps:
+  - overlay: .
+  - generate: {name: trial days and french, at: "20260309100000"}
+    exit: 2
+    output:
+      - "zero against a default: Plan/code=free: trial_days is 0, but the column defaults to 14"
+      - "nothing written"
+  - overlay: then
+  - generate: {name: trial days and french, at: "20260309100000"}
+    output:
+      - "Currency: 1 insert"
+      - "Country: 1 insert"
+      - "Plan: 3 updates"
+      - "Translation: 9 inserts"
+      - "wrote migrations/20260309100000_fixture_trial_days_and_french.go"
+deploy: [prod]
+plan:
+  # Without the SQL migrations the plan runs against a table without the
+  # column. A migration it did not run may add it, so the plan cannot tell
+  # whether the deploy fails, and says so rather than predict a failure.
+  - cli: [plan]
+    env: prod
+    exit: 1
+    output:
+      - "could not be planned"
+      - "pending before it and not simulated: 20260309090000_plans_trial_days, 20260309090100_plans_trial_days_no_default"
+      - "a migration that runs before it in the deploy but was not simulated can create it"
+  - cli: [plan, -with-sql, -strict]
+    env: prod
+    output:
+      - "20260309090000_plans_trial_days (SQL): would succeed"
+      - "20260309100000_fixture_trial_days_and_french: would succeed"

@@ -1,0 +1,28 @@
+description: |
+  A bulk import: the customs authority's 1200 Harmonised System codes, which
+  declarations for parcels leaving the EU need, as a new model in a new
+  fixture file, after a SQL migration that creates its table. The codes are
+  six digits with leading zeros, written as YAML reads them; the column is
+  char(6), so 010110 stays 010110. generate writes the 1200 inserts as one
+  function per hundred changes, joined by Concat, which the Go compiler takes
+  in seconds; the migration still runs in one transaction. plan says how long
+  it held the rows locked. Staging catches up two releases.
+steps:
+  - overlay: .
+  - generate: {name: hs codes, at: "20271004100000"}
+    output: ["HsCode: 1200 inserts"]
+  - file: migrations/20271004100000_fixture_hs_codes.go
+    output: ["fixturechange.Concat(", '"code": fixturechange.Lit("010110")']
+deploy: [prod, staging]
+plan:
+  - cli: [plan, -with-sql, -strict]
+    env: prod
+    output:
+      - "20271004090000_hs_codes (SQL): would succeed"
+      - "20271004100000_fixture_hs_codes: would succeed"
+      - "applied HsCode code=010110 insert (1 row)"
+      - "it held locked the 1200 rows it wrote"
+after:
+  - sql: SELECT count(*) || '/' || min(code) || '/' || count(*) FILTER (WHERE duty_free_eu) FROM billing.hs_codes
+    env: prod
+    want: "1200/010110/132"

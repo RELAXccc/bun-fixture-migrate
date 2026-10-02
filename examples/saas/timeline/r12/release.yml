@@ -1,0 +1,97 @@
+description: |
+  The help centre: 500 articles, each titled in English, German and French,
+  1500 translations in a new fixture file, for timing. Staging catches up two
+  releases, and the on-premises customer six (r07 to r12), across the split of
+  the fixture file, the merge, the column rename and this. Both find the
+  dashboards migration of r11, written for production's drift, already made.
+steps:
+  - overlay: .
+  - generate: {name: help centre, at: "20261116100000"}
+    output: ["Translation: 1500 inserts"]
+deploy: [prod, staging, onprem]
+plan:
+  - cli: [plan, -with-sql, -strict]
+    env: onprem
+    output:
+      - "20260727100000_fixture_retire_scale_and_priority_support: would succeed"
+      - "20261019090000_plans_rename_sort_order (SQL): would succeed"
+      - "20261019100000_fixture_plan_order: would succeed"
+      - "20261116100000_fixture_help_centre: would succeed"
+expect:
+  migrate:
+    staging:
+      output: ["Category slug=dashboards update: the row already holds these values, nothing to do"]
+    onprem:
+      output: ["Category slug=dashboards update: the row already holds these values, nothing to do"]
+probes:
+  # Staging never had the admin's name for the dashboards category: the
+  # migration r11 wrote for production found it already as the file has it.
+  # Rolling back staging's last group inverts that change all the same.
+  - name: roll back staging's last group
+    clone: staging
+    known: "F10: Revert inverts a change the migration found already made, writing a value this database never held"
+    steps:
+      - app: [rollback]
+        env: clone
+        output: ["Category slug=dashboards update: applied (1 row)", "rolled back group"]
+      - sql: SELECT name FROM categories WHERE slug = 'dashboards'
+        env: clone
+        want: "Dashboards & reports"
+  # Translations sit in two files. export writes a model back into the
+  # first file that holds it.
+  - name: export production into the files
+    steps:
+      - cli: [export]
+        env: prod
+        output: ["wrote fixtures/i18n.yml", "wrote fixtures/help.yml"]
+      - file: fixtures/help.yml
+        output: ["[]"]
+        absent: ["help.article"]
+      - file: fixtures/i18n.yml
+        output: ["help.article.500.title"]
+      # Moving rows between files changes no row.
+      - cli: [generate, -dry-run, -name, export]
+        env: prod
+        output: ["nothing changed in"]
+  # What the runbook used to say for a missing row: "if its absence is right,
+  # remove that change from the migration file and run plan again". It leaves
+  # every other database without the change while the state file says they
+  # have it, which only check tells. The runbook now sets MissingRow to "warn"
+  # in that migration's Policy instead, which keeps the change for the others.
+  - name: drop a change production cannot make
+    clone: prod
+    clone2: staging
+    known: "F11, fixed in the runbook: the remedy it gave for a missing row leaves every other database without the change, and only check says so"
+    steps:
+      - overlay: probe-relabel
+      - generate: {name: relabel, at: "20261120100000"}
+        env: prod
+        output: ["Translation: 2 updates"]
+      # An admin deleted the row in production.
+      - sql: DELETE FROM translations WHERE locale = 'en' AND key = 'nav.settings'
+        env: clone
+      - cli: [plan]
+        env: clone
+        exit: 3
+        output: ["failed Translation key=nav.settings,locale=en update [missing row]: no row of translations has key=nav.settings,locale=en"]
+      - edit:
+          file: migrations/20261120100000_fixture_relabel.go
+          regexp: true
+          old: '\t\t\{Model: "Translation", Kind: fixturechange\.Update,\n\t\t\tKey: fixturechange\.Values\{"key": fixturechange\.Lit\("nav\.settings"\).*\n.*\n.*\n\t\t\},\n'
+          new: ""
+      - cli: [plan, -strict]
+        env: clone
+        output: ["applied Translation key=plan.free.name,locale=en update (1 row)"]
+        absent: ["nav.settings"]
+      - app: [migrate]
+        env: clone
+      - app: [migrate]
+        env: clone2
+      # Staging had the row, and now will never get the change; the state
+      # file says it has.
+      - cli: [status, -offline]
+        output: ["not migrated nothing"]
+      - cli: [check]
+        env: clone2
+        exit: 3
+        output: ["Translation key=nav.settings,locale=en", "value: database Settings & data residency, file Preferences"]

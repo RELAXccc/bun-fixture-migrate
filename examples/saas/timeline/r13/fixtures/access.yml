@@ -1,0 +1,76 @@
+# Master roles, permissions and what each role grants. A tenant's custom
+# roles live in the same tables and are not here.
+
+- model: Role
+  rows:
+    - _id: owner
+      id: 1
+      code: owner
+      name: Owner
+    - _id: admin
+      id: 2
+      code: admin
+      name: Administrator
+    - _id: member
+      id: 3
+      code: member
+      name: Member
+    - _id: viewer
+      id: 4
+      code: viewer
+      name: Viewer
+    - _id: billing_admin
+      id: 100
+      code: billing_admin
+      name: Billing administrator
+    - _id: support
+      id: 5
+      code: support
+      name: Support agent
+
+- model: Permission
+  rows:
+    - _id: billing_read
+      id: 1
+      code: billing.read
+      description: See invoices and the subscription
+    - _id: billing_write
+      id: 2
+      code: billing.manage
+      description: Change the plan, the payment method and the billing address
+    - _id: users_manage
+      id: 3
+      code: users.manage
+      description: Invite, remove and change users
+    - _id: projects_write
+      id: 4
+      code: projects.write
+      description: Create and change projects
+    - _id: projects_read
+      id: 5
+      code: projects.read
+      description: See projects
+    - _id: reports_export
+      id: 6
+      code: reports.export
+      description: Export reports as CSV
+
+- model: RolePermission
+  rows:
+    - {role_id: '{{ $.Role.owner.ID }}', permission_id: '{{ $.Permission.billing_read.ID }}'}
+    - {role_id: '{{ $.Role.owner.ID }}', permission_id: '{{ $.Permission.billing_write.ID }}'}
+    - {role_id: '{{ $.Role.owner.ID }}', permission_id: '{{ $.Permission.users_manage.ID }}'}
+    - {role_id: '{{ $.Role.owner.ID }}', permission_id: '{{ $.Permission.projects_write.ID }}'}
+    - {role_id: '{{ $.Role.owner.ID }}', permission_id: '{{ $.Permission.projects_read.ID }}'}
+    - {role_id: '{{ $.Role.owner.ID }}', permission_id: '{{ $.Permission.reports_export.ID }}'}
+    - {role_id: '{{ $.Role.admin.ID }}', permission_id: '{{ $.Permission.billing_read.ID }}'}
+    - {role_id: '{{ $.Role.admin.ID }}', permission_id: '{{ $.Permission.users_manage.ID }}'}
+    - {role_id: '{{ $.Role.admin.ID }}', permission_id: '{{ $.Permission.projects_write.ID }}'}
+    - {role_id: '{{ $.Role.admin.ID }}', permission_id: '{{ $.Permission.projects_read.ID }}'}
+    - {role_id: '{{ $.Role.member.ID }}', permission_id: '{{ $.Permission.projects_write.ID }}'}
+    - {role_id: '{{ $.Role.member.ID }}', permission_id: '{{ $.Permission.projects_read.ID }}'}
+    - {role_id: '{{ $.Role.viewer.ID }}', permission_id: '{{ $.Permission.projects_read.ID }}'}
+    - {role_id: '{{ $.Role.billing_admin.ID }}', permission_id: '{{ $.Permission.billing_read.ID }}'}
+    - {role_id: '{{ $.Role.billing_admin.ID }}', permission_id: '{{ $.Permission.billing_write.ID }}'}
+    - {role_id: '{{ $.Role.support.ID }}', permission_id: '{{ $.Permission.billing_read.ID }}'}
+    - {role_id: '{{ $.Role.support.ID }}', permission_id: '{{ $.Permission.projects_read.ID }}'}

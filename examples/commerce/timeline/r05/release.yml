@@ -1,0 +1,87 @@
+description: |
+  Payment providers and the back office's roles. Klarna comes in as a buy now,
+  pay later provider (an enum kind of its own), PayPal takes Swiss francs and
+  the card provider gets its French name. Ops' TWINT stays as it is: under
+  mode: upsert the file adds and updates its own providers only. The
+  catalog.publish permission becomes catalog.products.publish and the support
+  role becomes customer-care, both renamed in place under renames: update, so
+  the grants and the admin users pointing at them stay; the role is renamed
+  under ids: database, found by its old code alone. A finance role is added,
+  numbered by the identity in production, where the merchant's custom roles
+  took the next ids, and with the file's number in a new database.
+steps:
+  - overlay: .
+  - generate: {name: klarna and finance role, at: "20270503100000"}
+    output:
+      - "PaymentProvider: 1 insert, 2 updates"
+      - "AdminPermission: 1 insert, 1 update"
+      - "AdminRole: 1 insert, 2 updates"
+      - "AdminRolePermission: 4 inserts"
+  # The rename is an update of the key, found by the old code; the insert of
+  # the new role writes no id.
+  - file: migrations/20270503100000_fixture_klarna_and_finance_role.go
+    output:
+      - 'Key: fixturechange.Values{"code": fixturechange.Lit("support")},'
+      - 'New: fixturechange.Values{"code": fixturechange.Lit("customer-care")},'
+    absent: ['"id": fixturechange.Lit("5")']
+deploy: [prod]
+plan:
+  - cli: [plan, -strict]
+    env: prod
+    output:
+      - "applied AdminPermission code=catalog.publish update (1 row)"
+      - "applied AdminRole code=support update (1 row)"
+      - "applied AdminRole code=finance insert (1 row)"
+      - "applied AdminRolePermission permission_id=AdminPermission(payouts.read),role_id=AdminRole(finance) insert (1 row)"
+after:
+  - sql: SELECT id > 5 FROM admin_roles WHERE code = 'finance'
+    env: prod
+    want: "true"
+  - sql: SELECT id::text FROM admin_roles WHERE code = 'finance'
+    env: dev
+    want: "5"
+  - sql: >-
+      SELECT string_agg(p.code, ',' ORDER BY p.code) FROM admin_role_permissions rp
+      JOIN admin_roles r ON r.id = rp.role_id JOIN admin_permissions p ON p.id = rp.permission_id
+      WHERE r.code = 'customer-care'
+    env: prod
+    want: "customers.read,orders.read"
+probes:
+  # A merchant made a custom role called finance before the release brought
+  # the built-in one, and granted it orders.read. Under mode: upsert the
+  # built-in role's insert finds it by its code and leaves it, as a row
+  # somebody changed; the grants then point at the custom role. The model's
+  # where keeps the grant to a role that is not built in from being written,
+  # but where the custom role holds the grant already, the insert fails on the
+  # primary key first, as a bare unique violation.
+  - name: a custom role called finance
+    clone: prod
+    when: before-deploy
+    known: F6
+    steps:
+      - sql: INSERT INTO admin_roles (code, name, builtin) VALUES ('finance', 'Our finance team', false)
+        env: clone
+      - sql: >-
+          INSERT INTO admin_role_permissions (role_id, permission_id) SELECT r.id, p.id FROM admin_roles r, admin_permissions p
+          WHERE r.code = 'finance' AND p.code = 'orders.read'
+        env: clone
+      - cli: [plan]
+        env: clone
+        exit: 3
+        output:
+          - "skipped AdminRole code=finance insert [changed row]: admin_roles code=finance already exists and holds different values"
+          - 'failed AdminRolePermission permission_id=AdminPermission(orders.read),role_id=AdminRole(finance) insert [error]: ERROR: duplicate key value violates unique constraint "admin_role_permissions_pkey"'
+      # Without the grant, the where says what is wrong.
+      - sql: DELETE FROM admin_role_permissions WHERE role_id = (SELECT id FROM admin_roles WHERE code = 'finance')
+        env: clone
+      - cli: [plan]
+        env: clone
+        exit: 3
+        output:
+          - "does not hold the model's where, role_id IN (SELECT id FROM admin_roles WHERE builtin)"
+      # The merchant's role gets another code, and the release goes through.
+      - sql: UPDATE admin_roles SET code = 'custom-finance' WHERE code = 'finance'
+        env: clone
+      - cli: [plan, -strict]
+        env: clone
+        output: ["applied AdminRole code=finance insert (1 row)"]

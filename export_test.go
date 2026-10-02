@@ -307,3 +307,290 @@ func TestFindingsByKindGroupsAndSorts(t *testing.T) {
 		t.Fatalf("findings of one kind are sorted by model and row: %+v", dupes)
 	}
 }
+
+// A value dbfixture would read as a template is written as a template whose
+// only action is that value as a string literal, which dbfixture evaluates to
+// the value itself.
+func TestExportWritesTemplateLikeTextAsALiteralTemplate(t *testing.T) {
+	cfg := testConfig(t)
+	state := snap(t, cfg, base, "the database")
+	for _, e := range state.Entries["Currency"] {
+		e.Cells["symbol"] = fixturechange.Lit(`Hello {{ .Name }} "x"`)
+	}
+	out, err := Export(cfg, state, testTables(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `symbol: "{{ \"Hello {{ .Name }} \\\"x\\\"\" }}"`) {
+		t.Fatalf("the value is not written as a literal template:\n%s", out)
+	}
+}
+
+// nullTables is testTables with a default on the nullable note column.
+func nullTables() map[string]*dbschema.Table {
+	tables := testTables()
+	for i, c := range tables["public.plans"].Columns {
+		if c.Name == "note" {
+			tables["public.plans"].Columns[i].Default = "'none'::text"
+		}
+	}
+	return tables
+}
+
+func TestLintNullDefaults(t *testing.T) {
+	cfg := testConfig(t)
+	text := replace(t, base, "      seats: 10\n", "      seats: 10\n      note: ~\n")
+	state := snap(t, cfg, text, "fixture.yml")
+	LintNullDefaults(cfg, state, testTables())
+	if len(state.Findings) != 0 {
+		t.Fatalf("a null into a column without a default is stored as NULL: %+v", state.Findings)
+	}
+	LintNullDefaults(cfg, state, nullTables())
+	if len(state.Findings) != 1 || state.Findings[0].Kind != FindingNullDefault {
+		t.Fatalf("expected the null to be reported, got %+v", state.Findings)
+	}
+	if !strings.Contains(state.Findings[0].Detail, "note is null, but the column defaults to none") {
+		t.Fatalf("the finding has to say what will happen: %q", state.Findings[0].Detail)
+	}
+	if cfg.FindingMode(FindingNullDefault) != ModeError {
+		t.Fatal("the null default is strict by default")
+	}
+}
+
+func TestExportMarksTheNullDefaultHazard(t *testing.T) {
+	cfg := testConfig(t)
+	state := snap(t, cfg, replace(t, base, "      seats: 10\n", "      seats: 10\n      note: ~\n"), "the database")
+	for _, model := range state.Order {
+		for _, e := range state.Entries[model] {
+			e.Anchor = anchorOf(e.Key)
+		}
+	}
+	data, err := Export(cfg, state, nullTables(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "note: ~  # ROUND-TRIP HAZARD: the column defaults to none") {
+		t.Fatalf("the null has to be marked on its line:\n%s", data)
+	}
+}
+
+// A generated column cannot be written by anybody, so a fixture file that
+// writes one does not load.
+func TestLintColumnsReportsAGeneratedColumn(t *testing.T) {
+	cfg := testConfig(t)
+	tables := testTables()
+	for i, c := range tables["public.plans"].Columns {
+		if c.Name == "seats" {
+			tables["public.plans"].Columns[i].Generated = true
+		}
+	}
+	state := snap(t, cfg, base, "fixture.yml")
+	LintColumns(cfg, state, tables)
+	if len(state.Findings) != 1 || !strings.Contains(state.Findings[0].Detail, "generates it") {
+		t.Fatalf("expected seats to be reported, got %+v", state.Findings)
+	}
+}
+
+// Each model goes back into the file that holds it; one that no file holds
+// yet goes into the last; a file left without a model is an empty list, which
+// dbfixture loads.
+func TestExportFilesKeepsEachModelInItsFile(t *testing.T) {
+	cfg := testConfig(t)
+	state := snap(t, cfg, base, "the database")
+	for _, model := range state.Order {
+		for _, e := range state.Entries[model] {
+			e.Anchor = anchorOf(e.Key)
+		}
+	}
+	current := []FixtureFile{
+		{Path: "a.yml", Data: []byte("- model: Currency\n  rows: []\n")},
+		{Path: "b.yml", Data: []byte("- model: Plan\n  rows: []\n")},
+		{Path: "c.yml"},
+	}
+	out, err := ExportFiles(cfg, state, testTables(), nil, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []string{"model: Currency", "model: Plan", "model: Feature"} {
+		if !strings.Contains(string(out[i]), want) || strings.Count(string(out[i]), "- model:") != 1 {
+			t.Fatalf("%s:\n%s", current[i].Path, out[i])
+		}
+	}
+	// A model pointing at one of a later file cannot be loaded.
+	current[0].Data = []byte("- model: Plan\n  rows: []\n")
+	current[1].Data = []byte("- model: Currency\n  rows: []\n")
+	if _, err := ExportFiles(cfg, state, testTables(), nil, current); err == nil ||
+		!strings.Contains(err.Error(), "Plan in a.yml points at Currency, which is in b.yml") {
+		t.Fatalf("expected the order to be refused: %v", err)
+	}
+	// An empty file is written as an empty list.
+	current = []FixtureFile{{Path: "a.yml", Data: []byte(base)}, {Path: "empty.yml", Data: []byte("- model: Nothing\n  rows: []\n")}}
+	out, err = ExportFiles(cfg, state, testTables(), nil, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(out[1])) != "[]" {
+		t.Fatalf("got %q", out[1])
+	}
+}
+
+// treeConfig and treeTables are a category tree: every row may point at a
+// parent in the same table.
+func treeConfig(t *testing.T) *Config {
+	t.Helper()
+	cfg := &Config{Models: map[string]*Model{
+		"Node": {Table: "nodes", References: map[string]string{"parent_id": "Node"}},
+	}}
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+func treeTables() map[string]*dbschema.Table {
+	return map[string]*dbschema.Table{"public.nodes": {Schema: "public", Name: "nodes", PrimaryKey: []string{"id"},
+		Columns: []dbschema.Column{
+			{Name: "id", Position: 1, Type: "int8"},
+			{Name: "name", Position: 2, Type: "text"},
+			{Name: "parent_id", Position: 3, Type: "int8", Nullable: true},
+		}}}
+}
+
+// treeState is a tree as a database returns it, in id order, where a root
+// was added after the leaves that hang from it.
+func treeState(rows ...[3]string) *Snapshot {
+	s := &Snapshot{Source: "the database", Order: []string{"Node"}, Entries: map[string][]*Entry{},
+		Columns: map[string][]string{"Node": {"name", "parent_id"}}}
+	for _, r := range rows {
+		parent := fixturechange.Null()
+		if r[2] != "" {
+			parent = fixturechange.RefTo("Node", r[2])
+		}
+		key := fixturechange.Values{"name": fixturechange.Lit(r[1])}
+		s.Entries["Node"] = append(s.Entries["Node"], &Entry{Anchor: r[1], ID: r[0], Key: key,
+			KeyStr: keyString("Node", key), Cells: fixturechange.Values{"name": key["name"], "parent_id": parent}})
+	}
+	return s
+}
+
+// dbfixture resolves a template against the rows above it, so a child written
+// before its parent cannot be loaded. The export puts parents first and keeps
+// the id order otherwise.
+func TestExportWritesAParentBeforeItsChildren(t *testing.T) {
+	cfg := treeConfig(t)
+	state := treeState(
+		[3]string{"1", "leaf", "branch"},
+		[3]string{"2", "other", ""},
+		[3]string{"3", "twig", "leaf"},
+		[3]string{"5", "branch", "root"},
+		[3]string{"7", "root", ""},
+	)
+	data, err := Export(cfg, state, treeTables(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var order []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "      name: ") {
+			order = append(order, strings.Trim(strings.TrimPrefix(line, "      name: "), `"`))
+		}
+	}
+	if got := strings.Join(order, ","); got != "other,root,branch,leaf,twig" {
+		t.Fatalf("expected parents first and id order otherwise, got %s\n%s", got, data)
+	}
+	back := snap(t, cfg, string(data), "the export")
+	res, err := Compute(cfg, state, back)
+	if err != nil {
+		t.Fatalf("the export does not load: %v\n%s", err, data)
+	}
+	if len(res.Changes) != 0 || len(res.Refusals) != 0 {
+		t.Fatalf("the export does not reproduce its source: %+v / %+v\n%s", res.Changes, res.Refusals, data)
+	}
+
+	// A file that already loads keeps its order.
+	again, err := Export(cfg, back, treeTables(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(again) != string(data) {
+		t.Fatalf("exporting the export changed it:\n%s\n---\n%s", data, again)
+	}
+}
+
+// Rows pointing at each other in a circle load in no order at all.
+func TestExportRefusesRowsThatPointAtEachOtherInACircle(t *testing.T) {
+	_, err := Export(treeConfig(t), treeState(
+		[3]string{"1", "a", "b"},
+		[3]string{"2", "b", "a"},
+		[3]string{"3", "c", ""},
+	), treeTables(), nil)
+	if err == nil || !strings.Contains(err.Error(), "Node/name=a; Node/name=b") ||
+		strings.Contains(err.Error(), "name=c") {
+		t.Fatalf("expected the two rows of the circle to be named, got %v", err)
+	}
+}
+
+// A null into a NOT NULL column without a default is never stored as written:
+// bun writes a plain field's zero, and a pointer field fails the insert.
+func TestLintNullDefaultsReportsANullTheColumnCannotHold(t *testing.T) {
+	cfg := testConfig(t)
+	state := snap(t, cfg, base, "fixture.yml")
+	state.Entries["Plan"][1].Cells["currency_id"] = fixturechange.Null()
+	LintNullDefaults(cfg, state, testTables())
+	var got []string
+	for _, f := range state.Findings {
+		got = append(got, string(f.Kind)+": "+f.Row+": "+f.Detail)
+	}
+	if len(got) != 1 || !strings.HasPrefix(got[0], "invalid value: Plan/name=team: currency_id is null, but the column is NOT NULL and has no default") {
+		t.Fatalf("expected one invalid value, got %q", got)
+	}
+}
+
+// A finding in the header quotes a value, and a value can hold a line break:
+// it starts a comment line of its own, so the export still parses.
+func TestExportHeaderKeepsALineBreakInsideTheComment(t *testing.T) {
+	cfg := testConfig(t)
+	state := snap(t, cfg, base, "the database")
+	for _, model := range state.Order {
+		for _, e := range state.Entries[model] {
+			e.Anchor = anchorOf(e.Key)
+		}
+	}
+	header := []string{"zero against a default: Plan/name=a\n- model: X\r\nrows: [1]\x01  end"}
+	data, err := Export(cfg, state, testTables(), header)
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	want := "# zero against a default: Plan/name=a\n# - model: X\n# rows: [1]\\x01 \n# end\n"
+	if !strings.HasPrefix(string(data), want) {
+		t.Fatalf("got\n%s", data)
+	}
+}
+
+// A column the table does not have, or generates, is said once, as a
+// finding, and taken out of the snapshot: the comparison with the database
+// does not say it again as a column written on one side only.
+func TestLintColumnsTakesWhatItReportsOutOfTheComparison(t *testing.T) {
+	cfg := testConfig(t)
+	tables := testTables()
+	tables["public.plans"].Columns = append(tables["public.plans"].Columns,
+		dbschema.Column{Name: "total", Position: 9, Type: "int8", Generated: true})
+	head := snap(t, cfg, strings.Replace(base, "      seats: 10\n", "      seats: 10\n      colour: red\n      total: 3\n", 1), "fixture.yml")
+	LintColumns(cfg, head, tables)
+	var found []string
+	for _, f := range head.Findings {
+		found = append(found, f.Row)
+	}
+	if strings.Join(found, ",") != "colour,total" {
+		t.Fatalf("findings %+v", head.Findings)
+	}
+	for _, col := range head.Columns["Plan"] {
+		if col == "colour" || col == "total" {
+			t.Fatalf("still compared: %v", head.Columns["Plan"])
+		}
+	}
+	res, err := Compute(cfg, snap(t, cfg, base, "the database"), head)
+	if err != nil || len(res.Refusals) != 0 || len(res.Changes) != 0 {
+		t.Fatalf("%v %+v / %+v", err, res.Changes, res.Refusals)
+	}
+}

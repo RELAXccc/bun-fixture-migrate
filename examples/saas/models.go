@@ -1,0 +1,132 @@
+package main
+
+import (
+	"time"
+
+	"github.com/uptrace/bun"
+)
+
+// The models dbfixture loads the fixture files into. A fixture file names a
+// model, not a table: dbfixture finds the table through the registered model,
+// and bun-fixture-migrate through the table fixture-migrate.yml names for it.
+// Only master data has a model here; the application's own tables (tenants,
+// users, subscriptions, invoices) are written by the application.
+
+// masterModels is every model the fixture files use.
+var masterModels = []any{
+	(*Currency)(nil), (*Country)(nil), (*Plan)(nil), (*PlanPrice)(nil), (*Feature)(nil),
+	(*PlanFeature)(nil), (*Role)(nil), (*Permission)(nil), (*RolePermission)(nil),
+	(*Translation)(nil), (*Category)(nil),
+}
+
+type Currency struct {
+	bun.BaseModel `bun:"table:currencies"`
+
+	ID         int64 `bun:",pk,autoincrement"`
+	Code       string
+	Name       string
+	Symbol     string
+	MinorUnits int16
+}
+
+type Country struct {
+	bun.BaseModel `bun:"table:countries"`
+
+	ID         int64 `bun:",pk,autoincrement"`
+	Code       string
+	Name       string
+	CurrencyID int64
+	// numeric(5,4), kept as text so no rate goes through a float.
+	TaxRate string `bun:"type:numeric(5,4)"`
+}
+
+type Plan struct {
+	bun.BaseModel `bun:"table:plans"`
+
+	// The database draws the uuid; the fixture file names plans by code.
+	ID       string `bun:",pk,type:uuid,default:gen_random_uuid()"`
+	Code     string
+	Name     string
+	Tier     string `bun:"type:plan_tier"`
+	Active   bool   `bun:",notnull"`
+	Position int32  `bun:",notnull"`
+	// No default: bun writes the field as it is, a zero included. The
+	// column has none either since 20260309090100; a default here would
+	// make bun write DEFAULT for a plan without a trial.
+	TrialDays int32          `bun:",notnull"`
+	Settings  map[string]any `bun:"type:jsonb,notnull"`
+	Tags      []string       `bun:",array,notnull"`
+}
+
+type PlanPrice struct {
+	bun.BaseModel `bun:"table:plan_prices"`
+
+	ID         int64 `bun:",pk,autoincrement"`
+	PlanID     string
+	CurrencyID int64
+	ValidFrom  time.Time `bun:"type:date,notnull"`
+	Amount     string    `bun:"type:numeric(12,2)"`
+}
+
+type Feature struct {
+	bun.BaseModel `bun:"table:features"`
+
+	ID   int64 `bun:",pk,autoincrement"`
+	Code string
+	Name string
+	Unit *string
+}
+
+type PlanFeature struct {
+	bun.BaseModel `bun:"table:plan_features"`
+
+	PlanID    string `bun:",pk"`
+	FeatureID int64  `bun:",pk"`
+	// nil is unlimited.
+	Quota *int32
+}
+
+type Role struct {
+	bun.BaseModel `bun:"table:roles"`
+
+	ID int64 `bun:",pk,autoincrement"`
+	// Master roles have none; a tenant's custom roles have theirs.
+	TenantID *int64
+	Code     string
+	Name     string
+}
+
+type Permission struct {
+	bun.BaseModel `bun:"table:permissions"`
+
+	ID          int64 `bun:",pk,autoincrement"`
+	Code        string
+	Description string
+}
+
+type RolePermission struct {
+	bun.BaseModel `bun:"table:role_permissions"`
+
+	RoleID       int64 `bun:",pk"`
+	PermissionID int64 `bun:",pk"`
+}
+
+type Translation struct {
+	bun.BaseModel `bun:"table:translations"`
+
+	ID      int64 `bun:",pk,autoincrement"`
+	Locale  string
+	Key     string
+	Value   string
+	Context *string
+}
+
+type Category struct {
+	bun.BaseModel `bun:"table:categories"`
+
+	ID       int64 `bun:",pk,autoincrement"`
+	Slug     string
+	ParentID *int64
+	Name     string
+	Position int32 `bun:",notnull"`
+}

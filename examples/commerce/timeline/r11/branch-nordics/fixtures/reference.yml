@@ -1,0 +1,143 @@
+# Currencies, countries and their tax rates: the lookups everything else
+# names by ISO code.
+
+- model: Currency
+  rows:
+    - _id: eur
+      code: EUR
+      name: Euro
+      symbol: "€"
+      minor_units: 2
+    - _id: usd
+      code: USD
+      name: US dollar
+      symbol: "$"
+      minor_units: 2
+    - _id: gbp
+      code: GBP
+      name: Pound sterling
+      symbol: "£"
+      minor_units: 2
+    - _id: chf
+      code: CHF
+      name: Swiss franc
+      symbol: CHF
+      minor_units: 2
+    - _id: sek
+      code: SEK
+      name: Swedish krona
+      symbol: kr
+      minor_units: 2
+    - _id: pln
+      code: PLN
+      name: Polish złoty
+      symbol: zł
+      minor_units: 2
+    - _id: dkk
+      code: DKK
+      name: Danish krone
+      symbol: kr.
+      minor_units: 2
+
+- model: Country
+  rows:
+    - _id: de
+      id: 1
+      iso2: DE
+      iso3: DEU
+      name: {en: Germany, de: Deutschland}
+      currency_code: '{{ $.Currency.eur.Code }}'
+      eu_member: true
+    - _id: at
+      id: 2
+      iso2: AT
+      iso3: AUT
+      name: {en: Austria, de: Österreich}
+      currency_code: '{{ $.Currency.eur.Code }}'
+      eu_member: true
+    - _id: fr
+      id: 3
+      iso2: FR
+      iso3: FRA
+      name: {en: France, de: Frankreich, fr: France}
+      currency_code: '{{ $.Currency.eur.Code }}'
+      eu_member: true
+    - _id: nl
+      id: 4
+      iso2: NL
+      iso3: NLD
+      name: {en: Netherlands, de: Niederlande}
+      currency_code: '{{ $.Currency.eur.Code }}'
+      eu_member: true
+    - _id: se
+      id: 5
+      iso2: SE
+      iso3: SWE
+      name: {en: Sweden, de: Schweden}
+      currency_code: '{{ $.Currency.sek.Code }}'
+      eu_member: true
+    - _id: ch
+      id: 6
+      iso2: CH
+      iso3: CHE
+      name: {en: Switzerland, de: Schweiz, fr: Suisse}
+      currency_code: '{{ $.Currency.chf.Code }}'
+      eu_member: false
+    - _id: gb
+      id: 7
+      iso2: GB
+      iso3: GBR
+      name: {en: United Kingdom, de: Vereinigtes Königreich}
+      currency_code: '{{ $.Currency.gbp.Code }}'
+      eu_member: false
+    - _id: us
+      id: 8
+      iso2: US
+      iso3: USA
+      name: {en: United States, de: Vereinigte Staaten}
+      currency_code: '{{ $.Currency.usd.Code }}'
+      eu_member: false
+    - _id: pl
+      id: 9
+      iso2: PL
+      iso3: POL
+      name: {en: Poland, de: Polen, pl: Polska}
+      currency_code: '{{ $.Currency.pln.Code }}'
+      eu_member: true
+    - _id: dk
+      id: 10
+      iso2: DK
+      iso3: DNK
+      name: {en: Denmark, de: Dänemark, da: Danmark}
+      currency_code: '{{ $.Currency.dkk.Code }}'
+      eu_member: true
+
+- model: TaxRate
+  rows:
+    - {id: 1, country_id: '{{ $.Country.de.ID }}', tax_class: standard, rate: 0.19, valid_from: 2007-01-01, valid_to: 2027-07-01}
+    - {id: 2, country_id: '{{ $.Country.de.ID }}', tax_class: reduced, rate: 0.07, valid_from: 1983-07-01, valid_to: ~}
+    - {id: 3, country_id: '{{ $.Country.at.ID }}', tax_class: standard, rate: 0.20, valid_from: 1984-01-01, valid_to: ~}
+    - {id: 4, country_id: '{{ $.Country.at.ID }}', tax_class: reduced, rate: 0.10, valid_from: 1984-01-01, valid_to: 2027-08-01}
+    - {id: 5, country_id: '{{ $.Country.fr.ID }}', tax_class: standard, rate: 0.20, valid_from: 2014-01-01, valid_to: ~}
+    - {id: 6, country_id: '{{ $.Country.fr.ID }}', tax_class: reduced, rate: 0.055, valid_from: 2012-01-01, valid_to: ~}
+    - {id: 7, country_id: '{{ $.Country.nl.ID }}', tax_class: standard, rate: 0.21, valid_from: 2012-10-01, valid_to: ~}
+    - {id: 8, country_id: '{{ $.Country.nl.ID }}', tax_class: reduced, rate: 0.06, valid_from: 1986-10-01, valid_to: 2019-01-01}
+    - {id: 9, country_id: '{{ $.Country.nl.ID }}', tax_class: reduced, rate: 0.09, valid_from: 2019-01-01, valid_to: ~}
+    - {id: 10, country_id: '{{ $.Country.se.ID }}', tax_class: standard, rate: 0.25, valid_from: 1990-07-01, valid_to: ~}
+    - {id: 11, country_id: '{{ $.Country.se.ID }}', tax_class: reduced, rate: 0.12, valid_from: 1992-01-01, valid_to: ~}
+    - {id: 12, country_id: '{{ $.Country.ch.ID }}', tax_class: standard, rate: 0.077, valid_from: 2018-01-01, valid_to: 2024-01-01}
+    - {id: 13, country_id: '{{ $.Country.ch.ID }}', tax_class: standard, rate: 0.081, valid_from: 2024-01-01, valid_to: ~}
+    - {id: 14, country_id: '{{ $.Country.ch.ID }}', tax_class: reduced, rate: 0.026, valid_from: 2024-01-01, valid_to: ~}
+    - {id: 15, country_id: '{{ $.Country.gb.ID }}', tax_class: standard, rate: 0.20, valid_from: 2011-01-04, valid_to: ~}
+    - {id: 16, country_id: '{{ $.Country.gb.ID }}', tax_class: zero, rate: 0, valid_from: 1973-04-01, valid_to: ~}
+    - {id: 17, country_id: '{{ $.Country.us.ID }}', tax_class: zero, rate: 0, valid_from: 2020-01-01, valid_to: ~}
+    # Germany's standard rate rises on 1 July 2027: the old rate is closed
+    # the day the new one opens.
+    - {id: 18, country_id: '{{ $.Country.de.ID }}', tax_class: standard, rate: 0.20, valid_from: 2027-07-01, valid_to: ~}
+    - {id: 19, country_id: '{{ $.Country.pl.ID }}', tax_class: standard, rate: 0.23, valid_from: 2011-01-01, valid_to: ~}
+    - {id: 20, country_id: '{{ $.Country.pl.ID }}', tax_class: reduced, rate: 0.08, valid_from: 2011-01-01, valid_to: ~}
+    # Austria halves its reduced rate from 1 August 2027, announced three
+    # weeks before: a hotfix, applied by hand ahead of the deploy.
+    - {id: 21, country_id: '{{ $.Country.at.ID }}', tax_class: reduced, rate: 0.05, valid_from: 2027-08-01, valid_to: ~}
+    # Denmark has one rate for everything.
+    - {id: 22, country_id: '{{ $.Country.dk.ID }}', tax_class: standard, rate: 0.25, valid_from: 1992-01-01, valid_to: ~}

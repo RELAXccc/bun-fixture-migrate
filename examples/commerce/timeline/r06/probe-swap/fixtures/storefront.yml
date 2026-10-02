@@ -1,0 +1,20 @@
+# The storefront's menus and the addresses its mail comes from.
+
+- model: MenuItem
+  rows:
+    - {id: 5, menu: header, slug: sale, position: 1, label: {en: Sale, de: Sale}, url: /sale}
+    - {id: 1, menu: header, slug: new, position: 2, label: {en: New in, de: Neu}, url: /new}
+    - {id: 2, menu: header, slug: women, position: 3, label: {en: Women, de: Damen}, url: /c/womens}
+    - {id: 3, menu: header, slug: men, position: 4, label: {en: Men, de: Herren}, url: /c/mens}
+    - {id: 4, menu: header, slug: home, position: 5, label: {en: Home, de: Wohnen}, url: /c/home}
+    - {id: 6, menu: footer, slug: about, position: 1, label: {en: About us, de: Über uns}, url: /about}
+    - {id: 7, menu: footer, slug: shipping, position: 2, label: {en: Shipping, de: Versand}, url: /help/shipping}
+    - {id: 8, menu: footer, slug: returns, position: 3, label: {en: Returns & refunds, de: Rücksendung & Erstattung}, url: /help/returns}
+    - {id: 9, menu: footer, slug: contact, position: 4, label: {en: Contact, de: Kontakt}, url: /contact}
+
+- model: SenderIdentity
+  rows:
+    - {id: 1, code: orders, email: news@shop.example, display_name: Shop orders, reply_to: support@shop.example}
+    - {id: 2, code: support, email: support@shop.example, display_name: Shop support, reply_to: ~}
+    - {id: 3, code: newsletter, email: orders@shop.example, display_name: Shop newsletter, reply_to: ~}
+    - {id: 4, code: marketplace, email: marketplace@shop.example, display_name: Shop marketplace, reply_to: support@shop.example}

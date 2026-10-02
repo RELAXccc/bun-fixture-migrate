@@ -7,26 +7,72 @@
 
 # The dbfixture YAML file, relative to this file.
 fixture: fixtures/fixture.yml
+# Or, when the application loads several with one fixture.Load(ctx, fsys,
+# "currencies.yml", "plans.yml"), all of them in that order instead: one scope
+# of anchors across them, so a row of a later file can name one of an earlier
+# file and not the other way round. export writes each model back into the
+# file that holds it.
+# fixtures: [fixtures/currencies.yml, fixtures/plans.yml]
 # Where generated migrations go, and the Go package and migrator variable they
 # register with.
 out: internal/migrations
 package: migrations
 migrator: Migrations
-# A table that is never empty in a seeded database. While it is empty a
-# generated migration does nothing at all: that database has not been seeded
-# yet, and dbfixture is about to load the new state by itself. Leave it out
-# only if your migration chain never runs before the seed.
+# The table your migrator records applied migrations in: bun's default unless
+# you build the migrator with migrate.WithTableName. A generated migration that
+# fails deletes the record bun made of it before running it, so it runs again
+# once the database is fixed; status and plan read what was applied from here.
+migrations_table: bun_migrations
+# The table bun's Migrator.Lock writes a row into while it migrates: bun's
+# default unless you build the migrator with migrate.WithLocksTableName.
+# status reports a row a crashed deploy left there, which makes every later
+# migrate fail with "migrations table is already locked".
+migration_locks_table: bun_migration_locks
+# The state file: the fixture file as the generated migrations leave a
+# database. generate diffs against it, not against git, and rewrites it with
+# every migration, so an edit committed without a migration is still found and
+# generating twice never writes a change twice. Commit it. Default
+# <out>/fixture_state.yml.
+state: internal/migrations/fixture_state.yml
+# A table that is never empty in a seeded database: the table of a model the
+# fixture file fills, which the application never empties. While it is empty
+# a generated migration does nothing at all: that database has not been seeded
+# yet, and dbfixture is about to load the new state by itself. Without one, a
+# new database runs every fixture migration before its seed and the first that
+# changes a row fails, so generate warns; leave it out only if your migration
+# chain never runs before the seed.
 seed_guard_table: plans
-# Where export, check and generate -from-db connect. "env:NAME" reads the DSN
-# from an environment variable, which is how the password stays out of the
-# repository. PostgreSQL only.
+# How long a generated migration waits for a lock another session holds on a
+# row it writes -- an admin's open transaction, a long batch job -- before it
+# fails, rolls back and leaves the migration to the next deploy. Without it
+# the deploy waits for as long as that transaction stays open, and the
+# application's own writes to those rows queue up behind it. PostgreSQL's
+# spelling: 500ms, 10s, 1min. Waiting for another replica running the same
+# migrations is not cut short by it.
+lock_timeout: 10s
+# A table every generated migration writes one row into each time it runs, in
+# the transaction that made its changes: which changes it applied, which it
+# found made already, which it skipped and why. A rollback then undoes only
+# what the migration did in that database, instead of writing back old values
+# the database never held, and status shows per database what a deploy
+# skipped. The first migration creates it, which takes CREATE on its schema.
+# Optionally schema-qualified; written into every migration. Leave it out to
+# record nothing.
+audit_table: bun_fixture_audit
+# Where the commands that read a database connect, unless -dsn names another:
+# export, check, status, plan and sync, and generate and baseline to check
+# values against the columns. "env:NAME" reads the DSN from an environment
+# variable, which is how the password stays out of the repository. PostgreSQL
+# only.
 database: env:DATABASE_URL
 # The schema tables are looked for in when they are written without one.
 schema: public
 
 # The choices that depend on how you run your databases rather than on what is
 # correct. Everything not here is fixed, because the alternative would be a
-# setting that lets this tool corrupt a database.
+# setting that lets this tool corrupt a database. A model can override
+# id_drift, missing_row, changed_row, duplicate_key and key_index with keys of
+# the same names, and deletes and array_nulls.
 policy:
   # The id in the fixture file is not the id the database gave the row: the
   # file's id belongs to another row, or the row lives under a different id.
@@ -49,7 +95,8 @@ policy:
   missing_row: error
 
   # The row is there, but no longer holds the values the migration was
-  # generated against, because somebody changed it in this database.
+  # generated against: somebody edited it in this database, or another
+  # migration changed it first.
   #   warn   keep their change, apply nothing, say so (default)
   #   error  fail and roll back
   # warn is right when an admin UI edits this data in production: their edit is
@@ -68,13 +115,44 @@ policy:
   # it off does not make the problem go away, it makes it quiet.
   zero_default: error
 
-  # Two rows of one model share a natural key in the database.
+  # A fixture row writes an explicit null (~) into a column that has a default.
   #   error  refuse (default)
   #   warn   report it
+  #   ignore do not look
+  # bun sends DEFAULT rather than NULL for a nil pointer, and for a zero in a
+  # nullzero field, which is how a nullable column is usually modelled. So the
+  # file says null and the database holds the default. Only a field such as
+  # sql.NullString without either tag writes the NULL; set warn or ignore if
+  # that is how your models spell nullable columns.
+  null_default: error
+
+  # Two rows of one model share a natural key in the database.
+  #   error  refuse, and at run time fail the migration (default)
+  #   warn   report it; at run time leave those rows alone and carry on
   # Every guard and every reference this tool writes matches on that key, so
-  # two rows holding it make the lookup pick one of them at random. Nothing
-  # makes that safe; warn exists so you can see the whole list before fixing it.
+  # nothing can say which of two rows holding it the fixture file means. A
+  # generated change never touches more than one row. warn exists so you can
+  # see the whole list before fixing it; a change skipped with a warning is
+  # recorded as applied with the rest of its migration, like missing_row.
   duplicate_key: error
+
+  # No unique index or constraint of the table makes a natural key, or the
+  # ref column of a model another one references, unique among the model's
+  # rows: there is none, it is over more columns than the key, it holds NULLs
+  # distinct in a nullable key column, it is partial over rows the model's
+  # where does not keep to, or a CREATE INDEX CONCURRENTLY that failed left it
+  # invalid. Checked by check, generate, status and sync against the
+  # database, and noted by plan; never written into a migration.
+  #   error  refuse, as check (exit 3), generate and sync (exit 2) do
+  #   warn   report it (default)
+  #   ignore do not look
+  # Nothing is written to the wrong row without an index: a lookup two rows
+  # answer is a duplicate key and touches neither. What it costs is the
+  # deploy: the application or an admin UI adds the second row, or races the
+  # migration's own insert, and every change to that key fails from then on.
+  # The finding names the CREATE UNIQUE INDEX that backs the key. scaffold
+  # writes error for a new project.
+  key_index: warn
 
   # A row kept its id and changed its natural key.
   #   refuse  report it and write nothing for that row (default)
@@ -87,11 +165,36 @@ policy:
   renames: refuse
 
   # A row left the fixture file.
-  #   allow   write a guarded DELETE (default)
-  #   refuse  report it
-  # Override it per model, below, wherever other tables point at the row and
-  # only you can say whether they should cascade, be repointed or block it.
+  #   allow    write a guarded DELETE (default). If rows of other tables still
+  #            point at it, the migration fails instead of letting a foreign
+  #            key's ON DELETE CASCADE or SET NULL reach them.
+  #   refuse   report it and write nothing
+  #   cascade  write the DELETE and let those foreign keys do what they say
+  # Override it per model, below, wherever only you can say whether the rows
+  # pointing at one should go with it, be repointed or block it.
   deletes: allow
+
+  # A null inside a sequence, [a, ~, b], in an array column.
+  #   refuse  report it and refuse a change that carries it (default)
+  #   keep    the array holds a NULL element there
+  # yaml.v3 leaves the null out of a []string or []int64 field and keeps it in a
+  # []*string or []sql.NullString one, and the fixture file does not say which
+  # the model has. Set keep if your array fields keep a null; with plain slices,
+  # leave nulls out of the file. Override it per model where they differ.
+  array_nulls: refuse
+
+  # Which rows of a model the fixture file owns, for every model that does not
+  # say: set mode on a model, below, to override it.
+  #   sync    all of them (default): a row the file adds is inserted, a value it
+  #           changes is updated, a row it does not hold is deleted
+  #   upsert  the rows it holds, inserted and updated; a row only a database
+  #           holds, a tenant's or one the application added, is no drift and
+  #           never deleted, and an export writes only the file's rows
+  #   insert  only the rows a database lacks, by natural key: a row it holds is
+  #           its own from then on, values and all, an admin's edit included
+  # deletes only applies under sync, and a model that sets it next to upsert or
+  # insert is refused. check counts what upsert and insert leave alone.
+  mode: sync
 
 # One entry per model of the fixture file. A model in the file that is not
 # listed here stops the tool: a model nobody configured is a mistake, and a
@@ -101,7 +204,9 @@ models:
     table: currencies
     # The primary key. It is never compared as an ordinary column and never
     # updated; it is written on an insert when the fixture row has one, and it
-    # is what a reference to this model resolves to.
+    # is what a reference to this model resolves to. "none" for a table with no
+    # id of its own, whose primary key is another model's id: a plan's details
+    # keyed by the plan, with key: [id] and references: {id: Plan}.
     id: id
     # The natural key: what identifies a row when its id means nothing. Every
     # guard the generated migration writes matches on these columns, so the
@@ -110,6 +215,12 @@ models:
     # The column another model's reference to this one names it by. Default
     # "name".
     ref: code
+    # The policy block's changed_row, for this model alone: nothing but the
+    # fixture file writes currencies, so a currency that differs from what a
+    # migration expects is a fault, not an admin's edit to keep. Likewise
+    # missing_row, id_drift and duplicate_key; each is written into the
+    # migration for this model's changes.
+    changed_row: error
 
   Plan:
     table: plans
@@ -136,10 +247,12 @@ models:
     # omitted column is "not set", which compares equal to another omitted
     # column and to nothing else; a column written on one side and omitted on
     # the other is refused rather than guessed at. The scaffold fills this in
-    # from the database's column defaults.
+    # from the database's column defaults. ~ means NULL, which is right for a
+    # column added to the table later: the rows written before it hold NULL.
     defaults:
       price_cents: "0"
       seats: "1"
+      note: ~
     # Other tables point at a plan, and only you can say what should happen to
     # them when one goes away.
     deletes: refuse
@@ -156,6 +269,13 @@ models:
     defaults:
       quota: "0"
       enabled: "false"
+    # Columns an insert writes and the database owns from then on: a feature
+    # starts as the file says, and operators turn it on and off in production.
+    # Once the row exists nothing compares them, no update writes them and no
+    # delete is guarded by them, and an export keeps the file's value. Unlike
+    # ignore, they are written; unlike derived, by the insert. Never a column
+    # of the key, the ref column or the id.
+    insert_only: [enabled]
 
   # A table whose identity includes which of a few mutually exclusive columns
   # is set. key_any_of adds, per group, the first column of that group holding
@@ -182,3 +302,32 @@ models:
     table: addons
     serial: true
     key: [name]
+    # policy.array_nulls for this model's array columns alone: its Go fields
+    # are []*string, which keep a null inside a sequence.
+    array_nulls: keep
+    # The application retires add-ons with bun's soft delete: the model has
+    # DeletedAt time.Time `bun:",soft_delete,nullzero"`, or a *time.Time.
+    # soft_delete names its column, a nullable timestamptz without a default.
+    # Only live rows, where it is NULL, are master data: check, sync and
+    # export read no other, and never the column. A row that leaves the file
+    # is soft-deleted, not deleted; one that comes back is restored, with its
+    # id and the rows pointing at it. Never set it from the column's name
+    # alone: without the Go tag, bun reads every row. Not with mode insert,
+    # deletes: cascade, or the column named in where.
+    soft_delete: deleted_at
+
+  # A table tenants add roles of their own to, numbered by the same sequence.
+  Role:
+    table: roles
+    key: [code]
+    ref: code
+    # The fixture file adds and updates its roles and never deletes one: a
+    # tenant's role is no drift, and an export writes only the file's roles.
+    mode: upsert
+    # The database gives every role its id, "file" being the default. The file
+    # may still number its roles, for a reference such as role_id: 3 to
+    # resolve, but a migration inserts a role without its id, so it takes the
+    # sequence's next one instead of one a tenant's role holds; nothing
+    # compares the ids, and an export writes none. Neither key nor ref can be
+    # the id then.
+    ids: database

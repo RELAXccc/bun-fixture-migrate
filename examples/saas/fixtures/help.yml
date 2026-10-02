@@ -1,0 +1,1505 @@
+# The help centre: 500 articles, each with a title in three languages.
+# Loaded after i18n.yml; the same model may sit in several files.
+
+- model: Translation
+  rows:
+    - {locale: en, key: help.article.001.title, value: "Troubleshooting INVOICES (1)"}
+    - {locale: de, key: help.article.001.title, value: "Fehlerbehebung: INVOICES (1)"}
+    - {locale: fr, key: help.article.001.title, value: "Dépannage : INVOICES (1)"}
+    - {locale: en, key: help.article.002.title, value: "Understanding SEATS (2)"}
+    - {locale: de, key: help.article.002.title, value: "Verständnis: SEATS (2)"}
+    - {locale: fr, key: help.article.002.title, value: "Comprendre SEATS (2)"}
+    - {locale: en, key: help.article.003.title, value: "Changing SSO (3)"}
+    - {locale: de, key: help.article.003.title, value: "Ändern: SSO (3)"}
+    - {locale: fr, key: help.article.003.title, value: "Modifier SSO (3)"}
+    - {locale: en, key: help.article.004.title, value: "Limits of SCIM (4)"}
+    - {locale: de, key: help.article.004.title, value: "Grenzen von SCIM (4)"}
+    - {locale: fr, key: help.article.004.title, value: "Limites de SCIM (4)"}
+    - {locale: en, key: help.article.005.title, value: "How to set up API (5)"}
+    - {locale: de, key: help.article.005.title, value: "So richten Sie ein: API (5)"}
+    - {locale: fr, key: help.article.005.title, value: "Configurer API (5)"}
+    - {locale: en, key: help.article.006.title, value: "Troubleshooting WEBHOOKS (6)"}
+    - {locale: de, key: help.article.006.title, value: "Fehlerbehebung: WEBHOOKS (6)"}
+    - {locale: fr, key: help.article.006.title, value: "Dépannage : WEBHOOKS (6)"}
+    - {locale: en, key: help.article.007.title, value: "Understanding EXPORTS (7)"}
+    - {locale: de, key: help.article.007.title, value: "Verständnis: EXPORTS (7) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.007.title, value: "Comprendre EXPORTS (7)"}
+    - {locale: en, key: help.article.008.title, value: "Changing DASHBOARDS (8)"}
+    - {locale: de, key: help.article.008.title, value: "Ändern: DASHBOARDS (8)"}
+    - {locale: fr, key: help.article.008.title, value: "Modifier DASHBOARDS (8)"}
+    - {locale: en, key: help.article.009.title, value: "Limits of ROLES (9)"}
+    - {locale: de, key: help.article.009.title, value: "Grenzen von ROLES (9)"}
+    - {locale: fr, key: help.article.009.title, value: "Limites de ROLES (9)"}
+    - {locale: en, key: help.article.010.title, value: "How to set up BILLING (10)"}
+    - {locale: de, key: help.article.010.title, value: "So richten Sie ein: BILLING (10)"}
+    - {locale: fr, key: help.article.010.title, value: "Configurer BILLING (10)"}
+    - {locale: en, key: help.article.011.title, value: "Troubleshooting INVOICES (11)"}
+    - {locale: de, key: help.article.011.title, value: "Fehlerbehebung: INVOICES (11)"}
+    - {locale: fr, key: help.article.011.title, value: "Dépannage : INVOICES (11) « avancé »"}
+    - {locale: en, key: help.article.012.title, value: "Understanding SEATS (12)"}
+    - {locale: de, key: help.article.012.title, value: "Verständnis: SEATS (12)"}
+    - {locale: fr, key: help.article.012.title, value: "Comprendre SEATS (12)"}
+    - {locale: en, key: help.article.013.title, value: "Changing SSO (13)"}
+    - {locale: de, key: help.article.013.title, value: "Ändern: SSO (13)"}
+    - {locale: fr, key: help.article.013.title, value: "Modifier SSO (13)"}
+    - {locale: en, key: help.article.014.title, value: "Limits of SCIM (14)"}
+    - {locale: de, key: help.article.014.title, value: "Grenzen von SCIM (14) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.014.title, value: "Limites de SCIM (14)"}
+    - {locale: en, key: help.article.015.title, value: "How to set up API (15)"}
+    - {locale: de, key: help.article.015.title, value: "So richten Sie ein: API (15)"}
+    - {locale: fr, key: help.article.015.title, value: "Configurer API (15)"}
+    - {locale: en, key: help.article.016.title, value: "Troubleshooting WEBHOOKS (16)"}
+    - {locale: de, key: help.article.016.title, value: "Fehlerbehebung: WEBHOOKS (16)"}
+    - {locale: fr, key: help.article.016.title, value: "Dépannage : WEBHOOKS (16)"}
+    - {locale: en, key: help.article.017.title, value: "Understanding EXPORTS (17)"}
+    - {locale: de, key: help.article.017.title, value: "Verständnis: EXPORTS (17)"}
+    - {locale: fr, key: help.article.017.title, value: "Comprendre EXPORTS (17)"}
+    - {locale: en, key: help.article.018.title, value: "Changing DASHBOARDS (18)"}
+    - {locale: de, key: help.article.018.title, value: "Ändern: DASHBOARDS (18)"}
+    - {locale: fr, key: help.article.018.title, value: "Modifier DASHBOARDS (18)"}
+    - {locale: en, key: help.article.019.title, value: "Limits of ROLES (19)"}
+    - {locale: de, key: help.article.019.title, value: "Grenzen von ROLES (19)"}
+    - {locale: fr, key: help.article.019.title, value: "Limites de ROLES (19)"}
+    - {locale: en, key: help.article.020.title, value: "How to set up BILLING (20)"}
+    - {locale: de, key: help.article.020.title, value: "So richten Sie ein: BILLING (20)"}
+    - {locale: fr, key: help.article.020.title, value: "Configurer BILLING (20)"}
+    - {locale: en, key: help.article.021.title, value: "Troubleshooting INVOICES (21)"}
+    - {locale: de, key: help.article.021.title, value: "Fehlerbehebung: INVOICES (21) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.021.title, value: "Dépannage : INVOICES (21)"}
+    - {locale: en, key: help.article.022.title, value: "Understanding SEATS (22)"}
+    - {locale: de, key: help.article.022.title, value: "Verständnis: SEATS (22)"}
+    - {locale: fr, key: help.article.022.title, value: "Comprendre SEATS (22) « avancé »"}
+    - {locale: en, key: help.article.023.title, value: "Changing SSO (23)"}
+    - {locale: de, key: help.article.023.title, value: "Ändern: SSO (23)"}
+    - {locale: fr, key: help.article.023.title, value: "Modifier SSO (23)"}
+    - {locale: en, key: help.article.024.title, value: "Limits of SCIM (24)"}
+    - {locale: de, key: help.article.024.title, value: "Grenzen von SCIM (24)"}
+    - {locale: fr, key: help.article.024.title, value: "Limites de SCIM (24)"}
+    - {locale: en, key: help.article.025.title, value: "How to set up API (25)"}
+    - {locale: de, key: help.article.025.title, value: "So richten Sie ein: API (25)"}
+    - {locale: fr, key: help.article.025.title, value: "Configurer API (25)"}
+    - {locale: en, key: help.article.026.title, value: "Troubleshooting WEBHOOKS (26)"}
+    - {locale: de, key: help.article.026.title, value: "Fehlerbehebung: WEBHOOKS (26)"}
+    - {locale: fr, key: help.article.026.title, value: "Dépannage : WEBHOOKS (26)"}
+    - {locale: en, key: help.article.027.title, value: "Understanding EXPORTS (27)"}
+    - {locale: de, key: help.article.027.title, value: "Verständnis: EXPORTS (27)"}
+    - {locale: fr, key: help.article.027.title, value: "Comprendre EXPORTS (27)"}
+    - {locale: en, key: help.article.028.title, value: "Changing DASHBOARDS (28)"}
+    - {locale: de, key: help.article.028.title, value: "Ändern: DASHBOARDS (28) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.028.title, value: "Modifier DASHBOARDS (28)"}
+    - {locale: en, key: help.article.029.title, value: "Limits of ROLES (29)"}
+    - {locale: de, key: help.article.029.title, value: "Grenzen von ROLES (29)"}
+    - {locale: fr, key: help.article.029.title, value: "Limites de ROLES (29)"}
+    - {locale: en, key: help.article.030.title, value: "How to set up BILLING (30)"}
+    - {locale: de, key: help.article.030.title, value: "So richten Sie ein: BILLING (30)"}
+    - {locale: fr, key: help.article.030.title, value: "Configurer BILLING (30)"}
+    - {locale: en, key: help.article.031.title, value: "Troubleshooting INVOICES (31)"}
+    - {locale: de, key: help.article.031.title, value: "Fehlerbehebung: INVOICES (31)"}
+    - {locale: fr, key: help.article.031.title, value: "Dépannage : INVOICES (31)"}
+    - {locale: en, key: help.article.032.title, value: "Understanding SEATS (32)"}
+    - {locale: de, key: help.article.032.title, value: "Verständnis: SEATS (32)"}
+    - {locale: fr, key: help.article.032.title, value: "Comprendre SEATS (32)"}
+    - {locale: en, key: help.article.033.title, value: "Changing SSO (33)"}
+    - {locale: de, key: help.article.033.title, value: "Ändern: SSO (33)"}
+    - {locale: fr, key: help.article.033.title, value: "Modifier SSO (33) « avancé »"}
+    - {locale: en, key: help.article.034.title, value: "Limits of SCIM (34)"}
+    - {locale: de, key: help.article.034.title, value: "Grenzen von SCIM (34)"}
+    - {locale: fr, key: help.article.034.title, value: "Limites de SCIM (34)"}
+    - {locale: en, key: help.article.035.title, value: "How to set up API (35)"}
+    - {locale: de, key: help.article.035.title, value: "So richten Sie ein: API (35) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.035.title, value: "Configurer API (35)"}
+    - {locale: en, key: help.article.036.title, value: "Troubleshooting WEBHOOKS (36)"}
+    - {locale: de, key: help.article.036.title, value: "Fehlerbehebung: WEBHOOKS (36)"}
+    - {locale: fr, key: help.article.036.title, value: "Dépannage : WEBHOOKS (36)"}
+    - {locale: en, key: help.article.037.title, value: "Understanding EXPORTS (37)"}
+    - {locale: de, key: help.article.037.title, value: "Verständnis: EXPORTS (37)"}
+    - {locale: fr, key: help.article.037.title, value: "Comprendre EXPORTS (37)"}
+    - {locale: en, key: help.article.038.title, value: "Changing DASHBOARDS (38)"}
+    - {locale: de, key: help.article.038.title, value: "Ändern: DASHBOARDS (38)"}
+    - {locale: fr, key: help.article.038.title, value: "Modifier DASHBOARDS (38)"}
+    - {locale: en, key: help.article.039.title, value: "Limits of ROLES (39)"}
+    - {locale: de, key: help.article.039.title, value: "Grenzen von ROLES (39)"}
+    - {locale: fr, key: help.article.039.title, value: "Limites de ROLES (39)"}
+    - {locale: en, key: help.article.040.title, value: "How to set up BILLING (40)"}
+    - {locale: de, key: help.article.040.title, value: "So richten Sie ein: BILLING (40)"}
+    - {locale: fr, key: help.article.040.title, value: "Configurer BILLING (40)"}
+    - {locale: en, key: help.article.041.title, value: "Troubleshooting INVOICES (41)"}
+    - {locale: de, key: help.article.041.title, value: "Fehlerbehebung: INVOICES (41)"}
+    - {locale: fr, key: help.article.041.title, value: "Dépannage : INVOICES (41)"}
+    - {locale: en, key: help.article.042.title, value: "Understanding SEATS (42)"}
+    - {locale: de, key: help.article.042.title, value: "Verständnis: SEATS (42) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.042.title, value: "Comprendre SEATS (42)"}
+    - {locale: en, key: help.article.043.title, value: "Changing SSO (43)"}
+    - {locale: de, key: help.article.043.title, value: "Ändern: SSO (43)"}
+    - {locale: fr, key: help.article.043.title, value: "Modifier SSO (43)"}
+    - {locale: en, key: help.article.044.title, value: "Limits of SCIM (44)"}
+    - {locale: de, key: help.article.044.title, value: "Grenzen von SCIM (44)"}
+    - {locale: fr, key: help.article.044.title, value: "Limites de SCIM (44) « avancé »"}
+    - {locale: en, key: help.article.045.title, value: "How to set up API (45)"}
+    - {locale: de, key: help.article.045.title, value: "So richten Sie ein: API (45)"}
+    - {locale: fr, key: help.article.045.title, value: "Configurer API (45)"}
+    - {locale: en, key: help.article.046.title, value: "Troubleshooting WEBHOOKS (46)"}
+    - {locale: de, key: help.article.046.title, value: "Fehlerbehebung: WEBHOOKS (46)"}
+    - {locale: fr, key: help.article.046.title, value: "Dépannage : WEBHOOKS (46)"}
+    - {locale: en, key: help.article.047.title, value: "Understanding EXPORTS (47)"}
+    - {locale: de, key: help.article.047.title, value: "Verständnis: EXPORTS (47)"}
+    - {locale: fr, key: help.article.047.title, value: "Comprendre EXPORTS (47)"}
+    - {locale: en, key: help.article.048.title, value: "Changing DASHBOARDS (48)"}
+    - {locale: de, key: help.article.048.title, value: "Ändern: DASHBOARDS (48)"}
+    - {locale: fr, key: help.article.048.title, value: "Modifier DASHBOARDS (48)"}
+    - {locale: en, key: help.article.049.title, value: "Limits of ROLES (49)"}
+    - {locale: de, key: help.article.049.title, value: "Grenzen von ROLES (49) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.049.title, value: "Limites de ROLES (49)"}
+    - {locale: en, key: help.article.050.title, value: "How to set up BILLING (50)"}
+    - {locale: de, key: help.article.050.title, value: "So richten Sie ein: BILLING (50)"}
+    - {locale: fr, key: help.article.050.title, value: "Configurer BILLING (50)"}
+    - {locale: en, key: help.article.051.title, value: "Troubleshooting INVOICES (51)"}
+    - {locale: de, key: help.article.051.title, value: "Fehlerbehebung: INVOICES (51)"}
+    - {locale: fr, key: help.article.051.title, value: "Dépannage : INVOICES (51)"}
+    - {locale: en, key: help.article.052.title, value: "Understanding SEATS (52)"}
+    - {locale: de, key: help.article.052.title, value: "Verständnis: SEATS (52)"}
+    - {locale: fr, key: help.article.052.title, value: "Comprendre SEATS (52)"}
+    - {locale: en, key: help.article.053.title, value: "Changing SSO (53)"}
+    - {locale: de, key: help.article.053.title, value: "Ändern: SSO (53)"}
+    - {locale: fr, key: help.article.053.title, value: "Modifier SSO (53)"}
+    - {locale: en, key: help.article.054.title, value: "Limits of SCIM (54)"}
+    - {locale: de, key: help.article.054.title, value: "Grenzen von SCIM (54)"}
+    - {locale: fr, key: help.article.054.title, value: "Limites de SCIM (54)"}
+    - {locale: en, key: help.article.055.title, value: "How to set up API (55)"}
+    - {locale: de, key: help.article.055.title, value: "So richten Sie ein: API (55)"}
+    - {locale: fr, key: help.article.055.title, value: "Configurer API (55) « avancé »"}
+    - {locale: en, key: help.article.056.title, value: "Troubleshooting WEBHOOKS (56)"}
+    - {locale: de, key: help.article.056.title, value: "Fehlerbehebung: WEBHOOKS (56) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.056.title, value: "Dépannage : WEBHOOKS (56)"}
+    - {locale: en, key: help.article.057.title, value: "Understanding EXPORTS (57)"}
+    - {locale: de, key: help.article.057.title, value: "Verständnis: EXPORTS (57)"}
+    - {locale: fr, key: help.article.057.title, value: "Comprendre EXPORTS (57)"}
+    - {locale: en, key: help.article.058.title, value: "Changing DASHBOARDS (58)"}
+    - {locale: de, key: help.article.058.title, value: "Ändern: DASHBOARDS (58)"}
+    - {locale: fr, key: help.article.058.title, value: "Modifier DASHBOARDS (58)"}
+    - {locale: en, key: help.article.059.title, value: "Limits of ROLES (59)"}
+    - {locale: de, key: help.article.059.title, value: "Grenzen von ROLES (59)"}
+    - {locale: fr, key: help.article.059.title, value: "Limites de ROLES (59)"}
+    - {locale: en, key: help.article.060.title, value: "How to set up BILLING (60)"}
+    - {locale: de, key: help.article.060.title, value: "So richten Sie ein: BILLING (60)"}
+    - {locale: fr, key: help.article.060.title, value: "Configurer BILLING (60)"}
+    - {locale: en, key: help.article.061.title, value: "Troubleshooting INVOICES (61)"}
+    - {locale: de, key: help.article.061.title, value: "Fehlerbehebung: INVOICES (61)"}
+    - {locale: fr, key: help.article.061.title, value: "Dépannage : INVOICES (61)"}
+    - {locale: en, key: help.article.062.title, value: "Understanding SEATS (62)"}
+    - {locale: de, key: help.article.062.title, value: "Verständnis: SEATS (62)"}
+    - {locale: fr, key: help.article.062.title, value: "Comprendre SEATS (62)"}
+    - {locale: en, key: help.article.063.title, value: "Changing SSO (63)"}
+    - {locale: de, key: help.article.063.title, value: "Ändern: SSO (63) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.063.title, value: "Modifier SSO (63)"}
+    - {locale: en, key: help.article.064.title, value: "Limits of SCIM (64)"}
+    - {locale: de, key: help.article.064.title, value: "Grenzen von SCIM (64)"}
+    - {locale: fr, key: help.article.064.title, value: "Limites de SCIM (64)"}
+    - {locale: en, key: help.article.065.title, value: "How to set up API (65)"}
+    - {locale: de, key: help.article.065.title, value: "So richten Sie ein: API (65)"}
+    - {locale: fr, key: help.article.065.title, value: "Configurer API (65)"}
+    - {locale: en, key: help.article.066.title, value: "Troubleshooting WEBHOOKS (66)"}
+    - {locale: de, key: help.article.066.title, value: "Fehlerbehebung: WEBHOOKS (66)"}
+    - {locale: fr, key: help.article.066.title, value: "Dépannage : WEBHOOKS (66) « avancé »"}
+    - {locale: en, key: help.article.067.title, value: "Understanding EXPORTS (67)"}
+    - {locale: de, key: help.article.067.title, value: "Verständnis: EXPORTS (67)"}
+    - {locale: fr, key: help.article.067.title, value: "Comprendre EXPORTS (67)"}
+    - {locale: en, key: help.article.068.title, value: "Changing DASHBOARDS (68)"}
+    - {locale: de, key: help.article.068.title, value: "Ändern: DASHBOARDS (68)"}
+    - {locale: fr, key: help.article.068.title, value: "Modifier DASHBOARDS (68)"}
+    - {locale: en, key: help.article.069.title, value: "Limits of ROLES (69)"}
+    - {locale: de, key: help.article.069.title, value: "Grenzen von ROLES (69)"}
+    - {locale: fr, key: help.article.069.title, value: "Limites de ROLES (69)"}
+    - {locale: en, key: help.article.070.title, value: "How to set up BILLING (70)"}
+    - {locale: de, key: help.article.070.title, value: "So richten Sie ein: BILLING (70) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.070.title, value: "Configurer BILLING (70)"}
+    - {locale: en, key: help.article.071.title, value: "Troubleshooting INVOICES (71)"}
+    - {locale: de, key: help.article.071.title, value: "Fehlerbehebung: INVOICES (71)"}
+    - {locale: fr, key: help.article.071.title, value: "Dépannage : INVOICES (71)"}
+    - {locale: en, key: help.article.072.title, value: "Understanding SEATS (72)"}
+    - {locale: de, key: help.article.072.title, value: "Verständnis: SEATS (72)"}
+    - {locale: fr, key: help.article.072.title, value: "Comprendre SEATS (72)"}
+    - {locale: en, key: help.article.073.title, value: "Changing SSO (73)"}
+    - {locale: de, key: help.article.073.title, value: "Ändern: SSO (73)"}
+    - {locale: fr, key: help.article.073.title, value: "Modifier SSO (73)"}
+    - {locale: en, key: help.article.074.title, value: "Limits of SCIM (74)"}
+    - {locale: de, key: help.article.074.title, value: "Grenzen von SCIM (74)"}
+    - {locale: fr, key: help.article.074.title, value: "Limites de SCIM (74)"}
+    - {locale: en, key: help.article.075.title, value: "How to set up API (75)"}
+    - {locale: de, key: help.article.075.title, value: "So richten Sie ein: API (75)"}
+    - {locale: fr, key: help.article.075.title, value: "Configurer API (75)"}
+    - {locale: en, key: help.article.076.title, value: "Troubleshooting WEBHOOKS (76)"}
+    - {locale: de, key: help.article.076.title, value: "Fehlerbehebung: WEBHOOKS (76)"}
+    - {locale: fr, key: help.article.076.title, value: "Dépannage : WEBHOOKS (76)"}
+    - {locale: en, key: help.article.077.title, value: "Understanding EXPORTS (77)"}
+    - {locale: de, key: help.article.077.title, value: "Verständnis: EXPORTS (77) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.077.title, value: "Comprendre EXPORTS (77) « avancé »"}
+    - {locale: en, key: help.article.078.title, value: "Changing DASHBOARDS (78)"}
+    - {locale: de, key: help.article.078.title, value: "Ändern: DASHBOARDS (78)"}
+    - {locale: fr, key: help.article.078.title, value: "Modifier DASHBOARDS (78)"}
+    - {locale: en, key: help.article.079.title, value: "Limits of ROLES (79)"}
+    - {locale: de, key: help.article.079.title, value: "Grenzen von ROLES (79)"}
+    - {locale: fr, key: help.article.079.title, value: "Limites de ROLES (79)"}
+    - {locale: en, key: help.article.080.title, value: "How to set up BILLING (80)"}
+    - {locale: de, key: help.article.080.title, value: "So richten Sie ein: BILLING (80)"}
+    - {locale: fr, key: help.article.080.title, value: "Configurer BILLING (80)"}
+    - {locale: en, key: help.article.081.title, value: "Troubleshooting INVOICES (81)"}
+    - {locale: de, key: help.article.081.title, value: "Fehlerbehebung: INVOICES (81)"}
+    - {locale: fr, key: help.article.081.title, value: "Dépannage : INVOICES (81)"}
+    - {locale: en, key: help.article.082.title, value: "Understanding SEATS (82)"}
+    - {locale: de, key: help.article.082.title, value: "Verständnis: SEATS (82)"}
+    - {locale: fr, key: help.article.082.title, value: "Comprendre SEATS (82)"}
+    - {locale: en, key: help.article.083.title, value: "Changing SSO (83)"}
+    - {locale: de, key: help.article.083.title, value: "Ändern: SSO (83)"}
+    - {locale: fr, key: help.article.083.title, value: "Modifier SSO (83)"}
+    - {locale: en, key: help.article.084.title, value: "Limits of SCIM (84)"}
+    - {locale: de, key: help.article.084.title, value: "Grenzen von SCIM (84) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.084.title, value: "Limites de SCIM (84)"}
+    - {locale: en, key: help.article.085.title, value: "How to set up API (85)"}
+    - {locale: de, key: help.article.085.title, value: "So richten Sie ein: API (85)"}
+    - {locale: fr, key: help.article.085.title, value: "Configurer API (85)"}
+    - {locale: en, key: help.article.086.title, value: "Troubleshooting WEBHOOKS (86)"}
+    - {locale: de, key: help.article.086.title, value: "Fehlerbehebung: WEBHOOKS (86)"}
+    - {locale: fr, key: help.article.086.title, value: "Dépannage : WEBHOOKS (86)"}
+    - {locale: en, key: help.article.087.title, value: "Understanding EXPORTS (87)"}
+    - {locale: de, key: help.article.087.title, value: "Verständnis: EXPORTS (87)"}
+    - {locale: fr, key: help.article.087.title, value: "Comprendre EXPORTS (87)"}
+    - {locale: en, key: help.article.088.title, value: "Changing DASHBOARDS (88)"}
+    - {locale: de, key: help.article.088.title, value: "Ändern: DASHBOARDS (88)"}
+    - {locale: fr, key: help.article.088.title, value: "Modifier DASHBOARDS (88) « avancé »"}
+    - {locale: en, key: help.article.089.title, value: "Limits of ROLES (89)"}
+    - {locale: de, key: help.article.089.title, value: "Grenzen von ROLES (89)"}
+    - {locale: fr, key: help.article.089.title, value: "Limites de ROLES (89)"}
+    - {locale: en, key: help.article.090.title, value: "How to set up BILLING (90)"}
+    - {locale: de, key: help.article.090.title, value: "So richten Sie ein: BILLING (90)"}
+    - {locale: fr, key: help.article.090.title, value: "Configurer BILLING (90)"}
+    - {locale: en, key: help.article.091.title, value: "Troubleshooting INVOICES (91)"}
+    - {locale: de, key: help.article.091.title, value: "Fehlerbehebung: INVOICES (91) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.091.title, value: "Dépannage : INVOICES (91)"}
+    - {locale: en, key: help.article.092.title, value: "Understanding SEATS (92)"}
+    - {locale: de, key: help.article.092.title, value: "Verständnis: SEATS (92)"}
+    - {locale: fr, key: help.article.092.title, value: "Comprendre SEATS (92)"}
+    - {locale: en, key: help.article.093.title, value: "Changing SSO (93)"}
+    - {locale: de, key: help.article.093.title, value: "Ändern: SSO (93)"}
+    - {locale: fr, key: help.article.093.title, value: "Modifier SSO (93)"}
+    - {locale: en, key: help.article.094.title, value: "Limits of SCIM (94)"}
+    - {locale: de, key: help.article.094.title, value: "Grenzen von SCIM (94)"}
+    - {locale: fr, key: help.article.094.title, value: "Limites de SCIM (94)"}
+    - {locale: en, key: help.article.095.title, value: "How to set up API (95)"}
+    - {locale: de, key: help.article.095.title, value: "So richten Sie ein: API (95)"}
+    - {locale: fr, key: help.article.095.title, value: "Configurer API (95)"}
+    - {locale: en, key: help.article.096.title, value: "Troubleshooting WEBHOOKS (96)"}
+    - {locale: de, key: help.article.096.title, value: "Fehlerbehebung: WEBHOOKS (96)"}
+    - {locale: fr, key: help.article.096.title, value: "Dépannage : WEBHOOKS (96)"}
+    - {locale: en, key: help.article.097.title, value: "Understanding EXPORTS (97)"}
+    - {locale: de, key: help.article.097.title, value: "Verständnis: EXPORTS (97)"}
+    - {locale: fr, key: help.article.097.title, value: "Comprendre EXPORTS (97)"}
+    - {locale: en, key: help.article.098.title, value: "Changing DASHBOARDS (98)"}
+    - {locale: de, key: help.article.098.title, value: "Ändern: DASHBOARDS (98) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.098.title, value: "Modifier DASHBOARDS (98)"}
+    - {locale: en, key: help.article.099.title, value: "Limits of ROLES (99)"}
+    - {locale: de, key: help.article.099.title, value: "Grenzen von ROLES (99)"}
+    - {locale: fr, key: help.article.099.title, value: "Limites de ROLES (99) « avancé »"}
+    - {locale: en, key: help.article.100.title, value: "How to set up BILLING (100)"}
+    - {locale: de, key: help.article.100.title, value: "So richten Sie ein: BILLING (100)"}
+    - {locale: fr, key: help.article.100.title, value: "Configurer BILLING (100)"}
+    - {locale: en, key: help.article.101.title, value: "Troubleshooting INVOICES (101)"}
+    - {locale: de, key: help.article.101.title, value: "Fehlerbehebung: INVOICES (101)"}
+    - {locale: fr, key: help.article.101.title, value: "Dépannage : INVOICES (101)"}
+    - {locale: en, key: help.article.102.title, value: "Understanding SEATS (102)"}
+    - {locale: de, key: help.article.102.title, value: "Verständnis: SEATS (102)"}
+    - {locale: fr, key: help.article.102.title, value: "Comprendre SEATS (102)"}
+    - {locale: en, key: help.article.103.title, value: "Changing SSO (103)"}
+    - {locale: de, key: help.article.103.title, value: "Ändern: SSO (103)"}
+    - {locale: fr, key: help.article.103.title, value: "Modifier SSO (103)"}
+    - {locale: en, key: help.article.104.title, value: "Limits of SCIM (104)"}
+    - {locale: de, key: help.article.104.title, value: "Grenzen von SCIM (104)"}
+    - {locale: fr, key: help.article.104.title, value: "Limites de SCIM (104)"}
+    - {locale: en, key: help.article.105.title, value: "How to set up API (105)"}
+    - {locale: de, key: help.article.105.title, value: "So richten Sie ein: API (105) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.105.title, value: "Configurer API (105)"}
+    - {locale: en, key: help.article.106.title, value: "Troubleshooting WEBHOOKS (106)"}
+    - {locale: de, key: help.article.106.title, value: "Fehlerbehebung: WEBHOOKS (106)"}
+    - {locale: fr, key: help.article.106.title, value: "Dépannage : WEBHOOKS (106)"}
+    - {locale: en, key: help.article.107.title, value: "Understanding EXPORTS (107)"}
+    - {locale: de, key: help.article.107.title, value: "Verständnis: EXPORTS (107)"}
+    - {locale: fr, key: help.article.107.title, value: "Comprendre EXPORTS (107)"}
+    - {locale: en, key: help.article.108.title, value: "Changing DASHBOARDS (108)"}
+    - {locale: de, key: help.article.108.title, value: "Ändern: DASHBOARDS (108)"}
+    - {locale: fr, key: help.article.108.title, value: "Modifier DASHBOARDS (108)"}
+    - {locale: en, key: help.article.109.title, value: "Limits of ROLES (109)"}
+    - {locale: de, key: help.article.109.title, value: "Grenzen von ROLES (109)"}
+    - {locale: fr, key: help.article.109.title, value: "Limites de ROLES (109)"}
+    - {locale: en, key: help.article.110.title, value: "How to set up BILLING (110)"}
+    - {locale: de, key: help.article.110.title, value: "So richten Sie ein: BILLING (110)"}
+    - {locale: fr, key: help.article.110.title, value: "Configurer BILLING (110) « avancé »"}
+    - {locale: en, key: help.article.111.title, value: "Troubleshooting INVOICES (111)"}
+    - {locale: de, key: help.article.111.title, value: "Fehlerbehebung: INVOICES (111)"}
+    - {locale: fr, key: help.article.111.title, value: "Dépannage : INVOICES (111)"}
+    - {locale: en, key: help.article.112.title, value: "Understanding SEATS (112)"}
+    - {locale: de, key: help.article.112.title, value: "Verständnis: SEATS (112) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.112.title, value: "Comprendre SEATS (112)"}
+    - {locale: en, key: help.article.113.title, value: "Changing SSO (113)"}
+    - {locale: de, key: help.article.113.title, value: "Ändern: SSO (113)"}
+    - {locale: fr, key: help.article.113.title, value: "Modifier SSO (113)"}
+    - {locale: en, key: help.article.114.title, value: "Limits of SCIM (114)"}
+    - {locale: de, key: help.article.114.title, value: "Grenzen von SCIM (114)"}
+    - {locale: fr, key: help.article.114.title, value: "Limites de SCIM (114)"}
+    - {locale: en, key: help.article.115.title, value: "How to set up API (115)"}
+    - {locale: de, key: help.article.115.title, value: "So richten Sie ein: API (115)"}
+    - {locale: fr, key: help.article.115.title, value: "Configurer API (115)"}
+    - {locale: en, key: help.article.116.title, value: "Troubleshooting WEBHOOKS (116)"}
+    - {locale: de, key: help.article.116.title, value: "Fehlerbehebung: WEBHOOKS (116)"}
+    - {locale: fr, key: help.article.116.title, value: "Dépannage : WEBHOOKS (116)"}
+    - {locale: en, key: help.article.117.title, value: "Understanding EXPORTS (117)"}
+    - {locale: de, key: help.article.117.title, value: "Verständnis: EXPORTS (117)"}
+    - {locale: fr, key: help.article.117.title, value: "Comprendre EXPORTS (117)"}
+    - {locale: en, key: help.article.118.title, value: "Changing DASHBOARDS (118)"}
+    - {locale: de, key: help.article.118.title, value: "Ändern: DASHBOARDS (118)"}
+    - {locale: fr, key: help.article.118.title, value: "Modifier DASHBOARDS (118)"}
+    - {locale: en, key: help.article.119.title, value: "Limits of ROLES (119)"}
+    - {locale: de, key: help.article.119.title, value: "Grenzen von ROLES (119) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.119.title, value: "Limites de ROLES (119)"}
+    - {locale: en, key: help.article.120.title, value: "How to set up BILLING (120)"}
+    - {locale: de, key: help.article.120.title, value: "So richten Sie ein: BILLING (120)"}
+    - {locale: fr, key: help.article.120.title, value: "Configurer BILLING (120)"}
+    - {locale: en, key: help.article.121.title, value: "Troubleshooting INVOICES (121)"}
+    - {locale: de, key: help.article.121.title, value: "Fehlerbehebung: INVOICES (121)"}
+    - {locale: fr, key: help.article.121.title, value: "Dépannage : INVOICES (121) « avancé »"}
+    - {locale: en, key: help.article.122.title, value: "Understanding SEATS (122)"}
+    - {locale: de, key: help.article.122.title, value: "Verständnis: SEATS (122)"}
+    - {locale: fr, key: help.article.122.title, value: "Comprendre SEATS (122)"}
+    - {locale: en, key: help.article.123.title, value: "Changing SSO (123)"}
+    - {locale: de, key: help.article.123.title, value: "Ändern: SSO (123)"}
+    - {locale: fr, key: help.article.123.title, value: "Modifier SSO (123)"}
+    - {locale: en, key: help.article.124.title, value: "Limits of SCIM (124)"}
+    - {locale: de, key: help.article.124.title, value: "Grenzen von SCIM (124)"}
+    - {locale: fr, key: help.article.124.title, value: "Limites de SCIM (124)"}
+    - {locale: en, key: help.article.125.title, value: "How to set up API (125)"}
+    - {locale: de, key: help.article.125.title, value: "So richten Sie ein: API (125)"}
+    - {locale: fr, key: help.article.125.title, value: "Configurer API (125)"}
+    - {locale: en, key: help.article.126.title, value: "Troubleshooting WEBHOOKS (126)"}
+    - {locale: de, key: help.article.126.title, value: "Fehlerbehebung: WEBHOOKS (126) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.126.title, value: "Dépannage : WEBHOOKS (126)"}
+    - {locale: en, key: help.article.127.title, value: "Understanding EXPORTS (127)"}
+    - {locale: de, key: help.article.127.title, value: "Verständnis: EXPORTS (127)"}
+    - {locale: fr, key: help.article.127.title, value: "Comprendre EXPORTS (127)"}
+    - {locale: en, key: help.article.128.title, value: "Changing DASHBOARDS (128)"}
+    - {locale: de, key: help.article.128.title, value: "Ändern: DASHBOARDS (128)"}
+    - {locale: fr, key: help.article.128.title, value: "Modifier DASHBOARDS (128)"}
+    - {locale: en, key: help.article.129.title, value: "Limits of ROLES (129)"}
+    - {locale: de, key: help.article.129.title, value: "Grenzen von ROLES (129)"}
+    - {locale: fr, key: help.article.129.title, value: "Limites de ROLES (129)"}
+    - {locale: en, key: help.article.130.title, value: "How to set up BILLING (130)"}
+    - {locale: de, key: help.article.130.title, value: "So richten Sie ein: BILLING (130)"}
+    - {locale: fr, key: help.article.130.title, value: "Configurer BILLING (130)"}
+    - {locale: en, key: help.article.131.title, value: "Troubleshooting INVOICES (131)"}
+    - {locale: de, key: help.article.131.title, value: "Fehlerbehebung: INVOICES (131)"}
+    - {locale: fr, key: help.article.131.title, value: "Dépannage : INVOICES (131)"}
+    - {locale: en, key: help.article.132.title, value: "Understanding SEATS (132)"}
+    - {locale: de, key: help.article.132.title, value: "Verständnis: SEATS (132)"}
+    - {locale: fr, key: help.article.132.title, value: "Comprendre SEATS (132) « avancé »"}
+    - {locale: en, key: help.article.133.title, value: "Changing SSO (133)"}
+    - {locale: de, key: help.article.133.title, value: "Ändern: SSO (133) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.133.title, value: "Modifier SSO (133)"}
+    - {locale: en, key: help.article.134.title, value: "Limits of SCIM (134)"}
+    - {locale: de, key: help.article.134.title, value: "Grenzen von SCIM (134)"}
+    - {locale: fr, key: help.article.134.title, value: "Limites de SCIM (134)"}
+    - {locale: en, key: help.article.135.title, value: "How to set up API (135)"}
+    - {locale: de, key: help.article.135.title, value: "So richten Sie ein: API (135)"}
+    - {locale: fr, key: help.article.135.title, value: "Configurer API (135)"}
+    - {locale: en, key: help.article.136.title, value: "Troubleshooting WEBHOOKS (136)"}
+    - {locale: de, key: help.article.136.title, value: "Fehlerbehebung: WEBHOOKS (136)"}
+    - {locale: fr, key: help.article.136.title, value: "Dépannage : WEBHOOKS (136)"}
+    - {locale: en, key: help.article.137.title, value: "Understanding EXPORTS (137)"}
+    - {locale: de, key: help.article.137.title, value: "Verständnis: EXPORTS (137)"}
+    - {locale: fr, key: help.article.137.title, value: "Comprendre EXPORTS (137)"}
+    - {locale: en, key: help.article.138.title, value: "Changing DASHBOARDS (138)"}
+    - {locale: de, key: help.article.138.title, value: "Ändern: DASHBOARDS (138)"}
+    - {locale: fr, key: help.article.138.title, value: "Modifier DASHBOARDS (138)"}
+    - {locale: en, key: help.article.139.title, value: "Limits of ROLES (139)"}
+    - {locale: de, key: help.article.139.title, value: "Grenzen von ROLES (139)"}
+    - {locale: fr, key: help.article.139.title, value: "Limites de ROLES (139)"}
+    - {locale: en, key: help.article.140.title, value: "How to set up BILLING (140)"}
+    - {locale: de, key: help.article.140.title, value: "So richten Sie ein: BILLING (140) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.140.title, value: "Configurer BILLING (140)"}
+    - {locale: en, key: help.article.141.title, value: "Troubleshooting INVOICES (141)"}
+    - {locale: de, key: help.article.141.title, value: "Fehlerbehebung: INVOICES (141)"}
+    - {locale: fr, key: help.article.141.title, value: "Dépannage : INVOICES (141)"}
+    - {locale: en, key: help.article.142.title, value: "Understanding SEATS (142)"}
+    - {locale: de, key: help.article.142.title, value: "Verständnis: SEATS (142)"}
+    - {locale: fr, key: help.article.142.title, value: "Comprendre SEATS (142)"}
+    - {locale: en, key: help.article.143.title, value: "Changing SSO (143)"}
+    - {locale: de, key: help.article.143.title, value: "Ändern: SSO (143)"}
+    - {locale: fr, key: help.article.143.title, value: "Modifier SSO (143) « avancé »"}
+    - {locale: en, key: help.article.144.title, value: "Limits of SCIM (144)"}
+    - {locale: de, key: help.article.144.title, value: "Grenzen von SCIM (144)"}
+    - {locale: fr, key: help.article.144.title, value: "Limites de SCIM (144)"}
+    - {locale: en, key: help.article.145.title, value: "How to set up API (145)"}
+    - {locale: de, key: help.article.145.title, value: "So richten Sie ein: API (145)"}
+    - {locale: fr, key: help.article.145.title, value: "Configurer API (145)"}
+    - {locale: en, key: help.article.146.title, value: "Troubleshooting WEBHOOKS (146)"}
+    - {locale: de, key: help.article.146.title, value: "Fehlerbehebung: WEBHOOKS (146)"}
+    - {locale: fr, key: help.article.146.title, value: "Dépannage : WEBHOOKS (146)"}
+    - {locale: en, key: help.article.147.title, value: "Understanding EXPORTS (147)"}
+    - {locale: de, key: help.article.147.title, value: "Verständnis: EXPORTS (147) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.147.title, value: "Comprendre EXPORTS (147)"}
+    - {locale: en, key: help.article.148.title, value: "Changing DASHBOARDS (148)"}
+    - {locale: de, key: help.article.148.title, value: "Ändern: DASHBOARDS (148)"}
+    - {locale: fr, key: help.article.148.title, value: "Modifier DASHBOARDS (148)"}
+    - {locale: en, key: help.article.149.title, value: "Limits of ROLES (149)"}
+    - {locale: de, key: help.article.149.title, value: "Grenzen von ROLES (149)"}
+    - {locale: fr, key: help.article.149.title, value: "Limites de ROLES (149)"}
+    - {locale: en, key: help.article.150.title, value: "How to set up BILLING (150)"}
+    - {locale: de, key: help.article.150.title, value: "So richten Sie ein: BILLING (150)"}
+    - {locale: fr, key: help.article.150.title, value: "Configurer BILLING (150)"}
+    - {locale: en, key: help.article.151.title, value: "Troubleshooting INVOICES (151)"}
+    - {locale: de, key: help.article.151.title, value: "Fehlerbehebung: INVOICES (151)"}
+    - {locale: fr, key: help.article.151.title, value: "Dépannage : INVOICES (151)"}
+    - {locale: en, key: help.article.152.title, value: "Understanding SEATS (152)"}
+    - {locale: de, key: help.article.152.title, value: "Verständnis: SEATS (152)"}
+    - {locale: fr, key: help.article.152.title, value: "Comprendre SEATS (152)"}
+    - {locale: en, key: help.article.153.title, value: "Changing SSO (153)"}
+    - {locale: de, key: help.article.153.title, value: "Ändern: SSO (153)"}
+    - {locale: fr, key: help.article.153.title, value: "Modifier SSO (153)"}
+    - {locale: en, key: help.article.154.title, value: "Limits of SCIM (154)"}
+    - {locale: de, key: help.article.154.title, value: "Grenzen von SCIM (154) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.154.title, value: "Limites de SCIM (154) « avancé »"}
+    - {locale: en, key: help.article.155.title, value: "How to set up API (155)"}
+    - {locale: de, key: help.article.155.title, value: "So richten Sie ein: API (155)"}
+    - {locale: fr, key: help.article.155.title, value: "Configurer API (155)"}
+    - {locale: en, key: help.article.156.title, value: "Troubleshooting WEBHOOKS (156)"}
+    - {locale: de, key: help.article.156.title, value: "Fehlerbehebung: WEBHOOKS (156)"}
+    - {locale: fr, key: help.article.156.title, value: "Dépannage : WEBHOOKS (156)"}
+    - {locale: en, key: help.article.157.title, value: "Understanding EXPORTS (157)"}
+    - {locale: de, key: help.article.157.title, value: "Verständnis: EXPORTS (157)"}
+    - {locale: fr, key: help.article.157.title, value: "Comprendre EXPORTS (157)"}
+    - {locale: en, key: help.article.158.title, value: "Changing DASHBOARDS (158)"}
+    - {locale: de, key: help.article.158.title, value: "Ändern: DASHBOARDS (158)"}
+    - {locale: fr, key: help.article.158.title, value: "Modifier DASHBOARDS (158)"}
+    - {locale: en, key: help.article.159.title, value: "Limits of ROLES (159)"}
+    - {locale: de, key: help.article.159.title, value: "Grenzen von ROLES (159)"}
+    - {locale: fr, key: help.article.159.title, value: "Limites de ROLES (159)"}
+    - {locale: en, key: help.article.160.title, value: "How to set up BILLING (160)"}
+    - {locale: de, key: help.article.160.title, value: "So richten Sie ein: BILLING (160)"}
+    - {locale: fr, key: help.article.160.title, value: "Configurer BILLING (160)"}
+    - {locale: en, key: help.article.161.title, value: "Troubleshooting INVOICES (161)"}
+    - {locale: de, key: help.article.161.title, value: "Fehlerbehebung: INVOICES (161) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.161.title, value: "Dépannage : INVOICES (161)"}
+    - {locale: en, key: help.article.162.title, value: "Understanding SEATS (162)"}
+    - {locale: de, key: help.article.162.title, value: "Verständnis: SEATS (162)"}
+    - {locale: fr, key: help.article.162.title, value: "Comprendre SEATS (162)"}
+    - {locale: en, key: help.article.163.title, value: "Changing SSO (163)"}
+    - {locale: de, key: help.article.163.title, value: "Ändern: SSO (163)"}
+    - {locale: fr, key: help.article.163.title, value: "Modifier SSO (163)"}
+    - {locale: en, key: help.article.164.title, value: "Limits of SCIM (164)"}
+    - {locale: de, key: help.article.164.title, value: "Grenzen von SCIM (164)"}
+    - {locale: fr, key: help.article.164.title, value: "Limites de SCIM (164)"}
+    - {locale: en, key: help.article.165.title, value: "How to set up API (165)"}
+    - {locale: de, key: help.article.165.title, value: "So richten Sie ein: API (165)"}
+    - {locale: fr, key: help.article.165.title, value: "Configurer API (165) « avancé »"}
+    - {locale: en, key: help.article.166.title, value: "Troubleshooting WEBHOOKS (166)"}
+    - {locale: de, key: help.article.166.title, value: "Fehlerbehebung: WEBHOOKS (166)"}
+    - {locale: fr, key: help.article.166.title, value: "Dépannage : WEBHOOKS (166)"}
+    - {locale: en, key: help.article.167.title, value: "Understanding EXPORTS (167)"}
+    - {locale: de, key: help.article.167.title, value: "Verständnis: EXPORTS (167)"}
+    - {locale: fr, key: help.article.167.title, value: "Comprendre EXPORTS (167)"}
+    - {locale: en, key: help.article.168.title, value: "Changing DASHBOARDS (168)"}
+    - {locale: de, key: help.article.168.title, value: "Ändern: DASHBOARDS (168) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.168.title, value: "Modifier DASHBOARDS (168)"}
+    - {locale: en, key: help.article.169.title, value: "Limits of ROLES (169)"}
+    - {locale: de, key: help.article.169.title, value: "Grenzen von ROLES (169)"}
+    - {locale: fr, key: help.article.169.title, value: "Limites de ROLES (169)"}
+    - {locale: en, key: help.article.170.title, value: "How to set up BILLING (170)"}
+    - {locale: de, key: help.article.170.title, value: "So richten Sie ein: BILLING (170)"}
+    - {locale: fr, key: help.article.170.title, value: "Configurer BILLING (170)"}
+    - {locale: en, key: help.article.171.title, value: "Troubleshooting INVOICES (171)"}
+    - {locale: de, key: help.article.171.title, value: "Fehlerbehebung: INVOICES (171)"}
+    - {locale: fr, key: help.article.171.title, value: "Dépannage : INVOICES (171)"}
+    - {locale: en, key: help.article.172.title, value: "Understanding SEATS (172)"}
+    - {locale: de, key: help.article.172.title, value: "Verständnis: SEATS (172)"}
+    - {locale: fr, key: help.article.172.title, value: "Comprendre SEATS (172)"}
+    - {locale: en, key: help.article.173.title, value: "Changing SSO (173)"}
+    - {locale: de, key: help.article.173.title, value: "Ändern: SSO (173)"}
+    - {locale: fr, key: help.article.173.title, value: "Modifier SSO (173)"}
+    - {locale: en, key: help.article.174.title, value: "Limits of SCIM (174)"}
+    - {locale: de, key: help.article.174.title, value: "Grenzen von SCIM (174)"}
+    - {locale: fr, key: help.article.174.title, value: "Limites de SCIM (174)"}
+    - {locale: en, key: help.article.175.title, value: "How to set up API (175)"}
+    - {locale: de, key: help.article.175.title, value: "So richten Sie ein: API (175) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.175.title, value: "Configurer API (175)"}
+    - {locale: en, key: help.article.176.title, value: "Troubleshooting WEBHOOKS (176)"}
+    - {locale: de, key: help.article.176.title, value: "Fehlerbehebung: WEBHOOKS (176)"}
+    - {locale: fr, key: help.article.176.title, value: "Dépannage : WEBHOOKS (176) « avancé »"}
+    - {locale: en, key: help.article.177.title, value: "Understanding EXPORTS (177)"}
+    - {locale: de, key: help.article.177.title, value: "Verständnis: EXPORTS (177)"}
+    - {locale: fr, key: help.article.177.title, value: "Comprendre EXPORTS (177)"}
+    - {locale: en, key: help.article.178.title, value: "Changing DASHBOARDS (178)"}
+    - {locale: de, key: help.article.178.title, value: "Ändern: DASHBOARDS (178)"}
+    - {locale: fr, key: help.article.178.title, value: "Modifier DASHBOARDS (178)"}
+    - {locale: en, key: help.article.179.title, value: "Limits of ROLES (179)"}
+    - {locale: de, key: help.article.179.title, value: "Grenzen von ROLES (179)"}
+    - {locale: fr, key: help.article.179.title, value: "Limites de ROLES (179)"}
+    - {locale: en, key: help.article.180.title, value: "How to set up BILLING (180)"}
+    - {locale: de, key: help.article.180.title, value: "So richten Sie ein: BILLING (180)"}
+    - {locale: fr, key: help.article.180.title, value: "Configurer BILLING (180)"}
+    - {locale: en, key: help.article.181.title, value: "Troubleshooting INVOICES (181)"}
+    - {locale: de, key: help.article.181.title, value: "Fehlerbehebung: INVOICES (181)"}
+    - {locale: fr, key: help.article.181.title, value: "Dépannage : INVOICES (181)"}
+    - {locale: en, key: help.article.182.title, value: "Understanding SEATS (182)"}
+    - {locale: de, key: help.article.182.title, value: "Verständnis: SEATS (182) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.182.title, value: "Comprendre SEATS (182)"}
+    - {locale: en, key: help.article.183.title, value: "Changing SSO (183)"}
+    - {locale: de, key: help.article.183.title, value: "Ändern: SSO (183)"}
+    - {locale: fr, key: help.article.183.title, value: "Modifier SSO (183)"}
+    - {locale: en, key: help.article.184.title, value: "Limits of SCIM (184)"}
+    - {locale: de, key: help.article.184.title, value: "Grenzen von SCIM (184)"}
+    - {locale: fr, key: help.article.184.title, value: "Limites de SCIM (184)"}
+    - {locale: en, key: help.article.185.title, value: "How to set up API (185)"}
+    - {locale: de, key: help.article.185.title, value: "So richten Sie ein: API (185)"}
+    - {locale: fr, key: help.article.185.title, value: "Configurer API (185)"}
+    - {locale: en, key: help.article.186.title, value: "Troubleshooting WEBHOOKS (186)"}
+    - {locale: de, key: help.article.186.title, value: "Fehlerbehebung: WEBHOOKS (186)"}
+    - {locale: fr, key: help.article.186.title, value: "Dépannage : WEBHOOKS (186)"}
+    - {locale: en, key: help.article.187.title, value: "Understanding EXPORTS (187)"}
+    - {locale: de, key: help.article.187.title, value: "Verständnis: EXPORTS (187)"}
+    - {locale: fr, key: help.article.187.title, value: "Comprendre EXPORTS (187) « avancé »"}
+    - {locale: en, key: help.article.188.title, value: "Changing DASHBOARDS (188)"}
+    - {locale: de, key: help.article.188.title, value: "Ändern: DASHBOARDS (188)"}
+    - {locale: fr, key: help.article.188.title, value: "Modifier DASHBOARDS (188)"}
+    - {locale: en, key: help.article.189.title, value: "Limits of ROLES (189)"}
+    - {locale: de, key: help.article.189.title, value: "Grenzen von ROLES (189) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.189.title, value: "Limites de ROLES (189)"}
+    - {locale: en, key: help.article.190.title, value: "How to set up BILLING (190)"}
+    - {locale: de, key: help.article.190.title, value: "So richten Sie ein: BILLING (190)"}
+    - {locale: fr, key: help.article.190.title, value: "Configurer BILLING (190)"}
+    - {locale: en, key: help.article.191.title, value: "Troubleshooting INVOICES (191)"}
+    - {locale: de, key: help.article.191.title, value: "Fehlerbehebung: INVOICES (191)"}
+    - {locale: fr, key: help.article.191.title, value: "Dépannage : INVOICES (191)"}
+    - {locale: en, key: help.article.192.title, value: "Understanding SEATS (192)"}
+    - {locale: de, key: help.article.192.title, value: "Verständnis: SEATS (192)"}
+    - {locale: fr, key: help.article.192.title, value: "Comprendre SEATS (192)"}
+    - {locale: en, key: help.article.193.title, value: "Changing SSO (193)"}
+    - {locale: de, key: help.article.193.title, value: "Ändern: SSO (193)"}
+    - {locale: fr, key: help.article.193.title, value: "Modifier SSO (193)"}
+    - {locale: en, key: help.article.194.title, value: "Limits of SCIM (194)"}
+    - {locale: de, key: help.article.194.title, value: "Grenzen von SCIM (194)"}
+    - {locale: fr, key: help.article.194.title, value: "Limites de SCIM (194)"}
+    - {locale: en, key: help.article.195.title, value: "How to set up API (195)"}
+    - {locale: de, key: help.article.195.title, value: "So richten Sie ein: API (195)"}
+    - {locale: fr, key: help.article.195.title, value: "Configurer API (195)"}
+    - {locale: en, key: help.article.196.title, value: "Troubleshooting WEBHOOKS (196)"}
+    - {locale: de, key: help.article.196.title, value: "Fehlerbehebung: WEBHOOKS (196) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.196.title, value: "Dépannage : WEBHOOKS (196)"}
+    - {locale: en, key: help.article.197.title, value: "Understanding EXPORTS (197)"}
+    - {locale: de, key: help.article.197.title, value: "Verständnis: EXPORTS (197)"}
+    - {locale: fr, key: help.article.197.title, value: "Comprendre EXPORTS (197)"}
+    - {locale: en, key: help.article.198.title, value: "Changing DASHBOARDS (198)"}
+    - {locale: de, key: help.article.198.title, value: "Ändern: DASHBOARDS (198)"}
+    - {locale: fr, key: help.article.198.title, value: "Modifier DASHBOARDS (198) « avancé »"}
+    - {locale: en, key: help.article.199.title, value: "Limits of ROLES (199)"}
+    - {locale: de, key: help.article.199.title, value: "Grenzen von ROLES (199)"}
+    - {locale: fr, key: help.article.199.title, value: "Limites de ROLES (199)"}
+    - {locale: en, key: help.article.200.title, value: "How to set up BILLING (200)"}
+    - {locale: de, key: help.article.200.title, value: "So richten Sie ein: BILLING (200)"}
+    - {locale: fr, key: help.article.200.title, value: "Configurer BILLING (200)"}
+    - {locale: en, key: help.article.201.title, value: "Troubleshooting INVOICES (201)"}
+    - {locale: de, key: help.article.201.title, value: "Fehlerbehebung: INVOICES (201)"}
+    - {locale: fr, key: help.article.201.title, value: "Dépannage : INVOICES (201)"}
+    - {locale: en, key: help.article.202.title, value: "Understanding SEATS (202)"}
+    - {locale: de, key: help.article.202.title, value: "Verständnis: SEATS (202)"}
+    - {locale: fr, key: help.article.202.title, value: "Comprendre SEATS (202)"}
+    - {locale: en, key: help.article.203.title, value: "Changing SSO (203)"}
+    - {locale: de, key: help.article.203.title, value: "Ändern: SSO (203) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.203.title, value: "Modifier SSO (203)"}
+    - {locale: en, key: help.article.204.title, value: "Limits of SCIM (204)"}
+    - {locale: de, key: help.article.204.title, value: "Grenzen von SCIM (204)"}
+    - {locale: fr, key: help.article.204.title, value: "Limites de SCIM (204)"}
+    - {locale: en, key: help.article.205.title, value: "How to set up API (205)"}
+    - {locale: de, key: help.article.205.title, value: "So richten Sie ein: API (205)"}
+    - {locale: fr, key: help.article.205.title, value: "Configurer API (205)"}
+    - {locale: en, key: help.article.206.title, value: "Troubleshooting WEBHOOKS (206)"}
+    - {locale: de, key: help.article.206.title, value: "Fehlerbehebung: WEBHOOKS (206)"}
+    - {locale: fr, key: help.article.206.title, value: "Dépannage : WEBHOOKS (206)"}
+    - {locale: en, key: help.article.207.title, value: "Understanding EXPORTS (207)"}
+    - {locale: de, key: help.article.207.title, value: "Verständnis: EXPORTS (207)"}
+    - {locale: fr, key: help.article.207.title, value: "Comprendre EXPORTS (207)"}
+    - {locale: en, key: help.article.208.title, value: "Changing DASHBOARDS (208)"}
+    - {locale: de, key: help.article.208.title, value: "Ändern: DASHBOARDS (208)"}
+    - {locale: fr, key: help.article.208.title, value: "Modifier DASHBOARDS (208)"}
+    - {locale: en, key: help.article.209.title, value: "Limits of ROLES (209)"}
+    - {locale: de, key: help.article.209.title, value: "Grenzen von ROLES (209)"}
+    - {locale: fr, key: help.article.209.title, value: "Limites de ROLES (209) « avancé »"}
+    - {locale: en, key: help.article.210.title, value: "How to set up BILLING (210)"}
+    - {locale: de, key: help.article.210.title, value: "So richten Sie ein: BILLING (210) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.210.title, value: "Configurer BILLING (210)"}
+    - {locale: en, key: help.article.211.title, value: "Troubleshooting INVOICES (211)"}
+    - {locale: de, key: help.article.211.title, value: "Fehlerbehebung: INVOICES (211)"}
+    - {locale: fr, key: help.article.211.title, value: "Dépannage : INVOICES (211)"}
+    - {locale: en, key: help.article.212.title, value: "Understanding SEATS (212)"}
+    - {locale: de, key: help.article.212.title, value: "Verständnis: SEATS (212)"}
+    - {locale: fr, key: help.article.212.title, value: "Comprendre SEATS (212)"}
+    - {locale: en, key: help.article.213.title, value: "Changing SSO (213)"}
+    - {locale: de, key: help.article.213.title, value: "Ändern: SSO (213)"}
+    - {locale: fr, key: help.article.213.title, value: "Modifier SSO (213)"}
+    - {locale: en, key: help.article.214.title, value: "Limits of SCIM (214)"}
+    - {locale: de, key: help.article.214.title, value: "Grenzen von SCIM (214)"}
+    - {locale: fr, key: help.article.214.title, value: "Limites de SCIM (214)"}
+    - {locale: en, key: help.article.215.title, value: "How to set up API (215)"}
+    - {locale: de, key: help.article.215.title, value: "So richten Sie ein: API (215)"}
+    - {locale: fr, key: help.article.215.title, value: "Configurer API (215)"}
+    - {locale: en, key: help.article.216.title, value: "Troubleshooting WEBHOOKS (216)"}
+    - {locale: de, key: help.article.216.title, value: "Fehlerbehebung: WEBHOOKS (216)"}
+    - {locale: fr, key: help.article.216.title, value: "Dépannage : WEBHOOKS (216)"}
+    - {locale: en, key: help.article.217.title, value: "Understanding EXPORTS (217)"}
+    - {locale: de, key: help.article.217.title, value: "Verständnis: EXPORTS (217) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.217.title, value: "Comprendre EXPORTS (217)"}
+    - {locale: en, key: help.article.218.title, value: "Changing DASHBOARDS (218)"}
+    - {locale: de, key: help.article.218.title, value: "Ändern: DASHBOARDS (218)"}
+    - {locale: fr, key: help.article.218.title, value: "Modifier DASHBOARDS (218)"}
+    - {locale: en, key: help.article.219.title, value: "Limits of ROLES (219)"}
+    - {locale: de, key: help.article.219.title, value: "Grenzen von ROLES (219)"}
+    - {locale: fr, key: help.article.219.title, value: "Limites de ROLES (219)"}
+    - {locale: en, key: help.article.220.title, value: "How to set up BILLING (220)"}
+    - {locale: de, key: help.article.220.title, value: "So richten Sie ein: BILLING (220)"}
+    - {locale: fr, key: help.article.220.title, value: "Configurer BILLING (220) « avancé »"}
+    - {locale: en, key: help.article.221.title, value: "Troubleshooting INVOICES (221)"}
+    - {locale: de, key: help.article.221.title, value: "Fehlerbehebung: INVOICES (221)"}
+    - {locale: fr, key: help.article.221.title, value: "Dépannage : INVOICES (221)"}
+    - {locale: en, key: help.article.222.title, value: "Understanding SEATS (222)"}
+    - {locale: de, key: help.article.222.title, value: "Verständnis: SEATS (222)"}
+    - {locale: fr, key: help.article.222.title, value: "Comprendre SEATS (222)"}
+    - {locale: en, key: help.article.223.title, value: "Changing SSO (223)"}
+    - {locale: de, key: help.article.223.title, value: "Ändern: SSO (223)"}
+    - {locale: fr, key: help.article.223.title, value: "Modifier SSO (223)"}
+    - {locale: en, key: help.article.224.title, value: "Limits of SCIM (224)"}
+    - {locale: de, key: help.article.224.title, value: "Grenzen von SCIM (224) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.224.title, value: "Limites de SCIM (224)"}
+    - {locale: en, key: help.article.225.title, value: "How to set up API (225)"}
+    - {locale: de, key: help.article.225.title, value: "So richten Sie ein: API (225)"}
+    - {locale: fr, key: help.article.225.title, value: "Configurer API (225)"}
+    - {locale: en, key: help.article.226.title, value: "Troubleshooting WEBHOOKS (226)"}
+    - {locale: de, key: help.article.226.title, value: "Fehlerbehebung: WEBHOOKS (226)"}
+    - {locale: fr, key: help.article.226.title, value: "Dépannage : WEBHOOKS (226)"}
+    - {locale: en, key: help.article.227.title, value: "Understanding EXPORTS (227)"}
+    - {locale: de, key: help.article.227.title, value: "Verständnis: EXPORTS (227)"}
+    - {locale: fr, key: help.article.227.title, value: "Comprendre EXPORTS (227)"}
+    - {locale: en, key: help.article.228.title, value: "Changing DASHBOARDS (228)"}
+    - {locale: de, key: help.article.228.title, value: "Ändern: DASHBOARDS (228)"}
+    - {locale: fr, key: help.article.228.title, value: "Modifier DASHBOARDS (228)"}
+    - {locale: en, key: help.article.229.title, value: "Limits of ROLES (229)"}
+    - {locale: de, key: help.article.229.title, value: "Grenzen von ROLES (229)"}
+    - {locale: fr, key: help.article.229.title, value: "Limites de ROLES (229)"}
+    - {locale: en, key: help.article.230.title, value: "How to set up BILLING (230)"}
+    - {locale: de, key: help.article.230.title, value: "So richten Sie ein: BILLING (230)"}
+    - {locale: fr, key: help.article.230.title, value: "Configurer BILLING (230)"}
+    - {locale: en, key: help.article.231.title, value: "Troubleshooting INVOICES (231)"}
+    - {locale: de, key: help.article.231.title, value: "Fehlerbehebung: INVOICES (231) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.231.title, value: "Dépannage : INVOICES (231) « avancé »"}
+    - {locale: en, key: help.article.232.title, value: "Understanding SEATS (232)"}
+    - {locale: de, key: help.article.232.title, value: "Verständnis: SEATS (232)"}
+    - {locale: fr, key: help.article.232.title, value: "Comprendre SEATS (232)"}
+    - {locale: en, key: help.article.233.title, value: "Changing SSO (233)"}
+    - {locale: de, key: help.article.233.title, value: "Ändern: SSO (233)"}
+    - {locale: fr, key: help.article.233.title, value: "Modifier SSO (233)"}
+    - {locale: en, key: help.article.234.title, value: "Limits of SCIM (234)"}
+    - {locale: de, key: help.article.234.title, value: "Grenzen von SCIM (234)"}
+    - {locale: fr, key: help.article.234.title, value: "Limites de SCIM (234)"}
+    - {locale: en, key: help.article.235.title, value: "How to set up API (235)"}
+    - {locale: de, key: help.article.235.title, value: "So richten Sie ein: API (235)"}
+    - {locale: fr, key: help.article.235.title, value: "Configurer API (235)"}
+    - {locale: en, key: help.article.236.title, value: "Troubleshooting WEBHOOKS (236)"}
+    - {locale: de, key: help.article.236.title, value: "Fehlerbehebung: WEBHOOKS (236)"}
+    - {locale: fr, key: help.article.236.title, value: "Dépannage : WEBHOOKS (236)"}
+    - {locale: en, key: help.article.237.title, value: "Understanding EXPORTS (237)"}
+    - {locale: de, key: help.article.237.title, value: "Verständnis: EXPORTS (237)"}
+    - {locale: fr, key: help.article.237.title, value: "Comprendre EXPORTS (237)"}
+    - {locale: en, key: help.article.238.title, value: "Changing DASHBOARDS (238)"}
+    - {locale: de, key: help.article.238.title, value: "Ändern: DASHBOARDS (238) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.238.title, value: "Modifier DASHBOARDS (238)"}
+    - {locale: en, key: help.article.239.title, value: "Limits of ROLES (239)"}
+    - {locale: de, key: help.article.239.title, value: "Grenzen von ROLES (239)"}
+    - {locale: fr, key: help.article.239.title, value: "Limites de ROLES (239)"}
+    - {locale: en, key: help.article.240.title, value: "How to set up BILLING (240)"}
+    - {locale: de, key: help.article.240.title, value: "So richten Sie ein: BILLING (240)"}
+    - {locale: fr, key: help.article.240.title, value: "Configurer BILLING (240)"}
+    - {locale: en, key: help.article.241.title, value: "Troubleshooting INVOICES (241)"}
+    - {locale: de, key: help.article.241.title, value: "Fehlerbehebung: INVOICES (241)"}
+    - {locale: fr, key: help.article.241.title, value: "Dépannage : INVOICES (241)"}
+    - {locale: en, key: help.article.242.title, value: "Understanding SEATS (242)"}
+    - {locale: de, key: help.article.242.title, value: "Verständnis: SEATS (242)"}
+    - {locale: fr, key: help.article.242.title, value: "Comprendre SEATS (242) « avancé »"}
+    - {locale: en, key: help.article.243.title, value: "Changing SSO (243)"}
+    - {locale: de, key: help.article.243.title, value: "Ändern: SSO (243)"}
+    - {locale: fr, key: help.article.243.title, value: "Modifier SSO (243)"}
+    - {locale: en, key: help.article.244.title, value: "Limits of SCIM (244)"}
+    - {locale: de, key: help.article.244.title, value: "Grenzen von SCIM (244)"}
+    - {locale: fr, key: help.article.244.title, value: "Limites de SCIM (244)"}
+    - {locale: en, key: help.article.245.title, value: "How to set up API (245)"}
+    - {locale: de, key: help.article.245.title, value: "So richten Sie ein: API (245) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.245.title, value: "Configurer API (245)"}
+    - {locale: en, key: help.article.246.title, value: "Troubleshooting WEBHOOKS (246)"}
+    - {locale: de, key: help.article.246.title, value: "Fehlerbehebung: WEBHOOKS (246)"}
+    - {locale: fr, key: help.article.246.title, value: "Dépannage : WEBHOOKS (246)"}
+    - {locale: en, key: help.article.247.title, value: "Understanding EXPORTS (247)"}
+    - {locale: de, key: help.article.247.title, value: "Verständnis: EXPORTS (247)"}
+    - {locale: fr, key: help.article.247.title, value: "Comprendre EXPORTS (247)"}
+    - {locale: en, key: help.article.248.title, value: "Changing DASHBOARDS (248)"}
+    - {locale: de, key: help.article.248.title, value: "Ändern: DASHBOARDS (248)"}
+    - {locale: fr, key: help.article.248.title, value: "Modifier DASHBOARDS (248)"}
+    - {locale: en, key: help.article.249.title, value: "Limits of ROLES (249)"}
+    - {locale: de, key: help.article.249.title, value: "Grenzen von ROLES (249)"}
+    - {locale: fr, key: help.article.249.title, value: "Limites de ROLES (249)"}
+    - {locale: en, key: help.article.250.title, value: "How to set up BILLING (250)"}
+    - {locale: de, key: help.article.250.title, value: "So richten Sie ein: BILLING (250)"}
+    - {locale: fr, key: help.article.250.title, value: "Configurer BILLING (250)"}
+    - {locale: en, key: help.article.251.title, value: "Troubleshooting INVOICES (251)"}
+    - {locale: de, key: help.article.251.title, value: "Fehlerbehebung: INVOICES (251)"}
+    - {locale: fr, key: help.article.251.title, value: "Dépannage : INVOICES (251)"}
+    - {locale: en, key: help.article.252.title, value: "Understanding SEATS (252)"}
+    - {locale: de, key: help.article.252.title, value: "Verständnis: SEATS (252) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.252.title, value: "Comprendre SEATS (252)"}
+    - {locale: en, key: help.article.253.title, value: "Changing SSO (253)"}
+    - {locale: de, key: help.article.253.title, value: "Ändern: SSO (253)"}
+    - {locale: fr, key: help.article.253.title, value: "Modifier SSO (253) « avancé »"}
+    - {locale: en, key: help.article.254.title, value: "Limits of SCIM (254)"}
+    - {locale: de, key: help.article.254.title, value: "Grenzen von SCIM (254)"}
+    - {locale: fr, key: help.article.254.title, value: "Limites de SCIM (254)"}
+    - {locale: en, key: help.article.255.title, value: "How to set up API (255)"}
+    - {locale: de, key: help.article.255.title, value: "So richten Sie ein: API (255)"}
+    - {locale: fr, key: help.article.255.title, value: "Configurer API (255)"}
+    - {locale: en, key: help.article.256.title, value: "Troubleshooting WEBHOOKS (256)"}
+    - {locale: de, key: help.article.256.title, value: "Fehlerbehebung: WEBHOOKS (256)"}
+    - {locale: fr, key: help.article.256.title, value: "Dépannage : WEBHOOKS (256)"}
+    - {locale: en, key: help.article.257.title, value: "Understanding EXPORTS (257)"}
+    - {locale: de, key: help.article.257.title, value: "Verständnis: EXPORTS (257)"}
+    - {locale: fr, key: help.article.257.title, value: "Comprendre EXPORTS (257)"}
+    - {locale: en, key: help.article.258.title, value: "Changing DASHBOARDS (258)"}
+    - {locale: de, key: help.article.258.title, value: "Ändern: DASHBOARDS (258)"}
+    - {locale: fr, key: help.article.258.title, value: "Modifier DASHBOARDS (258)"}
+    - {locale: en, key: help.article.259.title, value: "Limits of ROLES (259)"}
+    - {locale: de, key: help.article.259.title, value: "Grenzen von ROLES (259) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.259.title, value: "Limites de ROLES (259)"}
+    - {locale: en, key: help.article.260.title, value: "How to set up BILLING (260)"}
+    - {locale: de, key: help.article.260.title, value: "So richten Sie ein: BILLING (260)"}
+    - {locale: fr, key: help.article.260.title, value: "Configurer BILLING (260)"}
+    - {locale: en, key: help.article.261.title, value: "Troubleshooting INVOICES (261)"}
+    - {locale: de, key: help.article.261.title, value: "Fehlerbehebung: INVOICES (261)"}
+    - {locale: fr, key: help.article.261.title, value: "Dépannage : INVOICES (261)"}
+    - {locale: en, key: help.article.262.title, value: "Understanding SEATS (262)"}
+    - {locale: de, key: help.article.262.title, value: "Verständnis: SEATS (262)"}
+    - {locale: fr, key: help.article.262.title, value: "Comprendre SEATS (262)"}
+    - {locale: en, key: help.article.263.title, value: "Changing SSO (263)"}
+    - {locale: de, key: help.article.263.title, value: "Ändern: SSO (263)"}
+    - {locale: fr, key: help.article.263.title, value: "Modifier SSO (263)"}
+    - {locale: en, key: help.article.264.title, value: "Limits of SCIM (264)"}
+    - {locale: de, key: help.article.264.title, value: "Grenzen von SCIM (264)"}
+    - {locale: fr, key: help.article.264.title, value: "Limites de SCIM (264) « avancé »"}
+    - {locale: en, key: help.article.265.title, value: "How to set up API (265)"}
+    - {locale: de, key: help.article.265.title, value: "So richten Sie ein: API (265)"}
+    - {locale: fr, key: help.article.265.title, value: "Configurer API (265)"}
+    - {locale: en, key: help.article.266.title, value: "Troubleshooting WEBHOOKS (266)"}
+    - {locale: de, key: help.article.266.title, value: "Fehlerbehebung: WEBHOOKS (266) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.266.title, value: "Dépannage : WEBHOOKS (266)"}
+    - {locale: en, key: help.article.267.title, value: "Understanding EXPORTS (267)"}
+    - {locale: de, key: help.article.267.title, value: "Verständnis: EXPORTS (267)"}
+    - {locale: fr, key: help.article.267.title, value: "Comprendre EXPORTS (267)"}
+    - {locale: en, key: help.article.268.title, value: "Changing DASHBOARDS (268)"}
+    - {locale: de, key: help.article.268.title, value: "Ändern: DASHBOARDS (268)"}
+    - {locale: fr, key: help.article.268.title, value: "Modifier DASHBOARDS (268)"}
+    - {locale: en, key: help.article.269.title, value: "Limits of ROLES (269)"}
+    - {locale: de, key: help.article.269.title, value: "Grenzen von ROLES (269)"}
+    - {locale: fr, key: help.article.269.title, value: "Limites de ROLES (269)"}
+    - {locale: en, key: help.article.270.title, value: "How to set up BILLING (270)"}
+    - {locale: de, key: help.article.270.title, value: "So richten Sie ein: BILLING (270)"}
+    - {locale: fr, key: help.article.270.title, value: "Configurer BILLING (270)"}
+    - {locale: en, key: help.article.271.title, value: "Troubleshooting INVOICES (271)"}
+    - {locale: de, key: help.article.271.title, value: "Fehlerbehebung: INVOICES (271)"}
+    - {locale: fr, key: help.article.271.title, value: "Dépannage : INVOICES (271)"}
+    - {locale: en, key: help.article.272.title, value: "Understanding SEATS (272)"}
+    - {locale: de, key: help.article.272.title, value: "Verständnis: SEATS (272)"}
+    - {locale: fr, key: help.article.272.title, value: "Comprendre SEATS (272)"}
+    - {locale: en, key: help.article.273.title, value: "Changing SSO (273)"}
+    - {locale: de, key: help.article.273.title, value: "Ändern: SSO (273) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.273.title, value: "Modifier SSO (273)"}
+    - {locale: en, key: help.article.274.title, value: "Limits of SCIM (274)"}
+    - {locale: de, key: help.article.274.title, value: "Grenzen von SCIM (274)"}
+    - {locale: fr, key: help.article.274.title, value: "Limites de SCIM (274)"}
+    - {locale: en, key: help.article.275.title, value: "How to set up API (275)"}
+    - {locale: de, key: help.article.275.title, value: "So richten Sie ein: API (275)"}
+    - {locale: fr, key: help.article.275.title, value: "Configurer API (275) « avancé »"}
+    - {locale: en, key: help.article.276.title, value: "Troubleshooting WEBHOOKS (276)"}
+    - {locale: de, key: help.article.276.title, value: "Fehlerbehebung: WEBHOOKS (276)"}
+    - {locale: fr, key: help.article.276.title, value: "Dépannage : WEBHOOKS (276)"}
+    - {locale: en, key: help.article.277.title, value: "Understanding EXPORTS (277)"}
+    - {locale: de, key: help.article.277.title, value: "Verständnis: EXPORTS (277)"}
+    - {locale: fr, key: help.article.277.title, value: "Comprendre EXPORTS (277)"}
+    - {locale: en, key: help.article.278.title, value: "Changing DASHBOARDS (278)"}
+    - {locale: de, key: help.article.278.title, value: "Ändern: DASHBOARDS (278)"}
+    - {locale: fr, key: help.article.278.title, value: "Modifier DASHBOARDS (278)"}
+    - {locale: en, key: help.article.279.title, value: "Limits of ROLES (279)"}
+    - {locale: de, key: help.article.279.title, value: "Grenzen von ROLES (279)"}
+    - {locale: fr, key: help.article.279.title, value: "Limites de ROLES (279)"}
+    - {locale: en, key: help.article.280.title, value: "How to set up BILLING (280)"}
+    - {locale: de, key: help.article.280.title, value: "So richten Sie ein: BILLING (280) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.280.title, value: "Configurer BILLING (280)"}
+    - {locale: en, key: help.article.281.title, value: "Troubleshooting INVOICES (281)"}
+    - {locale: de, key: help.article.281.title, value: "Fehlerbehebung: INVOICES (281)"}
+    - {locale: fr, key: help.article.281.title, value: "Dépannage : INVOICES (281)"}
+    - {locale: en, key: help.article.282.title, value: "Understanding SEATS (282)"}
+    - {locale: de, key: help.article.282.title, value: "Verständnis: SEATS (282)"}
+    - {locale: fr, key: help.article.282.title, value: "Comprendre SEATS (282)"}
+    - {locale: en, key: help.article.283.title, value: "Changing SSO (283)"}
+    - {locale: de, key: help.article.283.title, value: "Ändern: SSO (283)"}
+    - {locale: fr, key: help.article.283.title, value: "Modifier SSO (283)"}
+    - {locale: en, key: help.article.284.title, value: "Limits of SCIM (284)"}
+    - {locale: de, key: help.article.284.title, value: "Grenzen von SCIM (284)"}
+    - {locale: fr, key: help.article.284.title, value: "Limites de SCIM (284)"}
+    - {locale: en, key: help.article.285.title, value: "How to set up API (285)"}
+    - {locale: de, key: help.article.285.title, value: "So richten Sie ein: API (285)"}
+    - {locale: fr, key: help.article.285.title, value: "Configurer API (285)"}
+    - {locale: en, key: help.article.286.title, value: "Troubleshooting WEBHOOKS (286)"}
+    - {locale: de, key: help.article.286.title, value: "Fehlerbehebung: WEBHOOKS (286)"}
+    - {locale: fr, key: help.article.286.title, value: "Dépannage : WEBHOOKS (286) « avancé »"}
+    - {locale: en, key: help.article.287.title, value: "Understanding EXPORTS (287)"}
+    - {locale: de, key: help.article.287.title, value: "Verständnis: EXPORTS (287) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.287.title, value: "Comprendre EXPORTS (287)"}
+    - {locale: en, key: help.article.288.title, value: "Changing DASHBOARDS (288)"}
+    - {locale: de, key: help.article.288.title, value: "Ändern: DASHBOARDS (288)"}
+    - {locale: fr, key: help.article.288.title, value: "Modifier DASHBOARDS (288)"}
+    - {locale: en, key: help.article.289.title, value: "Limits of ROLES (289)"}
+    - {locale: de, key: help.article.289.title, value: "Grenzen von ROLES (289)"}
+    - {locale: fr, key: help.article.289.title, value: "Limites de ROLES (289)"}
+    - {locale: en, key: help.article.290.title, value: "How to set up BILLING (290)"}
+    - {locale: de, key: help.article.290.title, value: "So richten Sie ein: BILLING (290)"}
+    - {locale: fr, key: help.article.290.title, value: "Configurer BILLING (290)"}
+    - {locale: en, key: help.article.291.title, value: "Troubleshooting INVOICES (291)"}
+    - {locale: de, key: help.article.291.title, value: "Fehlerbehebung: INVOICES (291)"}
+    - {locale: fr, key: help.article.291.title, value: "Dépannage : INVOICES (291)"}
+    - {locale: en, key: help.article.292.title, value: "Understanding SEATS (292)"}
+    - {locale: de, key: help.article.292.title, value: "Verständnis: SEATS (292)"}
+    - {locale: fr, key: help.article.292.title, value: "Comprendre SEATS (292)"}
+    - {locale: en, key: help.article.293.title, value: "Changing SSO (293)"}
+    - {locale: de, key: help.article.293.title, value: "Ändern: SSO (293)"}
+    - {locale: fr, key: help.article.293.title, value: "Modifier SSO (293)"}
+    - {locale: en, key: help.article.294.title, value: "Limits of SCIM (294)"}
+    - {locale: de, key: help.article.294.title, value: "Grenzen von SCIM (294) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.294.title, value: "Limites de SCIM (294)"}
+    - {locale: en, key: help.article.295.title, value: "How to set up API (295)"}
+    - {locale: de, key: help.article.295.title, value: "So richten Sie ein: API (295)"}
+    - {locale: fr, key: help.article.295.title, value: "Configurer API (295)"}
+    - {locale: en, key: help.article.296.title, value: "Troubleshooting WEBHOOKS (296)"}
+    - {locale: de, key: help.article.296.title, value: "Fehlerbehebung: WEBHOOKS (296)"}
+    - {locale: fr, key: help.article.296.title, value: "Dépannage : WEBHOOKS (296)"}
+    - {locale: en, key: help.article.297.title, value: "Understanding EXPORTS (297)"}
+    - {locale: de, key: help.article.297.title, value: "Verständnis: EXPORTS (297)"}
+    - {locale: fr, key: help.article.297.title, value: "Comprendre EXPORTS (297) « avancé »"}
+    - {locale: en, key: help.article.298.title, value: "Changing DASHBOARDS (298)"}
+    - {locale: de, key: help.article.298.title, value: "Ändern: DASHBOARDS (298)"}
+    - {locale: fr, key: help.article.298.title, value: "Modifier DASHBOARDS (298)"}
+    - {locale: en, key: help.article.299.title, value: "Limits of ROLES (299)"}
+    - {locale: de, key: help.article.299.title, value: "Grenzen von ROLES (299)"}
+    - {locale: fr, key: help.article.299.title, value: "Limites de ROLES (299)"}
+    - {locale: en, key: help.article.300.title, value: "How to set up BILLING (300)"}
+    - {locale: de, key: help.article.300.title, value: "So richten Sie ein: BILLING (300)"}
+    - {locale: fr, key: help.article.300.title, value: "Configurer BILLING (300)"}
+    - {locale: en, key: help.article.301.title, value: "Troubleshooting INVOICES (301)"}
+    - {locale: de, key: help.article.301.title, value: "Fehlerbehebung: INVOICES (301) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.301.title, value: "Dépannage : INVOICES (301)"}
+    - {locale: en, key: help.article.302.title, value: "Understanding SEATS (302)"}
+    - {locale: de, key: help.article.302.title, value: "Verständnis: SEATS (302)"}
+    - {locale: fr, key: help.article.302.title, value: "Comprendre SEATS (302)"}
+    - {locale: en, key: help.article.303.title, value: "Changing SSO (303)"}
+    - {locale: de, key: help.article.303.title, value: "Ändern: SSO (303)"}
+    - {locale: fr, key: help.article.303.title, value: "Modifier SSO (303)"}
+    - {locale: en, key: help.article.304.title, value: "Limits of SCIM (304)"}
+    - {locale: de, key: help.article.304.title, value: "Grenzen von SCIM (304)"}
+    - {locale: fr, key: help.article.304.title, value: "Limites de SCIM (304)"}
+    - {locale: en, key: help.article.305.title, value: "How to set up API (305)"}
+    - {locale: de, key: help.article.305.title, value: "So richten Sie ein: API (305)"}
+    - {locale: fr, key: help.article.305.title, value: "Configurer API (305)"}
+    - {locale: en, key: help.article.306.title, value: "Troubleshooting WEBHOOKS (306)"}
+    - {locale: de, key: help.article.306.title, value: "Fehlerbehebung: WEBHOOKS (306)"}
+    - {locale: fr, key: help.article.306.title, value: "Dépannage : WEBHOOKS (306)"}
+    - {locale: en, key: help.article.307.title, value: "Understanding EXPORTS (307)"}
+    - {locale: de, key: help.article.307.title, value: "Verständnis: EXPORTS (307)"}
+    - {locale: fr, key: help.article.307.title, value: "Comprendre EXPORTS (307)"}
+    - {locale: en, key: help.article.308.title, value: "Changing DASHBOARDS (308)"}
+    - {locale: de, key: help.article.308.title, value: "Ändern: DASHBOARDS (308) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.308.title, value: "Modifier DASHBOARDS (308) « avancé »"}
+    - {locale: en, key: help.article.309.title, value: "Limits of ROLES (309)"}
+    - {locale: de, key: help.article.309.title, value: "Grenzen von ROLES (309)"}
+    - {locale: fr, key: help.article.309.title, value: "Limites de ROLES (309)"}
+    - {locale: en, key: help.article.310.title, value: "How to set up BILLING (310)"}
+    - {locale: de, key: help.article.310.title, value: "So richten Sie ein: BILLING (310)"}
+    - {locale: fr, key: help.article.310.title, value: "Configurer BILLING (310)"}
+    - {locale: en, key: help.article.311.title, value: "Troubleshooting INVOICES (311)"}
+    - {locale: de, key: help.article.311.title, value: "Fehlerbehebung: INVOICES (311)"}
+    - {locale: fr, key: help.article.311.title, value: "Dépannage : INVOICES (311)"}
+    - {locale: en, key: help.article.312.title, value: "Understanding SEATS (312)"}
+    - {locale: de, key: help.article.312.title, value: "Verständnis: SEATS (312)"}
+    - {locale: fr, key: help.article.312.title, value: "Comprendre SEATS (312)"}
+    - {locale: en, key: help.article.313.title, value: "Changing SSO (313)"}
+    - {locale: de, key: help.article.313.title, value: "Ändern: SSO (313)"}
+    - {locale: fr, key: help.article.313.title, value: "Modifier SSO (313)"}
+    - {locale: en, key: help.article.314.title, value: "Limits of SCIM (314)"}
+    - {locale: de, key: help.article.314.title, value: "Grenzen von SCIM (314)"}
+    - {locale: fr, key: help.article.314.title, value: "Limites de SCIM (314)"}
+    - {locale: en, key: help.article.315.title, value: "How to set up API (315)"}
+    - {locale: de, key: help.article.315.title, value: "So richten Sie ein: API (315) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.315.title, value: "Configurer API (315)"}
+    - {locale: en, key: help.article.316.title, value: "Troubleshooting WEBHOOKS (316)"}
+    - {locale: de, key: help.article.316.title, value: "Fehlerbehebung: WEBHOOKS (316)"}
+    - {locale: fr, key: help.article.316.title, value: "Dépannage : WEBHOOKS (316)"}
+    - {locale: en, key: help.article.317.title, value: "Understanding EXPORTS (317)"}
+    - {locale: de, key: help.article.317.title, value: "Verständnis: EXPORTS (317)"}
+    - {locale: fr, key: help.article.317.title, value: "Comprendre EXPORTS (317)"}
+    - {locale: en, key: help.article.318.title, value: "Changing DASHBOARDS (318)"}
+    - {locale: de, key: help.article.318.title, value: "Ändern: DASHBOARDS (318)"}
+    - {locale: fr, key: help.article.318.title, value: "Modifier DASHBOARDS (318)"}
+    - {locale: en, key: help.article.319.title, value: "Limits of ROLES (319)"}
+    - {locale: de, key: help.article.319.title, value: "Grenzen von ROLES (319)"}
+    - {locale: fr, key: help.article.319.title, value: "Limites de ROLES (319) « avancé »"}
+    - {locale: en, key: help.article.320.title, value: "How to set up BILLING (320)"}
+    - {locale: de, key: help.article.320.title, value: "So richten Sie ein: BILLING (320)"}
+    - {locale: fr, key: help.article.320.title, value: "Configurer BILLING (320)"}
+    - {locale: en, key: help.article.321.title, value: "Troubleshooting INVOICES (321)"}
+    - {locale: de, key: help.article.321.title, value: "Fehlerbehebung: INVOICES (321)"}
+    - {locale: fr, key: help.article.321.title, value: "Dépannage : INVOICES (321)"}
+    - {locale: en, key: help.article.322.title, value: "Understanding SEATS (322)"}
+    - {locale: de, key: help.article.322.title, value: "Verständnis: SEATS (322) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.322.title, value: "Comprendre SEATS (322)"}
+    - {locale: en, key: help.article.323.title, value: "Changing SSO (323)"}
+    - {locale: de, key: help.article.323.title, value: "Ändern: SSO (323)"}
+    - {locale: fr, key: help.article.323.title, value: "Modifier SSO (323)"}
+    - {locale: en, key: help.article.324.title, value: "Limits of SCIM (324)"}
+    - {locale: de, key: help.article.324.title, value: "Grenzen von SCIM (324)"}
+    - {locale: fr, key: help.article.324.title, value: "Limites de SCIM (324)"}
+    - {locale: en, key: help.article.325.title, value: "How to set up API (325)"}
+    - {locale: de, key: help.article.325.title, value: "So richten Sie ein: API (325)"}
+    - {locale: fr, key: help.article.325.title, value: "Configurer API (325)"}
+    - {locale: en, key: help.article.326.title, value: "Troubleshooting WEBHOOKS (326)"}
+    - {locale: de, key: help.article.326.title, value: "Fehlerbehebung: WEBHOOKS (326)"}
+    - {locale: fr, key: help.article.326.title, value: "Dépannage : WEBHOOKS (326)"}
+    - {locale: en, key: help.article.327.title, value: "Understanding EXPORTS (327)"}
+    - {locale: de, key: help.article.327.title, value: "Verständnis: EXPORTS (327)"}
+    - {locale: fr, key: help.article.327.title, value: "Comprendre EXPORTS (327)"}
+    - {locale: en, key: help.article.328.title, value: "Changing DASHBOARDS (328)"}
+    - {locale: de, key: help.article.328.title, value: "Ändern: DASHBOARDS (328)"}
+    - {locale: fr, key: help.article.328.title, value: "Modifier DASHBOARDS (328)"}
+    - {locale: en, key: help.article.329.title, value: "Limits of ROLES (329)"}
+    - {locale: de, key: help.article.329.title, value: "Grenzen von ROLES (329) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.329.title, value: "Limites de ROLES (329)"}
+    - {locale: en, key: help.article.330.title, value: "How to set up BILLING (330)"}
+    - {locale: de, key: help.article.330.title, value: "So richten Sie ein: BILLING (330)"}
+    - {locale: fr, key: help.article.330.title, value: "Configurer BILLING (330) « avancé »"}
+    - {locale: en, key: help.article.331.title, value: "Troubleshooting INVOICES (331)"}
+    - {locale: de, key: help.article.331.title, value: "Fehlerbehebung: INVOICES (331)"}
+    - {locale: fr, key: help.article.331.title, value: "Dépannage : INVOICES (331)"}
+    - {locale: en, key: help.article.332.title, value: "Understanding SEATS (332)"}
+    - {locale: de, key: help.article.332.title, value: "Verständnis: SEATS (332)"}
+    - {locale: fr, key: help.article.332.title, value: "Comprendre SEATS (332)"}
+    - {locale: en, key: help.article.333.title, value: "Changing SSO (333)"}
+    - {locale: de, key: help.article.333.title, value: "Ändern: SSO (333)"}
+    - {locale: fr, key: help.article.333.title, value: "Modifier SSO (333)"}
+    - {locale: en, key: help.article.334.title, value: "Limits of SCIM (334)"}
+    - {locale: de, key: help.article.334.title, value: "Grenzen von SCIM (334)"}
+    - {locale: fr, key: help.article.334.title, value: "Limites de SCIM (334)"}
+    - {locale: en, key: help.article.335.title, value: "How to set up API (335)"}
+    - {locale: de, key: help.article.335.title, value: "So richten Sie ein: API (335)"}
+    - {locale: fr, key: help.article.335.title, value: "Configurer API (335)"}
+    - {locale: en, key: help.article.336.title, value: "Troubleshooting WEBHOOKS (336)"}
+    - {locale: de, key: help.article.336.title, value: "Fehlerbehebung: WEBHOOKS (336) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.336.title, value: "Dépannage : WEBHOOKS (336)"}
+    - {locale: en, key: help.article.337.title, value: "Understanding EXPORTS (337)"}
+    - {locale: de, key: help.article.337.title, value: "Verständnis: EXPORTS (337)"}
+    - {locale: fr, key: help.article.337.title, value: "Comprendre EXPORTS (337)"}
+    - {locale: en, key: help.article.338.title, value: "Changing DASHBOARDS (338)"}
+    - {locale: de, key: help.article.338.title, value: "Ändern: DASHBOARDS (338)"}
+    - {locale: fr, key: help.article.338.title, value: "Modifier DASHBOARDS (338)"}
+    - {locale: en, key: help.article.339.title, value: "Limits of ROLES (339)"}
+    - {locale: de, key: help.article.339.title, value: "Grenzen von ROLES (339)"}
+    - {locale: fr, key: help.article.339.title, value: "Limites de ROLES (339)"}
+    - {locale: en, key: help.article.340.title, value: "How to set up BILLING (340)"}
+    - {locale: de, key: help.article.340.title, value: "So richten Sie ein: BILLING (340)"}
+    - {locale: fr, key: help.article.340.title, value: "Configurer BILLING (340)"}
+    - {locale: en, key: help.article.341.title, value: "Troubleshooting INVOICES (341)"}
+    - {locale: de, key: help.article.341.title, value: "Fehlerbehebung: INVOICES (341)"}
+    - {locale: fr, key: help.article.341.title, value: "Dépannage : INVOICES (341) « avancé »"}
+    - {locale: en, key: help.article.342.title, value: "Understanding SEATS (342)"}
+    - {locale: de, key: help.article.342.title, value: "Verständnis: SEATS (342)"}
+    - {locale: fr, key: help.article.342.title, value: "Comprendre SEATS (342)"}
+    - {locale: en, key: help.article.343.title, value: "Changing SSO (343)"}
+    - {locale: de, key: help.article.343.title, value: "Ändern: SSO (343) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.343.title, value: "Modifier SSO (343)"}
+    - {locale: en, key: help.article.344.title, value: "Limits of SCIM (344)"}
+    - {locale: de, key: help.article.344.title, value: "Grenzen von SCIM (344)"}
+    - {locale: fr, key: help.article.344.title, value: "Limites de SCIM (344)"}
+    - {locale: en, key: help.article.345.title, value: "How to set up API (345)"}
+    - {locale: de, key: help.article.345.title, value: "So richten Sie ein: API (345)"}
+    - {locale: fr, key: help.article.345.title, value: "Configurer API (345)"}
+    - {locale: en, key: help.article.346.title, value: "Troubleshooting WEBHOOKS (346)"}
+    - {locale: de, key: help.article.346.title, value: "Fehlerbehebung: WEBHOOKS (346)"}
+    - {locale: fr, key: help.article.346.title, value: "Dépannage : WEBHOOKS (346)"}
+    - {locale: en, key: help.article.347.title, value: "Understanding EXPORTS (347)"}
+    - {locale: de, key: help.article.347.title, value: "Verständnis: EXPORTS (347)"}
+    - {locale: fr, key: help.article.347.title, value: "Comprendre EXPORTS (347)"}
+    - {locale: en, key: help.article.348.title, value: "Changing DASHBOARDS (348)"}
+    - {locale: de, key: help.article.348.title, value: "Ändern: DASHBOARDS (348)"}
+    - {locale: fr, key: help.article.348.title, value: "Modifier DASHBOARDS (348)"}
+    - {locale: en, key: help.article.349.title, value: "Limits of ROLES (349)"}
+    - {locale: de, key: help.article.349.title, value: "Grenzen von ROLES (349)"}
+    - {locale: fr, key: help.article.349.title, value: "Limites de ROLES (349)"}
+    - {locale: en, key: help.article.350.title, value: "How to set up BILLING (350)"}
+    - {locale: de, key: help.article.350.title, value: "So richten Sie ein: BILLING (350) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.350.title, value: "Configurer BILLING (350)"}
+    - {locale: en, key: help.article.351.title, value: "Troubleshooting INVOICES (351)"}
+    - {locale: de, key: help.article.351.title, value: "Fehlerbehebung: INVOICES (351)"}
+    - {locale: fr, key: help.article.351.title, value: "Dépannage : INVOICES (351)"}
+    - {locale: en, key: help.article.352.title, value: "Understanding SEATS (352)"}
+    - {locale: de, key: help.article.352.title, value: "Verständnis: SEATS (352)"}
+    - {locale: fr, key: help.article.352.title, value: "Comprendre SEATS (352) « avancé »"}
+    - {locale: en, key: help.article.353.title, value: "Changing SSO (353)"}
+    - {locale: de, key: help.article.353.title, value: "Ändern: SSO (353)"}
+    - {locale: fr, key: help.article.353.title, value: "Modifier SSO (353)"}
+    - {locale: en, key: help.article.354.title, value: "Limits of SCIM (354)"}
+    - {locale: de, key: help.article.354.title, value: "Grenzen von SCIM (354)"}
+    - {locale: fr, key: help.article.354.title, value: "Limites de SCIM (354)"}
+    - {locale: en, key: help.article.355.title, value: "How to set up API (355)"}
+    - {locale: de, key: help.article.355.title, value: "So richten Sie ein: API (355)"}
+    - {locale: fr, key: help.article.355.title, value: "Configurer API (355)"}
+    - {locale: en, key: help.article.356.title, value: "Troubleshooting WEBHOOKS (356)"}
+    - {locale: de, key: help.article.356.title, value: "Fehlerbehebung: WEBHOOKS (356)"}
+    - {locale: fr, key: help.article.356.title, value: "Dépannage : WEBHOOKS (356)"}
+    - {locale: en, key: help.article.357.title, value: "Understanding EXPORTS (357)"}
+    - {locale: de, key: help.article.357.title, value: "Verständnis: EXPORTS (357) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.357.title, value: "Comprendre EXPORTS (357)"}
+    - {locale: en, key: help.article.358.title, value: "Changing DASHBOARDS (358)"}
+    - {locale: de, key: help.article.358.title, value: "Ändern: DASHBOARDS (358)"}
+    - {locale: fr, key: help.article.358.title, value: "Modifier DASHBOARDS (358)"}
+    - {locale: en, key: help.article.359.title, value: "Limits of ROLES (359)"}
+    - {locale: de, key: help.article.359.title, value: "Grenzen von ROLES (359)"}
+    - {locale: fr, key: help.article.359.title, value: "Limites de ROLES (359)"}
+    - {locale: en, key: help.article.360.title, value: "How to set up BILLING (360)"}
+    - {locale: de, key: help.article.360.title, value: "So richten Sie ein: BILLING (360)"}
+    - {locale: fr, key: help.article.360.title, value: "Configurer BILLING (360)"}
+    - {locale: en, key: help.article.361.title, value: "Troubleshooting INVOICES (361)"}
+    - {locale: de, key: help.article.361.title, value: "Fehlerbehebung: INVOICES (361)"}
+    - {locale: fr, key: help.article.361.title, value: "Dépannage : INVOICES (361)"}
+    - {locale: en, key: help.article.362.title, value: "Understanding SEATS (362)"}
+    - {locale: de, key: help.article.362.title, value: "Verständnis: SEATS (362)"}
+    - {locale: fr, key: help.article.362.title, value: "Comprendre SEATS (362)"}
+    - {locale: en, key: help.article.363.title, value: "Changing SSO (363)"}
+    - {locale: de, key: help.article.363.title, value: "Ändern: SSO (363)"}
+    - {locale: fr, key: help.article.363.title, value: "Modifier SSO (363) « avancé »"}
+    - {locale: en, key: help.article.364.title, value: "Limits of SCIM (364)"}
+    - {locale: de, key: help.article.364.title, value: "Grenzen von SCIM (364) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.364.title, value: "Limites de SCIM (364)"}
+    - {locale: en, key: help.article.365.title, value: "How to set up API (365)"}
+    - {locale: de, key: help.article.365.title, value: "So richten Sie ein: API (365)"}
+    - {locale: fr, key: help.article.365.title, value: "Configurer API (365)"}
+    - {locale: en, key: help.article.366.title, value: "Troubleshooting WEBHOOKS (366)"}
+    - {locale: de, key: help.article.366.title, value: "Fehlerbehebung: WEBHOOKS (366)"}
+    - {locale: fr, key: help.article.366.title, value: "Dépannage : WEBHOOKS (366)"}
+    - {locale: en, key: help.article.367.title, value: "Understanding EXPORTS (367)"}
+    - {locale: de, key: help.article.367.title, value: "Verständnis: EXPORTS (367)"}
+    - {locale: fr, key: help.article.367.title, value: "Comprendre EXPORTS (367)"}
+    - {locale: en, key: help.article.368.title, value: "Changing DASHBOARDS (368)"}
+    - {locale: de, key: help.article.368.title, value: "Ändern: DASHBOARDS (368)"}
+    - {locale: fr, key: help.article.368.title, value: "Modifier DASHBOARDS (368)"}
+    - {locale: en, key: help.article.369.title, value: "Limits of ROLES (369)"}
+    - {locale: de, key: help.article.369.title, value: "Grenzen von ROLES (369)"}
+    - {locale: fr, key: help.article.369.title, value: "Limites de ROLES (369)"}
+    - {locale: en, key: help.article.370.title, value: "How to set up BILLING (370)"}
+    - {locale: de, key: help.article.370.title, value: "So richten Sie ein: BILLING (370)"}
+    - {locale: fr, key: help.article.370.title, value: "Configurer BILLING (370)"}
+    - {locale: en, key: help.article.371.title, value: "Troubleshooting INVOICES (371)"}
+    - {locale: de, key: help.article.371.title, value: "Fehlerbehebung: INVOICES (371) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.371.title, value: "Dépannage : INVOICES (371)"}
+    - {locale: en, key: help.article.372.title, value: "Understanding SEATS (372)"}
+    - {locale: de, key: help.article.372.title, value: "Verständnis: SEATS (372)"}
+    - {locale: fr, key: help.article.372.title, value: "Comprendre SEATS (372)"}
+    - {locale: en, key: help.article.373.title, value: "Changing SSO (373)"}
+    - {locale: de, key: help.article.373.title, value: "Ändern: SSO (373)"}
+    - {locale: fr, key: help.article.373.title, value: "Modifier SSO (373)"}
+    - {locale: en, key: help.article.374.title, value: "Limits of SCIM (374)"}
+    - {locale: de, key: help.article.374.title, value: "Grenzen von SCIM (374)"}
+    - {locale: fr, key: help.article.374.title, value: "Limites de SCIM (374) « avancé »"}
+    - {locale: en, key: help.article.375.title, value: "How to set up API (375)"}
+    - {locale: de, key: help.article.375.title, value: "So richten Sie ein: API (375)"}
+    - {locale: fr, key: help.article.375.title, value: "Configurer API (375)"}
+    - {locale: en, key: help.article.376.title, value: "Troubleshooting WEBHOOKS (376)"}
+    - {locale: de, key: help.article.376.title, value: "Fehlerbehebung: WEBHOOKS (376)"}
+    - {locale: fr, key: help.article.376.title, value: "Dépannage : WEBHOOKS (376)"}
+    - {locale: en, key: help.article.377.title, value: "Understanding EXPORTS (377)"}
+    - {locale: de, key: help.article.377.title, value: "Verständnis: EXPORTS (377)"}
+    - {locale: fr, key: help.article.377.title, value: "Comprendre EXPORTS (377)"}
+    - {locale: en, key: help.article.378.title, value: "Changing DASHBOARDS (378)"}
+    - {locale: de, key: help.article.378.title, value: "Ändern: DASHBOARDS (378) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.378.title, value: "Modifier DASHBOARDS (378)"}
+    - {locale: en, key: help.article.379.title, value: "Limits of ROLES (379)"}
+    - {locale: de, key: help.article.379.title, value: "Grenzen von ROLES (379)"}
+    - {locale: fr, key: help.article.379.title, value: "Limites de ROLES (379)"}
+    - {locale: en, key: help.article.380.title, value: "How to set up BILLING (380)"}
+    - {locale: de, key: help.article.380.title, value: "So richten Sie ein: BILLING (380)"}
+    - {locale: fr, key: help.article.380.title, value: "Configurer BILLING (380)"}
+    - {locale: en, key: help.article.381.title, value: "Troubleshooting INVOICES (381)"}
+    - {locale: de, key: help.article.381.title, value: "Fehlerbehebung: INVOICES (381)"}
+    - {locale: fr, key: help.article.381.title, value: "Dépannage : INVOICES (381)"}
+    - {locale: en, key: help.article.382.title, value: "Understanding SEATS (382)"}
+    - {locale: de, key: help.article.382.title, value: "Verständnis: SEATS (382)"}
+    - {locale: fr, key: help.article.382.title, value: "Comprendre SEATS (382)"}
+    - {locale: en, key: help.article.383.title, value: "Changing SSO (383)"}
+    - {locale: de, key: help.article.383.title, value: "Ändern: SSO (383)"}
+    - {locale: fr, key: help.article.383.title, value: "Modifier SSO (383)"}
+    - {locale: en, key: help.article.384.title, value: "Limits of SCIM (384)"}
+    - {locale: de, key: help.article.384.title, value: "Grenzen von SCIM (384)"}
+    - {locale: fr, key: help.article.384.title, value: "Limites de SCIM (384)"}
+    - {locale: en, key: help.article.385.title, value: "How to set up API (385)"}
+    - {locale: de, key: help.article.385.title, value: "So richten Sie ein: API (385) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.385.title, value: "Configurer API (385) « avancé »"}
+    - {locale: en, key: help.article.386.title, value: "Troubleshooting WEBHOOKS (386)"}
+    - {locale: de, key: help.article.386.title, value: "Fehlerbehebung: WEBHOOKS (386)"}
+    - {locale: fr, key: help.article.386.title, value: "Dépannage : WEBHOOKS (386)"}
+    - {locale: en, key: help.article.387.title, value: "Understanding EXPORTS (387)"}
+    - {locale: de, key: help.article.387.title, value: "Verständnis: EXPORTS (387)"}
+    - {locale: fr, key: help.article.387.title, value: "Comprendre EXPORTS (387)"}
+    - {locale: en, key: help.article.388.title, value: "Changing DASHBOARDS (388)"}
+    - {locale: de, key: help.article.388.title, value: "Ändern: DASHBOARDS (388)"}
+    - {locale: fr, key: help.article.388.title, value: "Modifier DASHBOARDS (388)"}
+    - {locale: en, key: help.article.389.title, value: "Limits of ROLES (389)"}
+    - {locale: de, key: help.article.389.title, value: "Grenzen von ROLES (389)"}
+    - {locale: fr, key: help.article.389.title, value: "Limites de ROLES (389)"}
+    - {locale: en, key: help.article.390.title, value: "How to set up BILLING (390)"}
+    - {locale: de, key: help.article.390.title, value: "So richten Sie ein: BILLING (390)"}
+    - {locale: fr, key: help.article.390.title, value: "Configurer BILLING (390)"}
+    - {locale: en, key: help.article.391.title, value: "Troubleshooting INVOICES (391)"}
+    - {locale: de, key: help.article.391.title, value: "Fehlerbehebung: INVOICES (391)"}
+    - {locale: fr, key: help.article.391.title, value: "Dépannage : INVOICES (391)"}
+    - {locale: en, key: help.article.392.title, value: "Understanding SEATS (392)"}
+    - {locale: de, key: help.article.392.title, value: "Verständnis: SEATS (392) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.392.title, value: "Comprendre SEATS (392)"}
+    - {locale: en, key: help.article.393.title, value: "Changing SSO (393)"}
+    - {locale: de, key: help.article.393.title, value: "Ändern: SSO (393)"}
+    - {locale: fr, key: help.article.393.title, value: "Modifier SSO (393)"}
+    - {locale: en, key: help.article.394.title, value: "Limits of SCIM (394)"}
+    - {locale: de, key: help.article.394.title, value: "Grenzen von SCIM (394)"}
+    - {locale: fr, key: help.article.394.title, value: "Limites de SCIM (394)"}
+    - {locale: en, key: help.article.395.title, value: "How to set up API (395)"}
+    - {locale: de, key: help.article.395.title, value: "So richten Sie ein: API (395)"}
+    - {locale: fr, key: help.article.395.title, value: "Configurer API (395)"}
+    - {locale: en, key: help.article.396.title, value: "Troubleshooting WEBHOOKS (396)"}
+    - {locale: de, key: help.article.396.title, value: "Fehlerbehebung: WEBHOOKS (396)"}
+    - {locale: fr, key: help.article.396.title, value: "Dépannage : WEBHOOKS (396) « avancé »"}
+    - {locale: en, key: help.article.397.title, value: "Understanding EXPORTS (397)"}
+    - {locale: de, key: help.article.397.title, value: "Verständnis: EXPORTS (397)"}
+    - {locale: fr, key: help.article.397.title, value: "Comprendre EXPORTS (397)"}
+    - {locale: en, key: help.article.398.title, value: "Changing DASHBOARDS (398)"}
+    - {locale: de, key: help.article.398.title, value: "Ändern: DASHBOARDS (398)"}
+    - {locale: fr, key: help.article.398.title, value: "Modifier DASHBOARDS (398)"}
+    - {locale: en, key: help.article.399.title, value: "Limits of ROLES (399)"}
+    - {locale: de, key: help.article.399.title, value: "Grenzen von ROLES (399) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.399.title, value: "Limites de ROLES (399)"}
+    - {locale: en, key: help.article.400.title, value: "How to set up BILLING (400)"}
+    - {locale: de, key: help.article.400.title, value: "So richten Sie ein: BILLING (400)"}
+    - {locale: fr, key: help.article.400.title, value: "Configurer BILLING (400)"}
+    - {locale: en, key: help.article.401.title, value: "Troubleshooting INVOICES (401)"}
+    - {locale: de, key: help.article.401.title, value: "Fehlerbehebung: INVOICES (401)"}
+    - {locale: fr, key: help.article.401.title, value: "Dépannage : INVOICES (401)"}
+    - {locale: en, key: help.article.402.title, value: "Understanding SEATS (402)"}
+    - {locale: de, key: help.article.402.title, value: "Verständnis: SEATS (402)"}
+    - {locale: fr, key: help.article.402.title, value: "Comprendre SEATS (402)"}
+    - {locale: en, key: help.article.403.title, value: "Changing SSO (403)"}
+    - {locale: de, key: help.article.403.title, value: "Ändern: SSO (403)"}
+    - {locale: fr, key: help.article.403.title, value: "Modifier SSO (403)"}
+    - {locale: en, key: help.article.404.title, value: "Limits of SCIM (404)"}
+    - {locale: de, key: help.article.404.title, value: "Grenzen von SCIM (404)"}
+    - {locale: fr, key: help.article.404.title, value: "Limites de SCIM (404)"}
+    - {locale: en, key: help.article.405.title, value: "How to set up API (405)"}
+    - {locale: de, key: help.article.405.title, value: "So richten Sie ein: API (405)"}
+    - {locale: fr, key: help.article.405.title, value: "Configurer API (405)"}
+    - {locale: en, key: help.article.406.title, value: "Troubleshooting WEBHOOKS (406)"}
+    - {locale: de, key: help.article.406.title, value: "Fehlerbehebung: WEBHOOKS (406) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.406.title, value: "Dépannage : WEBHOOKS (406)"}
+    - {locale: en, key: help.article.407.title, value: "Understanding EXPORTS (407)"}
+    - {locale: de, key: help.article.407.title, value: "Verständnis: EXPORTS (407)"}
+    - {locale: fr, key: help.article.407.title, value: "Comprendre EXPORTS (407) « avancé »"}
+    - {locale: en, key: help.article.408.title, value: "Changing DASHBOARDS (408)"}
+    - {locale: de, key: help.article.408.title, value: "Ändern: DASHBOARDS (408)"}
+    - {locale: fr, key: help.article.408.title, value: "Modifier DASHBOARDS (408)"}
+    - {locale: en, key: help.article.409.title, value: "Limits of ROLES (409)"}
+    - {locale: de, key: help.article.409.title, value: "Grenzen von ROLES (409)"}
+    - {locale: fr, key: help.article.409.title, value: "Limites de ROLES (409)"}
+    - {locale: en, key: help.article.410.title, value: "How to set up BILLING (410)"}
+    - {locale: de, key: help.article.410.title, value: "So richten Sie ein: BILLING (410)"}
+    - {locale: fr, key: help.article.410.title, value: "Configurer BILLING (410)"}
+    - {locale: en, key: help.article.411.title, value: "Troubleshooting INVOICES (411)"}
+    - {locale: de, key: help.article.411.title, value: "Fehlerbehebung: INVOICES (411)"}
+    - {locale: fr, key: help.article.411.title, value: "Dépannage : INVOICES (411)"}
+    - {locale: en, key: help.article.412.title, value: "Understanding SEATS (412)"}
+    - {locale: de, key: help.article.412.title, value: "Verständnis: SEATS (412)"}
+    - {locale: fr, key: help.article.412.title, value: "Comprendre SEATS (412)"}
+    - {locale: en, key: help.article.413.title, value: "Changing SSO (413)"}
+    - {locale: de, key: help.article.413.title, value: "Ändern: SSO (413) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.413.title, value: "Modifier SSO (413)"}
+    - {locale: en, key: help.article.414.title, value: "Limits of SCIM (414)"}
+    - {locale: de, key: help.article.414.title, value: "Grenzen von SCIM (414)"}
+    - {locale: fr, key: help.article.414.title, value: "Limites de SCIM (414)"}
+    - {locale: en, key: help.article.415.title, value: "How to set up API (415)"}
+    - {locale: de, key: help.article.415.title, value: "So richten Sie ein: API (415)"}
+    - {locale: fr, key: help.article.415.title, value: "Configurer API (415)"}
+    - {locale: en, key: help.article.416.title, value: "Troubleshooting WEBHOOKS (416)"}
+    - {locale: de, key: help.article.416.title, value: "Fehlerbehebung: WEBHOOKS (416)"}
+    - {locale: fr, key: help.article.416.title, value: "Dépannage : WEBHOOKS (416)"}
+    - {locale: en, key: help.article.417.title, value: "Understanding EXPORTS (417)"}
+    - {locale: de, key: help.article.417.title, value: "Verständnis: EXPORTS (417)"}
+    - {locale: fr, key: help.article.417.title, value: "Comprendre EXPORTS (417)"}
+    - {locale: en, key: help.article.418.title, value: "Changing DASHBOARDS (418)"}
+    - {locale: de, key: help.article.418.title, value: "Ändern: DASHBOARDS (418)"}
+    - {locale: fr, key: help.article.418.title, value: "Modifier DASHBOARDS (418) « avancé »"}
+    - {locale: en, key: help.article.419.title, value: "Limits of ROLES (419)"}
+    - {locale: de, key: help.article.419.title, value: "Grenzen von ROLES (419)"}
+    - {locale: fr, key: help.article.419.title, value: "Limites de ROLES (419)"}
+    - {locale: en, key: help.article.420.title, value: "How to set up BILLING (420)"}
+    - {locale: de, key: help.article.420.title, value: "So richten Sie ein: BILLING (420) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.420.title, value: "Configurer BILLING (420)"}
+    - {locale: en, key: help.article.421.title, value: "Troubleshooting INVOICES (421)"}
+    - {locale: de, key: help.article.421.title, value: "Fehlerbehebung: INVOICES (421)"}
+    - {locale: fr, key: help.article.421.title, value: "Dépannage : INVOICES (421)"}
+    - {locale: en, key: help.article.422.title, value: "Understanding SEATS (422)"}
+    - {locale: de, key: help.article.422.title, value: "Verständnis: SEATS (422)"}
+    - {locale: fr, key: help.article.422.title, value: "Comprendre SEATS (422)"}
+    - {locale: en, key: help.article.423.title, value: "Changing SSO (423)"}
+    - {locale: de, key: help.article.423.title, value: "Ändern: SSO (423)"}
+    - {locale: fr, key: help.article.423.title, value: "Modifier SSO (423)"}
+    - {locale: en, key: help.article.424.title, value: "Limits of SCIM (424)"}
+    - {locale: de, key: help.article.424.title, value: "Grenzen von SCIM (424)"}
+    - {locale: fr, key: help.article.424.title, value: "Limites de SCIM (424)"}
+    - {locale: en, key: help.article.425.title, value: "How to set up API (425)"}
+    - {locale: de, key: help.article.425.title, value: "So richten Sie ein: API (425)"}
+    - {locale: fr, key: help.article.425.title, value: "Configurer API (425)"}
+    - {locale: en, key: help.article.426.title, value: "Troubleshooting WEBHOOKS (426)"}
+    - {locale: de, key: help.article.426.title, value: "Fehlerbehebung: WEBHOOKS (426)"}
+    - {locale: fr, key: help.article.426.title, value: "Dépannage : WEBHOOKS (426)"}
+    - {locale: en, key: help.article.427.title, value: "Understanding EXPORTS (427)"}
+    - {locale: de, key: help.article.427.title, value: "Verständnis: EXPORTS (427) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.427.title, value: "Comprendre EXPORTS (427)"}
+    - {locale: en, key: help.article.428.title, value: "Changing DASHBOARDS (428)"}
+    - {locale: de, key: help.article.428.title, value: "Ändern: DASHBOARDS (428)"}
+    - {locale: fr, key: help.article.428.title, value: "Modifier DASHBOARDS (428)"}
+    - {locale: en, key: help.article.429.title, value: "Limits of ROLES (429)"}
+    - {locale: de, key: help.article.429.title, value: "Grenzen von ROLES (429)"}
+    - {locale: fr, key: help.article.429.title, value: "Limites de ROLES (429) « avancé »"}
+    - {locale: en, key: help.article.430.title, value: "How to set up BILLING (430)"}
+    - {locale: de, key: help.article.430.title, value: "So richten Sie ein: BILLING (430)"}
+    - {locale: fr, key: help.article.430.title, value: "Configurer BILLING (430)"}
+    - {locale: en, key: help.article.431.title, value: "Troubleshooting INVOICES (431)"}
+    - {locale: de, key: help.article.431.title, value: "Fehlerbehebung: INVOICES (431)"}
+    - {locale: fr, key: help.article.431.title, value: "Dépannage : INVOICES (431)"}
+    - {locale: en, key: help.article.432.title, value: "Understanding SEATS (432)"}
+    - {locale: de, key: help.article.432.title, value: "Verständnis: SEATS (432)"}
+    - {locale: fr, key: help.article.432.title, value: "Comprendre SEATS (432)"}
+    - {locale: en, key: help.article.433.title, value: "Changing SSO (433)"}
+    - {locale: de, key: help.article.433.title, value: "Ändern: SSO (433)"}
+    - {locale: fr, key: help.article.433.title, value: "Modifier SSO (433)"}
+    - {locale: en, key: help.article.434.title, value: "Limits of SCIM (434)"}
+    - {locale: de, key: help.article.434.title, value: "Grenzen von SCIM (434) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.434.title, value: "Limites de SCIM (434)"}
+    - {locale: en, key: help.article.435.title, value: "How to set up API (435)"}
+    - {locale: de, key: help.article.435.title, value: "So richten Sie ein: API (435)"}
+    - {locale: fr, key: help.article.435.title, value: "Configurer API (435)"}
+    - {locale: en, key: help.article.436.title, value: "Troubleshooting WEBHOOKS (436)"}
+    - {locale: de, key: help.article.436.title, value: "Fehlerbehebung: WEBHOOKS (436)"}
+    - {locale: fr, key: help.article.436.title, value: "Dépannage : WEBHOOKS (436)"}
+    - {locale: en, key: help.article.437.title, value: "Understanding EXPORTS (437)"}
+    - {locale: de, key: help.article.437.title, value: "Verständnis: EXPORTS (437)"}
+    - {locale: fr, key: help.article.437.title, value: "Comprendre EXPORTS (437)"}
+    - {locale: en, key: help.article.438.title, value: "Changing DASHBOARDS (438)"}
+    - {locale: de, key: help.article.438.title, value: "Ändern: DASHBOARDS (438)"}
+    - {locale: fr, key: help.article.438.title, value: "Modifier DASHBOARDS (438)"}
+    - {locale: en, key: help.article.439.title, value: "Limits of ROLES (439)"}
+    - {locale: de, key: help.article.439.title, value: "Grenzen von ROLES (439)"}
+    - {locale: fr, key: help.article.439.title, value: "Limites de ROLES (439)"}
+    - {locale: en, key: help.article.440.title, value: "How to set up BILLING (440)"}
+    - {locale: de, key: help.article.440.title, value: "So richten Sie ein: BILLING (440)"}
+    - {locale: fr, key: help.article.440.title, value: "Configurer BILLING (440) « avancé »"}
+    - {locale: en, key: help.article.441.title, value: "Troubleshooting INVOICES (441)"}
+    - {locale: de, key: help.article.441.title, value: "Fehlerbehebung: INVOICES (441) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.441.title, value: "Dépannage : INVOICES (441)"}
+    - {locale: en, key: help.article.442.title, value: "Understanding SEATS (442)"}
+    - {locale: de, key: help.article.442.title, value: "Verständnis: SEATS (442)"}
+    - {locale: fr, key: help.article.442.title, value: "Comprendre SEATS (442)"}
+    - {locale: en, key: help.article.443.title, value: "Changing SSO (443)"}
+    - {locale: de, key: help.article.443.title, value: "Ändern: SSO (443)"}
+    - {locale: fr, key: help.article.443.title, value: "Modifier SSO (443)"}
+    - {locale: en, key: help.article.444.title, value: "Limits of SCIM (444)"}
+    - {locale: de, key: help.article.444.title, value: "Grenzen von SCIM (444)"}
+    - {locale: fr, key: help.article.444.title, value: "Limites de SCIM (444)"}
+    - {locale: en, key: help.article.445.title, value: "How to set up API (445)"}
+    - {locale: de, key: help.article.445.title, value: "So richten Sie ein: API (445)"}
+    - {locale: fr, key: help.article.445.title, value: "Configurer API (445)"}
+    - {locale: en, key: help.article.446.title, value: "Troubleshooting WEBHOOKS (446)"}
+    - {locale: de, key: help.article.446.title, value: "Fehlerbehebung: WEBHOOKS (446)"}
+    - {locale: fr, key: help.article.446.title, value: "Dépannage : WEBHOOKS (446)"}
+    - {locale: en, key: help.article.447.title, value: "Understanding EXPORTS (447)"}
+    - {locale: de, key: help.article.447.title, value: "Verständnis: EXPORTS (447)"}
+    - {locale: fr, key: help.article.447.title, value: "Comprendre EXPORTS (447)"}
+    - {locale: en, key: help.article.448.title, value: "Changing DASHBOARDS (448)"}
+    - {locale: de, key: help.article.448.title, value: "Ändern: DASHBOARDS (448) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.448.title, value: "Modifier DASHBOARDS (448)"}
+    - {locale: en, key: help.article.449.title, value: "Limits of ROLES (449)"}
+    - {locale: de, key: help.article.449.title, value: "Grenzen von ROLES (449)"}
+    - {locale: fr, key: help.article.449.title, value: "Limites de ROLES (449)"}
+    - {locale: en, key: help.article.450.title, value: "How to set up BILLING (450)"}
+    - {locale: de, key: help.article.450.title, value: "So richten Sie ein: BILLING (450)"}
+    - {locale: fr, key: help.article.450.title, value: "Configurer BILLING (450)"}
+    - {locale: en, key: help.article.451.title, value: "Troubleshooting INVOICES (451)"}
+    - {locale: de, key: help.article.451.title, value: "Fehlerbehebung: INVOICES (451)"}
+    - {locale: fr, key: help.article.451.title, value: "Dépannage : INVOICES (451) « avancé »"}
+    - {locale: en, key: help.article.452.title, value: "Understanding SEATS (452)"}
+    - {locale: de, key: help.article.452.title, value: "Verständnis: SEATS (452)"}
+    - {locale: fr, key: help.article.452.title, value: "Comprendre SEATS (452)"}
+    - {locale: en, key: help.article.453.title, value: "Changing SSO (453)"}
+    - {locale: de, key: help.article.453.title, value: "Ändern: SSO (453)"}
+    - {locale: fr, key: help.article.453.title, value: "Modifier SSO (453)"}
+    - {locale: en, key: help.article.454.title, value: "Limits of SCIM (454)"}
+    - {locale: de, key: help.article.454.title, value: "Grenzen von SCIM (454)"}
+    - {locale: fr, key: help.article.454.title, value: "Limites de SCIM (454)"}
+    - {locale: en, key: help.article.455.title, value: "How to set up API (455)"}
+    - {locale: de, key: help.article.455.title, value: "So richten Sie ein: API (455) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.455.title, value: "Configurer API (455)"}
+    - {locale: en, key: help.article.456.title, value: "Troubleshooting WEBHOOKS (456)"}
+    - {locale: de, key: help.article.456.title, value: "Fehlerbehebung: WEBHOOKS (456)"}
+    - {locale: fr, key: help.article.456.title, value: "Dépannage : WEBHOOKS (456)"}
+    - {locale: en, key: help.article.457.title, value: "Understanding EXPORTS (457)"}
+    - {locale: de, key: help.article.457.title, value: "Verständnis: EXPORTS (457)"}
+    - {locale: fr, key: help.article.457.title, value: "Comprendre EXPORTS (457)"}
+    - {locale: en, key: help.article.458.title, value: "Changing DASHBOARDS (458)"}
+    - {locale: de, key: help.article.458.title, value: "Ändern: DASHBOARDS (458)"}
+    - {locale: fr, key: help.article.458.title, value: "Modifier DASHBOARDS (458)"}
+    - {locale: en, key: help.article.459.title, value: "Limits of ROLES (459)"}
+    - {locale: de, key: help.article.459.title, value: "Grenzen von ROLES (459)"}
+    - {locale: fr, key: help.article.459.title, value: "Limites de ROLES (459)"}
+    - {locale: en, key: help.article.460.title, value: "How to set up BILLING (460)"}
+    - {locale: de, key: help.article.460.title, value: "So richten Sie ein: BILLING (460)"}
+    - {locale: fr, key: help.article.460.title, value: "Configurer BILLING (460)"}
+    - {locale: en, key: help.article.461.title, value: "Troubleshooting INVOICES (461)"}
+    - {locale: de, key: help.article.461.title, value: "Fehlerbehebung: INVOICES (461)"}
+    - {locale: fr, key: help.article.461.title, value: "Dépannage : INVOICES (461)"}
+    - {locale: en, key: help.article.462.title, value: "Understanding SEATS (462)"}
+    - {locale: de, key: help.article.462.title, value: "Verständnis: SEATS (462) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.462.title, value: "Comprendre SEATS (462) « avancé »"}
+    - {locale: en, key: help.article.463.title, value: "Changing SSO (463)"}
+    - {locale: de, key: help.article.463.title, value: "Ändern: SSO (463)"}
+    - {locale: fr, key: help.article.463.title, value: "Modifier SSO (463)"}
+    - {locale: en, key: help.article.464.title, value: "Limits of SCIM (464)"}
+    - {locale: de, key: help.article.464.title, value: "Grenzen von SCIM (464)"}
+    - {locale: fr, key: help.article.464.title, value: "Limites de SCIM (464)"}
+    - {locale: en, key: help.article.465.title, value: "How to set up API (465)"}
+    - {locale: de, key: help.article.465.title, value: "So richten Sie ein: API (465)"}
+    - {locale: fr, key: help.article.465.title, value: "Configurer API (465)"}
+    - {locale: en, key: help.article.466.title, value: "Troubleshooting WEBHOOKS (466)"}
+    - {locale: de, key: help.article.466.title, value: "Fehlerbehebung: WEBHOOKS (466)"}
+    - {locale: fr, key: help.article.466.title, value: "Dépannage : WEBHOOKS (466)"}
+    - {locale: en, key: help.article.467.title, value: "Understanding EXPORTS (467)"}
+    - {locale: de, key: help.article.467.title, value: "Verständnis: EXPORTS (467)"}
+    - {locale: fr, key: help.article.467.title, value: "Comprendre EXPORTS (467)"}
+    - {locale: en, key: help.article.468.title, value: "Changing DASHBOARDS (468)"}
+    - {locale: de, key: help.article.468.title, value: "Ändern: DASHBOARDS (468)"}
+    - {locale: fr, key: help.article.468.title, value: "Modifier DASHBOARDS (468)"}
+    - {locale: en, key: help.article.469.title, value: "Limits of ROLES (469)"}
+    - {locale: de, key: help.article.469.title, value: "Grenzen von ROLES (469) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.469.title, value: "Limites de ROLES (469)"}
+    - {locale: en, key: help.article.470.title, value: "How to set up BILLING (470)"}
+    - {locale: de, key: help.article.470.title, value: "So richten Sie ein: BILLING (470)"}
+    - {locale: fr, key: help.article.470.title, value: "Configurer BILLING (470)"}
+    - {locale: en, key: help.article.471.title, value: "Troubleshooting INVOICES (471)"}
+    - {locale: de, key: help.article.471.title, value: "Fehlerbehebung: INVOICES (471)"}
+    - {locale: fr, key: help.article.471.title, value: "Dépannage : INVOICES (471)"}
+    - {locale: en, key: help.article.472.title, value: "Understanding SEATS (472)"}
+    - {locale: de, key: help.article.472.title, value: "Verständnis: SEATS (472)"}
+    - {locale: fr, key: help.article.472.title, value: "Comprendre SEATS (472)"}
+    - {locale: en, key: help.article.473.title, value: "Changing SSO (473)"}
+    - {locale: de, key: help.article.473.title, value: "Ändern: SSO (473)"}
+    - {locale: fr, key: help.article.473.title, value: "Modifier SSO (473) « avancé »"}
+    - {locale: en, key: help.article.474.title, value: "Limits of SCIM (474)"}
+    - {locale: de, key: help.article.474.title, value: "Grenzen von SCIM (474)"}
+    - {locale: fr, key: help.article.474.title, value: "Limites de SCIM (474)"}
+    - {locale: en, key: help.article.475.title, value: "How to set up API (475)"}
+    - {locale: de, key: help.article.475.title, value: "So richten Sie ein: API (475)"}
+    - {locale: fr, key: help.article.475.title, value: "Configurer API (475)"}
+    - {locale: en, key: help.article.476.title, value: "Troubleshooting WEBHOOKS (476)"}
+    - {locale: de, key: help.article.476.title, value: "Fehlerbehebung: WEBHOOKS (476) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.476.title, value: "Dépannage : WEBHOOKS (476)"}
+    - {locale: en, key: help.article.477.title, value: "Understanding EXPORTS (477)"}
+    - {locale: de, key: help.article.477.title, value: "Verständnis: EXPORTS (477)"}
+    - {locale: fr, key: help.article.477.title, value: "Comprendre EXPORTS (477)"}
+    - {locale: en, key: help.article.478.title, value: "Changing DASHBOARDS (478)"}
+    - {locale: de, key: help.article.478.title, value: "Ändern: DASHBOARDS (478)"}
+    - {locale: fr, key: help.article.478.title, value: "Modifier DASHBOARDS (478)"}
+    - {locale: en, key: help.article.479.title, value: "Limits of ROLES (479)"}
+    - {locale: de, key: help.article.479.title, value: "Grenzen von ROLES (479)"}
+    - {locale: fr, key: help.article.479.title, value: "Limites de ROLES (479)"}
+    - {locale: en, key: help.article.480.title, value: "How to set up BILLING (480)"}
+    - {locale: de, key: help.article.480.title, value: "So richten Sie ein: BILLING (480)"}
+    - {locale: fr, key: help.article.480.title, value: "Configurer BILLING (480)"}
+    - {locale: en, key: help.article.481.title, value: "Troubleshooting INVOICES (481)"}
+    - {locale: de, key: help.article.481.title, value: "Fehlerbehebung: INVOICES (481)"}
+    - {locale: fr, key: help.article.481.title, value: "Dépannage : INVOICES (481)"}
+    - {locale: en, key: help.article.482.title, value: "Understanding SEATS (482)"}
+    - {locale: de, key: help.article.482.title, value: "Verständnis: SEATS (482)"}
+    - {locale: fr, key: help.article.482.title, value: "Comprendre SEATS (482)"}
+    - {locale: en, key: help.article.483.title, value: "Changing SSO (483)"}
+    - {locale: de, key: help.article.483.title, value: "Ändern: SSO (483) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.483.title, value: "Modifier SSO (483)"}
+    - {locale: en, key: help.article.484.title, value: "Limits of SCIM (484)"}
+    - {locale: de, key: help.article.484.title, value: "Grenzen von SCIM (484)"}
+    - {locale: fr, key: help.article.484.title, value: "Limites de SCIM (484) « avancé »"}
+    - {locale: en, key: help.article.485.title, value: "How to set up API (485)"}
+    - {locale: de, key: help.article.485.title, value: "So richten Sie ein: API (485)"}
+    - {locale: fr, key: help.article.485.title, value: "Configurer API (485)"}
+    - {locale: en, key: help.article.486.title, value: "Troubleshooting WEBHOOKS (486)"}
+    - {locale: de, key: help.article.486.title, value: "Fehlerbehebung: WEBHOOKS (486)"}
+    - {locale: fr, key: help.article.486.title, value: "Dépannage : WEBHOOKS (486)"}
+    - {locale: en, key: help.article.487.title, value: "Understanding EXPORTS (487)"}
+    - {locale: de, key: help.article.487.title, value: "Verständnis: EXPORTS (487)"}
+    - {locale: fr, key: help.article.487.title, value: "Comprendre EXPORTS (487)"}
+    - {locale: en, key: help.article.488.title, value: "Changing DASHBOARDS (488)"}
+    - {locale: de, key: help.article.488.title, value: "Ändern: DASHBOARDS (488)"}
+    - {locale: fr, key: help.article.488.title, value: "Modifier DASHBOARDS (488)"}
+    - {locale: en, key: help.article.489.title, value: "Limits of ROLES (489)"}
+    - {locale: de, key: help.article.489.title, value: "Grenzen von ROLES (489)"}
+    - {locale: fr, key: help.article.489.title, value: "Limites de ROLES (489)"}
+    - {locale: en, key: help.article.490.title, value: "How to set up BILLING (490)"}
+    - {locale: de, key: help.article.490.title, value: "So richten Sie ein: BILLING (490) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.490.title, value: "Configurer BILLING (490)"}
+    - {locale: en, key: help.article.491.title, value: "Troubleshooting INVOICES (491)"}
+    - {locale: de, key: help.article.491.title, value: "Fehlerbehebung: INVOICES (491)"}
+    - {locale: fr, key: help.article.491.title, value: "Dépannage : INVOICES (491)"}
+    - {locale: en, key: help.article.492.title, value: "Understanding SEATS (492)"}
+    - {locale: de, key: help.article.492.title, value: "Verständnis: SEATS (492)"}
+    - {locale: fr, key: help.article.492.title, value: "Comprendre SEATS (492)"}
+    - {locale: en, key: help.article.493.title, value: "Changing SSO (493)"}
+    - {locale: de, key: help.article.493.title, value: "Ändern: SSO (493)"}
+    - {locale: fr, key: help.article.493.title, value: "Modifier SSO (493)"}
+    - {locale: en, key: help.article.494.title, value: "Limits of SCIM (494)"}
+    - {locale: de, key: help.article.494.title, value: "Grenzen von SCIM (494)"}
+    - {locale: fr, key: help.article.494.title, value: "Limites de SCIM (494)"}
+    - {locale: en, key: help.article.495.title, value: "How to set up API (495)"}
+    - {locale: de, key: help.article.495.title, value: "So richten Sie ein: API (495)"}
+    - {locale: fr, key: help.article.495.title, value: "Configurer API (495) « avancé »"}
+    - {locale: en, key: help.article.496.title, value: "Troubleshooting WEBHOOKS (496)"}
+    - {locale: de, key: help.article.496.title, value: "Fehlerbehebung: WEBHOOKS (496)"}
+    - {locale: fr, key: help.article.496.title, value: "Dépannage : WEBHOOKS (496)"}
+    - {locale: en, key: help.article.497.title, value: "Understanding EXPORTS (497)"}
+    - {locale: de, key: help.article.497.title, value: "Verständnis: EXPORTS (497) – für Administratorinnen & Administratoren"}
+    - {locale: fr, key: help.article.497.title, value: "Comprendre EXPORTS (497)"}
+    - {locale: en, key: help.article.498.title, value: "Changing DASHBOARDS (498)"}
+    - {locale: de, key: help.article.498.title, value: "Ändern: DASHBOARDS (498)"}
+    - {locale: fr, key: help.article.498.title, value: "Modifier DASHBOARDS (498)"}
+    - {locale: en, key: help.article.499.title, value: "Limits of ROLES (499)"}
+    - {locale: de, key: help.article.499.title, value: "Grenzen von ROLES (499)"}
+    - {locale: fr, key: help.article.499.title, value: "Limites de ROLES (499)"}
+    - {locale: en, key: help.article.500.title, value: "How to set up BILLING (500)"}
+    - {locale: de, key: help.article.500.title, value: "So richten Sie ein: BILLING (500)"}
+    - {locale: fr, key: help.article.500.title, value: "Configurer BILLING (500)"}

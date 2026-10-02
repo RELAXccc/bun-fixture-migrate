@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 )
 
@@ -62,8 +63,10 @@ func TestSelectQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The line break keeps a predicate's closing -- comment from swallowing
+	// the parenthesis and the ORDER BY.
 	const want = `SELECT ("id")::text, ("name")::text, ("price_cents")::text ` +
-		`FROM "public"."plans" WHERE (archived_at IS NULL) ORDER BY "id", "name"`
+		"FROM \"public\".\"plans\" WHERE (archived_at IS NULL\n) ORDER BY \"public\".\"plans\".\"id\", \"public\".\"plans\".\"name\""
 	if query != want {
 		t.Fatalf("selectQuery =\n%s\nwant\n%s", query, want)
 	}
@@ -212,19 +215,27 @@ func TestIsZero(t *testing.T) {
 	}
 }
 
-func TestNormalizeComparesNumbersByValueAndLeavesTextAlone(t *testing.T) {
-	for in, want := range map[string]string{
-		"1.0":    "1",
-		" 2 ":    "2",
-		"2.50":   "2.5",
-		"1e3":    "1000",
-		"01":     "1",
-		"EUR":    "EUR",
-		"":       "",
-		"1 plan": "1 plan",
-	} {
-		if got := normalize(in); got != want {
-			t.Errorf("normalize(%q) = %q, want %q", in, got, want)
-		}
+// A table without an id is ordered by its key, and then by every other column:
+// two rows sharing a key, or a key_any_of group unset in both, would otherwise
+// come back in whatever order PostgreSQL likes, and so would the export.
+func TestSelectQueryOrdersEveryRowWithoutAnID(t *testing.T) {
+	cfg := testConfig(t)
+	m := &Model{Table: "limits", ID: "id", KeyAnyOf: [][]string{{"plan_id", "addon_id"}}}
+	cfg.Models["Limit"] = m
+	if err := cfg.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	table := &dbschema.Table{Schema: "public", Name: "limits", Columns: []dbschema.Column{
+		{Name: "plan_id", Type: "int8"}, {Name: "addon_id", Type: "int8"}, {Name: "value", Type: "int8"},
+		{Name: "note", Type: "text"}}}
+	query, hasID, err := selectQuery(cfg, m, table, []string{"addon_id", "note", "plan_id", "value"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasID {
+		t.Fatal("the table has no id")
+	}
+	if !strings.HasSuffix(query, `ORDER BY "public"."limits"."plan_id", "public"."limits"."addon_id", 2, 4`) {
+		t.Fatalf("expected the key_any_of columns, then the rest by position: %s", query)
 	}
 }

@@ -1,0 +1,66 @@
+description: |
+  The autumn campaign, rolled back and deployed again. The release adds an
+  autumn item to the header menu, tags the outdoor category for it, and
+  writes DPD's slower autumn delivery times, which support had already typed
+  into production by hand when the carrier announced them. The deploy finds
+  that change made, and the audit table records it as unchanged. Then the
+  campaign is postponed: ops roll production's last group back with bun's
+  Rollback. The revert undoes what the run made, the menu item and the tags,
+  and leaves DPD's times alone, because the audit table says the migration
+  did not make that change here. Two days later the campaign goes ahead and
+  the migration runs again.
+steps:
+  - overlay: .
+  - generate: {name: autumn campaign, at: "20270705100000"}
+    output:
+      - "Category: 1 update"
+      - "ShippingMethod: 1 update"
+      - "MenuItem: 1 insert"
+deploy: [prod]
+before_deploy:
+  prod:
+    - UPDATE shipping_methods SET min_days = 3, max_days = 6 WHERE code = 'dpd-eu'
+plan:
+  - cli: [plan, -strict]
+    env: prod
+    output:
+      - "unchanged ShippingMethod code=dpd-eu update"
+      - "applied MenuItem menu=header,slug=autumn insert (1 row)"
+expect:
+  migrate:
+    prod:
+      output: ["ShippingMethod code=dpd-eu update: the row already holds these values, nothing to do"]
+after:
+  - app: [rollback]
+    env: prod
+    output:
+      - "rolled back group"
+      - "MenuItem menu=header,slug=autumn delete: applied (1 row)"
+      - "ShippingMethod code=dpd-eu update: not reverted: the migration did not make it in this database"
+  - sql: SELECT min_days || '-' || max_days FROM shipping_methods WHERE code = 'dpd-eu'
+    env: prod
+    want: "3-6"
+  - sql: SELECT count(*)::text FROM menu_items WHERE slug = 'autumn'
+    env: prod
+    want: "0"
+  - sql: SELECT array_to_string(tags, ',') FROM catalog.categories WHERE slug = 'outdoor'
+    env: prod
+    want: "seasonal"
+  - cli: [status, -require-applied]
+    env: prod
+    exit: 3
+    output: ["1 migration not applied"]
+  - cli: [check]
+    env: prod
+    exit: 3
+    output: ["MenuItem menu=header,slug=autumn"]
+  - app: [migrate]
+    env: prod
+    output:
+      - "migrated to group"
+      - "ShippingMethod code=dpd-eu update: the row already holds these values, nothing to do"
+  - cli: [status, -require-applied]
+    env: prod
+    output: ["20270705100000_fixture_autumn_campaign: applied"]
+  - cli: [check]
+    env: prod

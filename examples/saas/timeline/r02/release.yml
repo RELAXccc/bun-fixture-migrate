@@ -1,0 +1,26 @@
+description: |
+  Prices and a plan. The team plan gets new prices from April, as new
+  effective-dated rows, so the invoices already issued keep theirs. A scale
+  plan and an audit log feature are added, with the grants that go with them.
+  Staging is created, and from now on deployed every other release.
+steps:
+  - overlay: .
+  - cli: [status, -offline]
+    exit: 3
+    output: ["the fixture file has changes no migration makes"]
+  - generate: {name: plan prices and scale plan, at: "20260209100000"}
+    output:
+      - "Plan: 1 insert"
+      - "PlanPrice: 4 inserts"
+      - "Feature: 1 insert"
+      - "PlanFeature: 7 inserts"
+      - "Translation: 2 inserts"
+      - "wrote migrations/20260209100000_fixture_plan_prices_and_scale_plan.go"
+  - cli: [status, -offline]
+    output: ["not migrated nothing"]
+create: [staging]
+deploy: [prod, staging]
+plan:
+  - cli: [plan, -strict]
+    env: prod
+    output: ["20260209100000_fixture_plan_prices_and_scale_plan: would succeed"]

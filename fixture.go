@@ -1,10 +1,12 @@
 package fixturemigrate
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
+	"text/template/parse"
 
 	"gopkg.in/yaml.v3"
 )
@@ -16,14 +18,42 @@ const anchorColumn = "_id"
 // Cell is one column of a fixture row.
 type Cell struct {
 	// Text is the scalar as it was written, with no conversion. Numbers keep
-	// the notation of the file; compare through normalize.
+	// the notation of the file; scalarText resolves them.
 	Text string
+	// Tag is the YAML type the scalar resolved to, "!!str", "!!int",
+	// "!!float", "!!bool", "!!timestamp", and "" for a value that did not come
+	// from YAML, such as a configured default. It decides what the text
+	// means: 017 is the integer 15, "017" is a string.
+	Tag string
 	// IsNull is true for an explicit YAML null.
 	IsNull bool
-	// Structured is true when the value was a mapping or a sequence. The
-	// generator cannot turn one into a column value and says so if such a
-	// column takes part in a diff.
+	// Structured is true when the value was a mapping or a sequence. Text is
+	// then its canonical JSON, which is what a jsonb, json or array column is
+	// compared and written as.
 	Structured bool
+	// StringText is what a Go string field gets from this value when that is
+	// not what the value resolves to, and "" otherwise. yaml.v3 decodes a
+	// plain scalar into a string field as it is written: 1.10 stays "1.10"
+	// there, and 017 stays "017", while an integer or a float field gets 15 or
+	// 1.1. For a sequence it is the JSON array of its elements as written,
+	// which is what a []string field gets. Which one the database holds
+	// depends on the column's type.
+	StringText string
+	// JSONText is what a json or jsonb column holds for this value when that
+	// is not Text, and "" otherwise: the JSON encoding/json writes for what
+	// yaml.v3 makes of the value in an any, slice or map field. A timestamp
+	// is a time.Time there, which keeps its offset, and a date alone is
+	// midnight UTC; a float is a float64, so 0.1234567890123456789 is
+	// 0.12345678901234568. A scalar's is its text, a timestamp unquoted; a
+	// sequence's is its JSON, where Text is what an array column's slice
+	// field makes of the elements. In a timestamptz column, too, a timestamp
+	// is the time.Time yaml.v3 makes of it, and a date alone midnight UTC.
+	JSONText string
+	// Unsure says why the value is one thing to one Go field type and
+	// another to another, which no column type settles and this tool cannot
+	// see: a sequence holding a null, which yaml.v3 drops for a []string or
+	// []int64 field and keeps for a []*string. "" for any other value.
+	Unsure string
 }
 
 // Row is one fixture row.
@@ -70,37 +100,187 @@ func ParseDoc(data []byte) (Doc, error) {
 }
 
 func cellOf(node yaml.Node) (Cell, error) {
+	// An alias (*name) is the node it names, to yaml.v3 and so to dbfixture,
+	// with one difference: dbfixture evaluates a template only in a scalar
+	// tagged !!str, and an alias has no tag. The text of a template reached
+	// through an alias is stored as it is, which no other value of the file
+	// does, so it is refused rather than read either way.
+	if node.Kind == yaml.AliasNode {
+		target := resolveAlias(&node)
+		if target == nil {
+			return Cell{}, fmt.Errorf("line %d: an alias of nothing", node.Line)
+		}
+		if target.Kind == yaml.ScalarNode && anyTemplate.MatchString(target.Value) {
+			return Cell{}, fmt.Errorf("line %d: *%s stands for %s, which dbfixture stores as that text instead of "+
+				"evaluating it, because it does not evaluate a template reached through an alias: write the "+
+				"template itself here", node.Line, node.Value, target.Value)
+		}
+		return cellOf(*target)
+	}
 	switch {
 	case node.Tag == "!!null":
 		return Cell{IsNull: true}, nil
 	case node.Kind == yaml.ScalarNode:
-		return Cell{Text: node.Value}, nil
+		c := Cell{Text: node.Value, Tag: node.ShortTag()}
+		// A !!binary value is the bytes it decodes to, in a string field as
+		// in any other: it reads one way only.
+		if c.Tag != "!!binary" && scalarText(c) != c.Text {
+			c.StringText = c.Text
+		}
+		if j, ok := jsonScalar(&node); ok && j != scalarText(c) {
+			c.JSONText = j
+		}
+		return c, nil
 	case node.Kind == 0:
 		return Cell{IsNull: true}, nil
 	default:
-		out, err := yaml.Marshal(&node)
+		text, err := yamlJSON(&node)
 		if err != nil {
 			return Cell{}, err
 		}
-		return Cell{Text: strings.TrimSpace(string(out)), Structured: true}, nil
+		asAny, err := yamlAnyJSON(&node)
+		if err != nil {
+			return Cell{}, err
+		}
+		// In the one spelling the database's values are read in, so a
+		// migration writes the same text with the database at hand or
+		// without it.
+		text, asAny = normalJSON(text), normalJSON(asAny)
+		c := Cell{Text: text, Structured: true, StringText: sequenceAsWritten(&node)}
+		if asAny != text {
+			c.JSONText = asAny
+		}
+		if holdsNullElement(&node) {
+			c.Unsure = nullElementReason
+		}
+		return c, nil
 	}
+}
+
+// resolveAlias is the node an alias names, through any number of aliases,
+// and any other node itself; nil for an alias of nothing.
+func resolveAlias(n *yaml.Node) *yaml.Node {
+	for i := 0; n != nil && n.Kind == yaml.AliasNode; i++ {
+		if i > 100 {
+			return nil
+		}
+		n = n.Alias
+	}
+	return n
+}
+
+// sequenceAsWritten is a sequence of scalars as a []string field gets it, as a
+// JSON array, when that differs from the sequence's resolved JSON: "" for a
+// mapping, for a sequence holding anything but plain scalars, and for one
+// whose every element resolves to its own text.
+func sequenceAsWritten(n *yaml.Node) string {
+	if n.Kind != yaml.SequenceNode {
+		return ""
+	}
+	texts := make([]string, 0, len(n.Content))
+	differs := false
+	for _, e := range n.Content {
+		if e = resolveAlias(e); e == nil || e.Kind != yaml.ScalarNode || e.ShortTag() == "!!null" {
+			return ""
+		}
+		text := e.Value
+		if e.ShortTag() == "!!binary" {
+			text = scalarText(Cell{Text: e.Value, Tag: "!!binary"})
+		} else if scalarText(Cell{Text: e.Value, Tag: e.ShortTag()}) != e.Value {
+			differs = true
+		}
+		texts = append(texts, text)
+	}
+	if !differs {
+		return ""
+	}
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(texts); err != nil {
+		return ""
+	}
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 // Str returns a column's text, "" when the column is absent or null.
 func (r Row) Str(col string) string { return r[col].Text }
 
 // template matches a whole-value dbfixture reference, "{{ $.Model.row.Field }}".
-// Anything else, including a template that calls a function, is left as text.
-var template = regexp.MustCompile(`^\{\{\s*\$\.([A-Za-z_][A-Za-z0-9_]*)\.([^.\s{}]+)\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}$`)
+// The delimiters are dbfixture's own: it only evaluates a value holding
+// "{{ " and " }}" with the spaces (dbfixture/fixture.go, tplRE), so
+// "{{$.Model.row.ID}}" is not a template to it and is not one here.
+//
+// The row is an identifier too: text/template reads "$.Model.row.Field" as a
+// chain of field names, so an anchor such as "my-row" or "1_month" cannot be
+// named in a template at all, however dbfixture registered it.
+var template = regexp.MustCompile(`^\{\{ \s*\$\.([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s* \}\}$`)
 
-// normalize makes two spellings of the same number compare equal ("1.0" and
-// "1"). Everything else is returned trimmed.
-func normalize(s string) string {
-	s = strings.TrimSpace(s)
-	if f, err := strconv.ParseFloat(s, 64); err == nil {
-		return strconv.FormatFloat(f, 'f', -1, 64)
+// looseTemplate is the same reference with any row name, so a row name
+// text/template cannot parse gets a message about that rather than about
+// templates in general.
+var looseTemplate = regexp.MustCompile(`^\{\{ \s*\$\.([A-Za-z_][A-Za-z0-9_]*)\.([^\s{}]+)\.([A-Za-z_][A-Za-z0-9_]*)\s* \}\}$`)
+
+// anyTemplate is dbfixture's test for "evaluate this value as a template"
+// (tplRE). A value it matches never reaches the database as written: dbfixture
+// replaces it with whatever the template produces.
+var anyTemplate = regexp.MustCompile(`\{\{ .+ \}\}`)
+
+// literalTemplate is what a template made of nothing but text and string
+// constants evaluates to, '{{ "Hello {{ name }}" }}' among them: that text,
+// whatever dbfixture's data and functions. It is how a file has dbfixture
+// store a value holding "{{ " and " }}". ok is false for any other template,
+// whose value depends on what dbfixture evaluates it against.
+func literalTemplate(text string) (string, bool) {
+	trees, err := parse.Parse("", text, "{{", "}}")
+	if err != nil || len(trees) != 1 || trees[""] == nil {
+		return "", false
 	}
-	return s
+	var b strings.Builder
+	for _, n := range trees[""].Root.Nodes {
+		switch n := n.(type) {
+		case *parse.TextNode:
+			b.Write(n.Text)
+		case *parse.ActionNode:
+			if len(n.Pipe.Decl) > 0 || len(n.Pipe.Cmds) != 1 || len(n.Pipe.Cmds[0].Args) != 1 {
+				return "", false
+			}
+			s, ok := n.Pipe.Cmds[0].Args[0].(*parse.StringNode)
+			if !ok {
+				return "", false
+			}
+			b.WriteString(s.Text)
+		default:
+			return "", false
+		}
+	}
+	return b.String(), true
+}
+
+// nullElementReason is why a sequence holding a null is undecided. The
+// configuration's array_nulls settles it for a model whose array fields keep a
+// null element.
+const nullElementReason = "it is a sequence holding a null, which yaml.v3 leaves out of a []string or []int64 " +
+	"field and keeps in a []*string one, and only the model says which it has: leave the null out, which every " +
+	"field reads the same way, or set array_nulls: keep if the model's array fields keep a null"
+
+// holdsNullElement reports a sequence with a null among its elements, or
+// among the elements of a sequence nested in it: yaml.v3 leaves a null out of
+// an inner []string as it does out of an outer one.
+func holdsNullElement(n *yaml.Node) bool {
+	if n.Kind != yaml.SequenceNode {
+		return false
+	}
+	for _, e := range n.Content {
+		e := resolveAlias(e)
+		if e == nil {
+			continue
+		}
+		if e.ShortTag() == "!!null" || holdsNullElement(e) {
+			return true
+		}
+	}
+	return false
 }
 
 // underscore is bun's default column name for a Go field name, so a template

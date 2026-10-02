@@ -1,0 +1,61 @@
+# Currencies and countries.
+
+- model: Currency
+  rows:
+    - _id: eur
+      id: 1
+      code: EUR
+      name: Euro
+      symbol: "€"
+      minor_units: 2
+    - _id: usd
+      id: 2
+      code: USD
+      name: US dollar
+      symbol: "$"
+      minor_units: 2
+    - _id: jpy
+      id: 3
+      code: JPY
+      name: Japanese yen
+      symbol: "¥"
+      minor_units: 0
+    - _id: chf
+      id: 4
+      code: CHF
+      name: Swiss franc
+      symbol: CHF
+      minor_units: 2
+
+- model: Country
+  rows:
+    - _id: de
+      id: 1
+      code: DE
+      name: Deutschland
+      currency_id: '{{ $.Currency.eur.ID }}'
+      tax_rate: 0.19
+    - _id: fr
+      id: 2
+      code: FR
+      name: France
+      currency_id: '{{ $.Currency.eur.ID }}'
+      tax_rate: 0.2
+    - _id: us
+      id: 3
+      code: US
+      name: United States
+      currency_id: '{{ $.Currency.usd.ID }}'
+      tax_rate: 0
+    - _id: jp
+      id: 4
+      code: JP
+      name: 日本
+      currency_id: '{{ $.Currency.jpy.ID }}'
+      tax_rate: 0.1
+    - _id: ch
+      id: 5
+      code: CH
+      name: Schweiz
+      currency_id: '{{ $.Currency.chf.ID }}'
+      tax_rate: 0.081

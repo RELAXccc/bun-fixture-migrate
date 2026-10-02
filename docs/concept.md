@@ -1,0 +1,425 @@
+# Concept: from migration generator to master-data migration manager
+
+This document is the plan for growing bun-fixture-migrate into a tool a team can run its master
+data on in production, across the different ways people use bun. It is PostgreSQL only and stays
+that way: everything below leans on PostgreSQL's catalog, its type system and its transactions, and
+a second database would halve what each feature can promise.
+
+Status markers: **done** is on this branch and tested; **later** is designed but not scheduled.
+
+## 1. Principles
+
+These decide every trade-off further down.
+
+1. **Never guess.** Anything ambiguous is refused with the model, the row and a reason. A tool that
+   writes production data migrations is only useful if its silence means something.
+2. **Every premise about bun is a test.** What `marshalsToDefault` does, what the migrator records,
+   how dbfixture reads a file: each is pinned by a test that runs bun itself, in CI, against the
+   pinned release and against bun's master branch.
+3. **The database decides what a value is.** Equality of two values is PostgreSQL's equality for
+   the column's type, not a string comparison and not a Go parse. Where a value has to be compared
+   without a database, the YAML type of the scalar decides, never a guess from its spelling.
+4. **What is generated is read.** A migration is a Go literal a reviewer can follow row by row; the
+   state file is the fixture file verbatim; every report exists as text for people and as JSON for
+   programs.
+5. **A failed migration changes nothing and is not recorded.** One transaction per change set;
+   bun's record of a failed migration is taken back.
+6. **Reading never writes.** Every command that only reads runs in a transaction PostgreSQL itself
+   holds to READ ONLY.
+
+## 2. How bun is used, and what each use needs
+
+### 2.1 Migrations
+
+| Use | What the tool does | Status |
+| --- | --- | --- |
+| Go migrations, `Migrations.MustRegister(up, down)` | generates them; `status` and `plan` read them back | done |
+| SQL migrations, `Migrations.Discover(fsys)` with `.up.sql` / `.tx.up.sql` | `status` lists them; `plan -with-sql` runs pending ones in the plan transaction, honouring `--bun:split` | done |
+| Go and SQL migrations mixed in one directory | ordered as bun orders them; a name used twice is reported | done |
+| SQL-only projects, or another migrator (goose, golang-migrate, dbmate) | generate the change set as a guarded PL/pgSQL migration | later |
+| `migrate.NewMigrator` default: records **before** running | a failing change set deletes that record | done |
+| `WithMarkAppliedOnSuccess(true)` | nothing to take back; tested in both modes | done |
+| `WithTableName` / `WithLocksTableName` | `migrations_table` in the configuration | done |
+| `WithUpsert` + `RunMigration` (re-running an applied migration) | the record is only taken back when it is the migrator's fresh one | done |
+| `Lock` / `Unlock` | change sets additionally serialise on a transaction-scoped advisory lock | done |
+| `BeforeMigration` / `AfterMigration` hooks | untouched: they run around `Apply` | done |
+| Migrations run at application start by every replica | advisory lock; a second replica finds everything `unchanged` | done |
+| Migrations run as a separate job (Kubernetes Job, init container, CD step) | `plan` before, `status -require-applied` after | done |
+| No migration files at all: bring a dev, CI or staging database in line | `sync` command and `Sync` library call | done |
+| A new database: migrate, then seed with dbfixture | `fixtureapply.SyncSequences` after the seed; the example project's deploy step | done |
+
+### 2.2 dbfixture
+
+| Use | What the tool does | Status |
+| --- | --- | --- |
+| One fixture file | the whole pipeline | done |
+| Several files, `fixture.Load(ctx, fsys, "a.yml", "b.yml")`, one anchor scope | `fixtures:` list read in that order with one scope; state file holds all of them | done |
+| Templates `{{ $.Model.row.Field }}`, `pk<id>` anchors, latest anchor wins, file order | read exactly as dbfixture reads them, checked against it | done |
+| `{{ now }}`, `WithTemplateFuncs` | refused unless the column is ignored: the database never holds that text | done |
+| `WithTruncateTables` / `WithRecreateTables` for test databases | seed guard makes migrations no-ops on an empty database | done |
+| `WithBeforeInsert` altering rows | invisible to the tool; documented as a limit | documented |
+
+### 2.3 Model idioms
+
+| Idiom | Hazard | What the tool does | Status |
+| --- | --- | --- | --- |
+| `default:` tag / column default, zero in the file | bun writes DEFAULT | finding, export marker, policy | done |
+| pointer or `nullzero` field, `~` in the file | bun writes DEFAULT | finding, export marker, policy | done |
+| `type:jsonb` map or struct | YAML mapping in the file | compared as JSON, written as JSON, exported as YAML | done |
+| `json` column | no equality operator in PostgreSQL | compared through `jsonb` | done |
+| `array` tag, `text[]`, `int[]` | YAML sequence in the file | compared and written as a PostgreSQL array | done |
+| `string` field, `1.10` or `01234` unquoted | yaml.v3 hands a string field the text as written | the column's type decides; refused without a database | done |
+| uuid primary key, `gen_random_uuid()` | no sequence, ids differ everywhere | natural keys; zero uuid known | done |
+| `GENERATED ALWAYS AS IDENTITY` | an explicit id cannot be inserted, by anyone | export leaves the id out; lint | done |
+| composite primary key, m2m join table | no single id | keyed on the natural key only | done |
+| self-referencing model (`parent_id`) | order inside one model | parents inserted first, children deleted first, exported parents first; read whatever the id order | done |
+| enum types, domains, `citext` | text in, typed out; a domain's own name hides its base type; `Go` and `GO` are one `citext` | PostgreSQL compares; a domain is its base type, its default and `NOT NULL` the column's; keys equal under their type are a duplicate | done |
+| `soft_delete` | a delete is an UPDATE of `deleted_at`; bun reads live rows only, and a soft-deleted row comes back by an UPDATE, not an INSERT | `soft_delete: deleted_at`: live rows only, a delete soft-deletes, an insert restores; the zero-time spelling is refused | done |
+| a table the application or tenants insert into too, from one sequence | a fixture file's next id is somebody's row; the rows they add are drift | `mode: upsert` keeps their rows, `ids: database` leaves every id to the sequence | done |
+| a column an admin UI or an operator edits, a price or a flag | every edit is drift, and the file's next change of that column is skipped as a changed row | `insert_only`, or `mode: insert` for a whole table | done |
+| schema-qualified table, mixed-case or reserved-word names | quoting | quoted everywhere | done |
+
+### 2.4 Drivers and topologies
+
+| | Status |
+| --- | --- |
+| `pgdriver` | done |
+| `pgx/v5/stdlib` under `pgdialect` (the runtime in the application) | done: the database suite runs under both |
+| checks against a read replica | done: read-only transactions work on a hot standby |
+| `plan` pointed at a standby by mistake | refused with a sentence instead of a misleading failure | done |
+| PostgreSQL 12 to 18 | done: CI matrix |
+
+## 3. Edge cases, verified
+
+Each was reproduced before it went into this table.
+
+| Case | What happened | Severity | Fix | Status |
+| --- | --- | --- | --- | --- |
+| failing migration under bun's default migrator | recorded before running, never retried | data change lost | take the record back | done |
+| `pgdriver.WithDSN` on a keyword DSN or bad URL | panic with stack trace; `url.Parse` errors repeat the password | outage noise, secret leak | validate first, redact | done |
+| two migrations with one timestamp | bun records them as one, one never runs | data change lost | `status` reports it; `generate` never reuses a name | done |
+| fixture edit committed before generating | nothing to generate against HEAD | data change lost | state file | done |
+| quoted code `"01234"`, e.g. a postcode | written as `1234` into migrations and exports | **silent corruption** | keep the text of a string exactly | done |
+| string with leading or trailing spaces | trimmed | **silent corruption** | never trim a string | done |
+| integer above 2^53, long `numeric` | rounded through float64 | **silent corruption** | exact decimal arithmetic | done |
+| `017`, `0x1F`, `0o17`, `1_000` in YAML | dbfixture stores 15, 31, 15, 1000; the tool wrote 17 or failed | wrong value | resolve integers the way YAML does | done |
+| text `"1.0"` in the database, `"1"` in the file | compared equal | missed drift | only numbers compare as numbers | done |
+| `json`, `point`, `xml` column in a guard | `operator does not exist` at deploy time | failed deploy | typed comparison at run time | done |
+| timestamps | text depends on the session `TimeZone` and `DateStyle` | phantom drift, wrong instant | fixed session settings; PostgreSQL compares | done |
+| delete of a row other tables reference with `ON DELETE CASCADE` or `SET NULL` | user data deleted or detached | **data loss** | refused unless the model says `deletes: cascade` | done |
+| two replicas applying the same change set at once | both see "not there yet", one fails on a unique index or inserts twice | failed deploy / duplicate | advisory lock | done |
+| `GENERATED ALWAYS` identity exported with ids | the export cannot be loaded | broken export | leave the id out | done |
+| `plan` against a hot standby | "would FAIL" for the wrong reason | misleading | detect `pg_is_in_recovery()` | done |
+| `1.10`, `01234`, `True` unquoted in a text column | dbfixture stores the text as written; the tool resolved it to 1.1, 668, true and saw drift, and a migration would have written those | **silent corruption** | keep both readings, let the column's type decide, refuse without one | done |
+| a reference to a row whose ref value is written `0012` in a `bigint` column | the reference carried `0012` and the row held 10; `sync` on a freshly seeded database repointed the reference at the row whose code is 12 | **silent corruption** | the ref column's type decides what a reference carries; refused without one | done |
+| a tree whose root has a higher id than its leaves | `check`, `export`, `sync` and `generate -from-db` failed with a dangling reference; an export in id order did not load | failed command, broken export | read every row's name before resolving any; export parents first | done |
+| a parent model that leaves the file entirely | its rows were deleted before the rows pointing at them | failed deploy | models ordered by their references across both states | done |
+| closing an effective-dated price and opening the next in one release | the insert ran before the update and hit the one-open-price index | failed deploy | deletes and updates before inserts, each change after what it depends on | done |
+| natural keys `{a: "x/b=y", b: z}` and `{a: x, b: "y/b=z"}`, or a NULL and the text `NULL` | compared as one key | false duplicate, false id drift | an encoding no two keys share | done |
+| `id_drift: warn` | stopped `generate` and `sync` like `error` | blocked deploy | warnings apart from refusals | done |
+| a YAML alias `*name` of a scalar | written as its JSON, quotes and all, or the text `null` | **silent corruption** | an alias is the value it names | done |
+| `~` inside a sequence | `[]string` drops it, `[]*string` keeps it; the tool wrote it | wrong value | finding, and the change refused | done |
+| `~` in a NOT NULL column without a default | no finding; the deploy failed | failed deploy | `invalid value` finding | done |
+| the primary key as the natural key (a currency keyed by its ISO code) | `export`, `check`, `sync` failed: the key was not read | failed command | the key may be the id | done |
+| a primary key `"0"` | read as no id: permanent drift on every reference to it | false drift | a zero is "no id" only in a `serial` model | done |
+| ids 9 and 10 | read in the order of their text, 10 before 9 | broken export of a tree, unstable files | ordered by the column, not its text | done |
+| two rows sharing an id after a merge | taken for a rename; the deploy and a new seed failed | failed deploy | `duplicate id` finding, the insert refused | done |
+| a reference by a name two rows hold (per-parent category names) | written, then failed at deploy | failed deploy | refused | done |
+| `schema: app` with unqualified tables | the migration named `roles`, found in `public` or nowhere | failed deploy or **wrong table** | the change set names the schema | done |
+| `'{{ "Hello {{ name }}" }}'` | refused as a template | refused file | a template of string constants is its text | done |
+| explicit ids from a dbfixture seed | the sequence stays behind; the application's first insert fails | failed insert | `fixtureapply.SyncSequences` after the seed | done |
+| `char(n)` array elements shorter than n | padded on the database side, not on the file side | phantom drift | both read without the padding | done |
+| a domain over integer or `jsonb` | the domain's name was asked instead of its base type: exported as `"5"` and as a quoted string, a zero against the domain's default unreported | broken export, wrong value | the base type everywhere; the domain's default is the column's | done |
+| a value too long for `varchar(n)`, `char(n)`, `bit(n)` | an explicit cast cut it without a word, so it was no finding | failed deploy, **silent truncation** | an `INSERT`'s length rules: an `invalid value`, trailing spaces dropped | done |
+| a domain `CHECK`, an `hstore`, `ltree` or `tsquery` syntax error | not of class 22, so the command stopped with a raw error | outage noise | any error casting one value is an `invalid value` | done |
+| an offset into `timestamp` or `date`, more than six fractional digits, a zone-less string into `timestamptz`, `01/02/2026` | a `time.Time` and a string field store different values, or the seeding session decides | **silent corruption** | an `invalid value` naming both, unless every reading agrees | done |
+| nested timestamps and long numbers in `jsonb` through `map[string]any` | `encoding/json` writes a `time.Time` and a `float64` its own way | phantom drift, wrong value | written as `encoding/json` writes them | done |
+| a timestamp, a date or a long float at the top of a `jsonb` column, or as an element of a sequence there | read as an array column's elements: in UTC, a date as a date, a float exactly; dbfixture's `any` field keeps the offset, makes a date midnight UTC and a float a `float64` | phantom drift, wrong value | the cell keeps a JSON reading, which a `json` or `jsonb` column takes | done |
+| a configured model the files hold no block of | `check` and `sync` read only the models in the files and agreed with its rows, while `generate` deletes a block that leaves the files | missed drift, two answers to one file | every configured model is read; one without a block has no rows | done |
+| a `key_any_of` group a row leaves out, or a group column no row writes | the row keyed by `""` where the database holds NULL, read as a rename; every row a column on one side only | false refusal | a group column left out is NULL | done |
+| a primary key that is also a reference, `id: plan_id, references: {plan_id: Plan}` | the id read as the template text naming the plan: every row an invalid value, an insert and a delete | false drift, failed command | refused in the configuration: `id: none` | done |
+| a primary key `id` that is a plan's id, scaffolded | the model written without `id`, which made `id` the id, and every command refused the configuration scaffold wrote | failed command | `id: none`, which scaffold writes; a reference to such a table points at the plan | done |
+| a template copying a null, a float or a timestamp field, `{{ $.Src.s.Note }}` | dbfixture stores it as `fmt` prints it, `<nil>`, `1e+08`, `2026-01-01 10:00:00 +0000 UTC`; the tool read NULL or the value | phantom drift, wrong value | a copy of a string or integer column is the value; any other, a null or a structure is refused, and undecided without the database | done |
+| an interval respelled, `'86400 seconds'` to `'24:00:00'`, without the database | an update offline, no change with the database: `status -offline` and `generate -no-lint` disagreed with `status` and `generate` | phantom change | refused without the database, as `1.10` to `1.1` is: one value in an interval column, two in a text one; `'1 day'` to `'24 hours'` is a change both ways, which the run time writes | done |
+| a template copying a `bool` or a `uuid` field, `{{ $.User.smith.Active }}` | refused as an invalid value, although `fmt` prints `true`, or the uuid | false refusal | a `bool` is `true` or `false`; a `uuid` the value in a `uuid` column, and elsewhere where the file writes it as a uuid type prints it | done |
+| a YAML merge key `<<` inside a `jsonb` mapping | the whole file refused as holding a key JSON cannot hold; dbfixture merges it | refused file | yaml.v3's merge rules | done |
+| an unquoted date `2026-01-01` in a `timestamptz` column | refused as session-dependent; a `time.Time` field stores midnight UTC, as for `2026-01-01 00:00:00` | false refusal | the `time.Time` reading, midnight UTC | done |
+| `~` in a `json` or `jsonb` column | the JSON null through a map field, NULL through a pointer | phantom drift | a `null against a default` finding | done |
+| `bytea` through `[]byte` | the sequence's JSON text was cast to `bytea`; the export wrote `"\x48..."` | **silent corruption**, broken export | the sequence's bytes; exported as a sequence | done |
+| `!!binary` | the base64 text was kept | wrong value | the text it encodes | done, but in a string column it needs the reader to drop the as-written base64 |
+| NEL, DEL, the C1 range, U+FFFE in exported text | NEL folded into a space, the rest unparseable | broken export | escaped; every export is parsed back before it is written | done |
+| `NaN`, `Infinity`, timestamp `infinity`, `jsonb` strings and null, `Hello {{ name }}` in an export | written so dbfixture could not load them, or refused needlessly | broken export | YAML's spellings, a string-literal template, or a refusal with the reason | done |
+| `{"a": 1.0}` in `jsonb`, written by SQL | compared as text with the file's `1` | phantom drift | numbers canonical on both sides | done |
+| a 2-D array; an array numbered from 0 | an invalid value after export; `[0:1]={7,8}` exported as `[7, 8]` | broken export, **silent corruption** | the array literal built from nested JSON; another lower bound refused | done, and see below |
+| a `jsonb` document, an array or a timestamp in a generated migration | compact with sorted keys without the database, in jsonb's own spelling with it; a timestamp in RFC 3339 or as `2026-01-01 10:00:00+00`: one edit, two files | unstable output | one spelling on both paths; an export writes jsonb's | done |
+| an unquoted number with more digits than a `float64` holds, in a `numeric` column | read exactly; a `float64` field, a common model of a price, stores it rounded | phantom drift, wrong value | an `ambiguous value`, unless quoted | done |
+| keys one value to their type, in several groups | reported in the order the server's aggregate gave the groups | unstable output | in the order of the rows | done |
+| a type or a function a cast names that cannot be found | every value of the column an `invalid value` with that error | misleading | an error the cast raises for NULL too stops the command | done |
+| a column the table does not have, in `check` | an `unknown column` finding, and again a refusal as a column written on one side only | noise | the lint takes what it reports out of the comparison | done |
+| a `citext` key whose case changes, in a file without ids | a delete and an insert: the row's id lost, the rows pointing at it failed or cascaded | failed deploy, **data loss** under cascade | rows paired by the key as its type compares it; the new spelling is a rename | done |
+| a 2-D array in a file or an export | bun cannot write a nested slice into an array column, so `dbfixture` fails to load the sequence of sequences the tool read and exported | broken export, unloadable file | an `invalid value` in a file, an export refused with the reason | done |
+| an array holding a NULL, exported under `array_nulls: refuse` | written as `[1, null, 3]`, which the tool then refused to read and a `[]int64` field loads as `{1,3}` | broken export | the export refused unless `array_nulls: keep` | done |
+| a country keyed by its code renamed in its ref column, Germany to Deutschland, beside a slug shift in another table | the city pointing at it got an update waiting for the country and the country for it; the circle switched off the unique ordering of the whole set | failed deploy | the base state follows the ref value, as for a rename; only a circle new waits close makes an index give way | done |
+| an item put at the top of a list under `UNIQUE (cat, pos)` | only a unique index of one column ordered changes | failed deploy | every unique index orders by the values it holds together | done |
+| a list rotated, or two values swapped, under a unique index checked after every statement | the circle made the index order nothing; generate wrote a migration no order of which gets through, without a word | failed deploy | refused with what to do: a `DEFERRABLE` constraint, under which it is written, or a parked value; a warning without the database | done |
+| two columns guessed unique without the database, ordering changes oppositely | the first in name order won, whichever had the index | failed deploy | both give way, with a warning that the database decides | done |
+| a rename or an insert in a set of 20,000 rows | every row of every model looked at for each: 18 seconds | slow `generate`, `check`, `sync` | indexed once per comparison | done |
+| a change waiting behind a circle of others | could run first when the circle was broken anywhere | failed deploy | a circle is broken where nothing outside it waits | done |
+| a table `CHECK` the new value violates | generate wrote it, the deploy failed | failed deploy | a single-column `CHECK` is an `invalid value`; others `plan` reports | done |
+| `1.5` in an integer column | dbfixture stores 1 | phantom drift | an `invalid value` saying so | done |
+| a view named as a model's table | "not a table" | misleading | says it is a view, and that only tables hold master data | done |
+| a natural key no unique index backs | no word from `check` or `generate`; the application added a second row, and every change to the key failed from then on | failed deploy | `unbacked key` finding under `policy.key_index`, with the `CREATE UNIQUE INDEX`; `plan` notes it | done |
+| a unique index over more columns than the key, a nullable key column held NULLs distinct, a partial index over other rows | taken for a key | failed deploy | each an `unbacked key` naming the index and what to change; a partial one's predicate put to the planner under the model's `where` | done |
+| `Ann@` and `ann@` under `UNIQUE (lower(email))` | `sync` and the deploy failed with a raw 23505 | failed deploy | the fixture rows grouped by every index stricter than the key: a `duplicate key` before anything is written | done |
+| an invalid unique index a failed `CREATE INDEX CONCURRENTLY` left | read as unique: scaffold keyed on it, and changes were ordered by it | wrong key, misleading | left out of the unique indexes, and named by the lint and scaffold | done |
+| `EXCLUDE (code WITH =)` | not seen as a unique key | wrong guess, unordered changes | a unique key wherever unique indexes are read | done |
+| scaffold on a table with only a partial, expression or exclusion unique index, or a nullable key column | "no unique index besides its primary key", commented out; a nullable column without a word | wrong guess | keyed on them with a `# GUESS:`; the nullable column marked | done |
+| a duplicate key on a table whose index holds NULLs distinct or is partial | "give the table a unique index", which it has | misleading | the message names the index and what is wrong with it | done |
+
+## 4. Features
+
+### Done
+
+- **Value fidelity.** A cell keeps its YAML type. Strings are exact; integers are resolved as YAML
+  resolves them and written in decimal; decimals are canonicalised exactly, never through float64.
+  The database side reads numbers as numbers and everything else as its exact text, in a session
+  with fixed `TimeZone`, `DateStyle`, `IntervalStyle`, `extra_float_digits` and `bytea_output`.
+  When a database is at hand, fixture values are canonicalised by casting them to the column's type
+  in PostgreSQL, so equality is PostgreSQL's; a value the column cannot hold becomes a finding
+  before anything is generated.
+- **Typed run time.** `fixtureapply` reads the column types of every table it touches and compares
+  through them: `json` through `jsonb`, types without equality through their text.
+- **JSON and arrays.** YAML mappings and sequences in `json`/`jsonb` columns, and sequences in array
+  columns, are compared, written and exported.
+- **Safety at run time.** A transaction-scoped advisory lock serialises change sets. A delete that
+  would cascade into, or null out, rows elsewhere is refused unless the model says
+  `deletes: cascade`.
+- **Several fixture files.** `fixtures: [a.yml, b.yml]`, one anchor scope, in load order.
+- **`sync`.** Brings a database to the fixture file directly, with the plan printed first and
+  `-yes` to go through; `Project.Sync` does the same from Go, for development servers and test
+  setups.
+- **The commands as a library.** `fixturemigrate.LoadProject` and a method per command, with the
+  command's checks and refusals, typed errors, and results that are the commands' `-json`.
+- **`plan -with-sql`.** Runs pending bun SQL migrations in the plan transaction too, so a fixture
+  migration that needs a column a schema migration adds is simulated against that column.
+- **CI.** PostgreSQL 12 to 18, two Go versions, both drivers, bun master; GitHub Actions and an
+  equivalent GitLab CI pipeline; a composite GitHub Action and a GitLab CI template for projects that
+  use the tool.
+- **Documentation.** A production runbook — failed migration, drift, state-file conflict,
+  migrating by hand — a troubleshooting guide, and a reference for the configuration, exit codes and
+  JSON output.
+- **The value as a string field gets it.** A plain scalar keeps its written text next to its
+  resolved value, and the column's type picks one; without the database a change that depends on
+  it is refused.
+- **Seeding.** `fixtureapply.SyncSequences` moves sequences past the ids a `dbfixture` seed wrote,
+  and `examples/basic` is a runnable bun project that migrates, then seeds a new database.
+- **Who owns what.** A model's `mode` says which of its rows the files own, as Atlas's seed modes,
+  Liquibase's `loadData` and `loadUpdateData` and seed-fu's `seed` and `seed_once` do: `sync` all of
+  them, `upsert` the rows they hold without ever deleting one, `insert` only the rows a database
+  lacks. `insert_only` columns are written by the insert and the database's afterwards, an
+  operator's feature flag; `ids: database` leaves every id to the table's sequence, for a table the
+  application inserts into too. What the configuration gives to the database is no drift, no change
+  and not exported, through every command alike, and `check` counts it; the generated sets only hold
+  fewer changes, so the run time is untouched.
+- **Drift that explains itself.** Where the database holds a column's default and the file a null or
+  a zero, `check` says that bun wrote `DEFAULT` there, on an insert and, since v1.2.17, on an update.
+- **Key lint.** Every natural key, and every `ref` column another model references, is checked
+  against the table's unique indexes and exclusion constraints wherever the database is read: one
+  over exactly the key, a part of it or expressions of it backs it; one over more columns, a
+  nullable column it holds NULLs distinct in, a partial one whose predicate the model's `where` does
+  not imply (PostgreSQL's planner decides) or an invalid one does not. An `unbacked key` finding
+  under `policy.key_index`, `warn` by default and `error` in a scaffolded configuration, says which
+  index to create; keys an index stricter than the key holds equal are a `duplicate key` before
+  deploy; `plan` notes the keys of each pending migration; scaffold keys a table on a partial,
+  exclusion or expression index.
+- **Soft deletes.** A model with `soft_delete: deleted_at` is its live rows: check, sync and export
+  read no other, a fixture row that sets the column is no master data, and a soft-deleted row of a
+  key never makes it ambiguous. A migration's delete sets the column, its insert restores the newest
+  soft-deleted row holding its values, with its id and the rows pointing at it, or inserts beside one
+  holding others where a unique index over live rows lets it, and a revert undoes either. The table
+  carries the column in the generated file, `Table.SoftDelete`, which older files leave out and keep
+  their hard deletes. `scaffold` proposes it as a guess, never the other commands.
+
+- **An audit table and an accurate revert.** With `audit_table` set, every run records what each
+  change did on that database, with the set's SHA-256. `Revert` undoes only what that database's
+  `Apply` did: a second revert changes nothing, a run that found the database unseeded reverts
+  nothing, and a file edited since it ran is flagged. `status` shows it per migration.
+- **Migrating by hand.** `apply -file` runs one generated migration, and `-record` records it as bun's
+  migrator would, under bun's lock; `-revert -record` only removes the record when the audit table
+  says the set was reverted already.
+- **Run-time guards.** `lock_timeout` set after the advisory lock, the audit write included; a set
+  refuses to run where row-level security would hide rows, the audit table's included; deferrable
+  constraints deferred and checked before commit; sequences moved past explicit ids, never back,
+  even by a role that may not read them.
+- **Tables without an id of their own.** `id: none` for a table keyed by its parent's id, a 1:1
+  extension table, which scaffold proposes.
+- **Unique values that trade places.** A swap or rotation under a non-deferrable unique index is
+  refused with the two ways out, a deferrable constraint or a parking value in a migration of its
+  own; under a deferrable one it is written.
+- **Offline readings PostgreSQL agrees with.** Interval spellings, bool and uuid template copies and
+  numbers are settled without a database as PostgreSQL would settle them, and what cannot be is
+  refused.
+- **Two long-running examples.** `examples/saas` over 13 releases and `examples/commerce`, a shop's
+  back office in three schemas, over 12, both replayed release by release against bun's migrator in
+  CI, each with a table of what it found.
+
+### Known limitations
+
+Found by the adversarial reviews and the two long-running examples, and not fixed yet. Each says what
+happens and how to stay clear of it; none of them writes wrong data silently where the workaround is
+followed, and most fail loudly at `plan`.
+
+**Who owns what.** The reference lists them with their workarounds under
+[who owns what](reference.md#who-owns-what). In short:
+- `check`, `sync` and `generate -from-db` pair rows by id before natural key, so a tenant's row that
+  holds the id the files give a new row is taken for a rename of it. Give new rows ids no database
+  holds, or use `ids: database`. Fixing it needs the state file's view of which rows the files held,
+  passed into the database diff, because pairing by key alone would turn genuine renames into
+  collisions.
+- A cascade reaching an `upsert` or `insert` model through a foreign key the configuration does not
+  declare as a reference is not refused. One it declares is.
+- Under `upsert` and `insert`: keys the database spells differently but holds equal (citext) are
+  dropped by `export`; the `ref` column under `insert` follows the database; `export` over fixture
+  files that do not read skips the ownership filter; a mode change is not recorded in the state; an
+  `ids: database` column without a default is not linted; a new row taking a unique value that a
+  kept row holds is not warned about.
+- An insert that finds its row already there, differing only in columns the database owns
+  (`insert_only`, or every column under `mode: insert`), is reported as a skipped changed row rather
+  than as unchanged. Nothing is written either way; under `changed_row: error` it fails the set. A
+  soft-delete restore compares `insert_only` columns too. The fix is a field in `fixturechange.Table`
+  naming the columns the files own, with the format rules of the [architecture](architecture.md).
+
+**The run time.**
+- Under `default_transaction_isolation` set to `repeatable read` or `serializable`, the second of two
+  simultaneous runs of one set fails with a serialization error instead of finding the work done. It
+  rolls back, so nothing is lost; the fix is beginning the transactions `READ COMMITTED` explicitly.
+- A role with `USAGE` and `UPDATE` but not `SELECT` on a sequence moves a sequence restarted with
+  `RESTART WITH` and not used since back to just past the ids it inserted. Grant `SELECT`.
+
+**Soft deletes.**
+- Under a `DEFERRABLE` unique constraint, inserting beside a soft-deleted copy is not refused inside
+  the savepoint, so instead of a `changed_row` outcome the whole set fails at the final constraint
+  check. Use a constraint that is not deferrable, or a partial unique index over live rows.
+- One application soft-delete of a parent that another master row points at stops `check`, `export`
+  and `sync`; restore the parent by hand.
+- `scaffold` proposes a key containing the soft-delete column for `UNIQUE NULLS NOT DISTINCT (sku,
+  deleted_at)`, which the loader refuses; key on `sku` and keep `key_index` at `warn` for that model.
+- A fixture file holding a soft-deleted history row beside a live row of the same key, under a unique
+  index over all rows, passes `check` but cannot be seeded by `dbfixture`.
+- A restore skipped under `changed_row: warn` makes an insert of the same set that points at the
+  row fail the deploy, and `check`'s note that a migration restores the row is then wrong.
+- A restore locks its candidate rows (`FOR UPDATE`), so the role running migrations needs `UPDATE`
+  on a soft-delete table even for a change that only inserts.
+- Reverting a restore soft-deletes the row at the revert's time, not at its original `deleted_at`.
+- `mode: insert` with `soft_delete` is refused.
+
+**The key lint.**
+- False positives: a partial unique index on a partitioned table, which the planner test cannot
+  decide; an index column the model's `where` or soft-delete pins to one value, reported as a
+  superset. Set `key_index: warn`, or `ignore` on that model.
+- `plan`'s notes misjudge `key_any_of` keys that `check` passes.
+- An index under a nondeterministic collation the column lacks is taken as plain, not stricter, so
+  values it holds equal are not reported as duplicates before deploy.
+- The proposed `CREATE UNIQUE INDEX` does not run on a partitioned table, or with a predicate that
+  calls `now()` or a subquery.
+- `scaffold` does not key a table on a partial expression index (`lower(email) WHERE deleted_at IS
+  NULL`).
+- A finding read back from JSON loses the mark that caps an undecidable verdict at a warning.
+- Unverified risks: the planner test runs once per partial index, which takes seconds per key with
+  hundreds of them, and the textual implication check ignores casts.
+
+**Ordering and values.**
+- Unique values trading places are detected through plain unique indexes only: through a partial
+  index, an expression index such as `lower(email)` or a citext column they are written, and the
+  migration fails at run time, which `plan` shows. Move one row to a free value in a migration of its
+  own.
+- `id: none` chains (a table keyed by a table keyed by a parent) are not ordered by their foreign
+  keys, so an insert can come before the row it needs, and an export is not in an order `dbfixture`
+  loads. Split such a change into two migrations.
+- Offline, an interval with a time field before a fractional day (`'00:00 1.5 days'`) is read
+  differently from PostgreSQL, and quoted respellings of other types (`'1.10'`, a uuid's case) and
+  intervals used as natural keys are compared as written. Configure the database.
+- A null inside a JSON mapping that a `map[string]string` field loads is stored as `""` by
+  `dbfixture`, while the tool reads it as JSON null; `check` after the seed is the first to say so.
+  A nullable jsonb column through a `nullzero` map can only be allowed with the global
+  `null_default: warn`.
+- An insert of a row the model's `where` leaves out fails on the table's key before the `where` is
+  checked, with a bare unique violation.
+- Retiring a model by taking it out of the files and the configuration at once stops every command
+  with a message about the fixture file; take it out of the files first, generate, then out of the
+  configuration.
+
+**bun upstream.** bun pull requests #1356 and #1365 (free-form migration names) would break the
+reading of migration names from file names; the bun-master CI job will show it. bun's `int64`
+soft-delete field fails on PostgreSQL in bun itself.
+
+### Later
+
+First, the known limitations above, in this order, because each can cost data or a deploy:
+
+1. **The files' columns in the run time.** A `fixturechange.Table` field naming the columns the files
+   own, so an insert that finds its row differing only in the database's columns is unchanged, a
+   restore ignores `insert_only` columns, and `mode: insert` can take `soft_delete`.
+2. **The state file in the database diff.** `check`, `sync` and `generate -from-db` told which rows
+   the files held, so a row the files never had is never paired with a file row by id.
+3. **`READ COMMITTED` change sets**, and a sequence that a role may not read checked with `nextval`.
+4. **Soft deletes under deferrable constraints**, by setting the table's deferrable unique
+   constraints `IMMEDIATE` inside the savepoint; an application soft-delete of a referenced parent
+   reported as a finding that `sync` repairs.
+5. **Ordering through every unique index**: partial, expression and citext ones, and `id: none`
+   chains through their foreign keys.
+6. **The key lint's false positives** on partitioned tables and on columns a filter pins.
+7. **The commerce example's later releases**: retiring a shipping method orders point at, by soft
+   delete, and `key_index: error` after unique indexes added by SQL migrations.
+
+Then:
+
+- **SQL output.** A change set rendered as guarded PL/pgSQL (`DO` blocks, `GET DIAGNOSTICS`,
+  `RAISE EXCEPTION` per policy) for projects whose migrations are SQL only and for other migrators.
+  It cannot take back bun's record of a failure from inside the failed transaction, so with bun it
+  needs `WithMarkAppliedOnSuccess(true)`, and says so in the file.
+- **Scoped inserts.** An insert into a model with a `where` clause is checked against it, so a row
+  the export would not see again cannot be written.
+- **Batching** for change sets of thousands of rows: one statement per model and kind instead of
+  one per row, with the same guards.
+- **Drift monitoring.** `check -json` on a schedule with a documented alerting recipe (the CI
+  guide has the job), and a bot that exports production and opens a pull request with the fixture
+  change and its generated migration when an admin UI changed master data.
+- **Column types next to the state file.** The types of the columns the fixture files use, recorded
+  when a database is at hand, so a value such as `1.10` is settled offline too and `status -offline`
+  never has to refuse one.
+- **Squash.** Replace a chain of applied fixture migrations with one, for projects with hundreds.
+
+## 5. Tests
+
+Seven layers, each with a job the others cannot do:
+
+1. **Unit** — the diff, reading and rendering, the state file, value canonicalisation, the reader
+   of generated files. Fuzzed where the input is text from outside: number canonicalisation, the
+   state file, the Go literal reader.
+2. **Database** — the change-set runtime against PostgreSQL: every policy, every edge case in §3, both
+   drivers.
+3. **bun itself** — every premise in §1.2, pinned against the real `dbfixture`, the real
+   `InsertQuery` and the real `migrate.Migrator` in both of its modes.
+4. **End to end** — the command built and driven through a fixture change from baseline to deploy,
+   including a generated migration compiled into a program that runs bun's migrator.
+5. **Properties** — random models, ownership modes, soft deletes and edits, checking that applying
+   what `generate` wrote takes a database to the files, and that revert, `check` and `export` agree.
+6. **Generated files over time** — every shape an earlier version wrote, frozen in
+   `testdata/generated`, compiled and run against today's run time.
+7. **Long-running examples** — `examples/saas` and `examples/commerce` replayed release by release:
+   seeds, migrations, rollbacks, hand edits, merges and runbooks, as a team would live them.
+
+Each wave of work was followed by an adversarial review that reproduced what it found; the open
+findings are the known limitations above.
+
+Variants, as a CI matrix: PostgreSQL 12 to 18; the pinned bun release and bun master; `pgdriver`
+and `pgx`; Go's oldest supported version and the current one. The same pipeline runs on GitHub
+Actions and GitLab CI.
+
+## 6. Not planned
+
+- Databases other than PostgreSQL.
+- Schema migrations. bun has them; this tool moves data and only reads the schema.
+- Evaluating arbitrary templates or reading Go model types: both need the application's code, and a
+  standalone tool that ran it would be a different, riskier tool.

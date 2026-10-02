@@ -1,0 +1,1 @@
+ALTER TABLE plans ADD COLUMN trial_days integer NOT NULL DEFAULT 14;

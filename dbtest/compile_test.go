@@ -12,6 +12,7 @@ package dbtest_test
 // already uses.
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"testing"
 
 	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
+	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 )
 
 const migratorFile = `package buildcheck
@@ -98,4 +100,45 @@ func replaceOnce(t *testing.T, text, old, new string) string {
 		t.Fatalf("%q is not in the fixture any more", old)
 	}
 	return out
+}
+
+// A set of more than a thousand changes is written in parts joined by
+// fixturechange.Concat, which has to compile against the real packages too.
+func TestALargeGeneratedFileCompiles(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("no Go toolchain to build with")
+	}
+	cfg := itemConfig(t)
+	cfg.Package = "buildcheck"
+	cfg.Migrator = "Migrations"
+	res := &fixturemigrate.Result{Tables: fixturechange.Tables{"Item": {Name: "items", ID: "id", Key: "name"}}}
+	for i := 0; i < 1234; i++ {
+		res.Changes = append(res.Changes, fixturechange.Change{Model: "Item", Kind: fixturechange.Update,
+			Key: fixturechange.Values{"name": fixturechange.Lit(fmt.Sprintf("item %d", i))},
+			Old: fixturechange.Values{"cost": fixturechange.Lit("1")},
+			New: fixturechange.Values{"cost": fixturechange.Lit(fmt.Sprint(i))}})
+	}
+	src, err := fixturemigrate.Render(cfg, "many items", "20260921120000", res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(src), "fixturechange.Concat(") {
+		t.Fatal("expected the set in parts")
+	}
+	dir := "buildcheck"
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	for name, content := range map[string][]byte{
+		"migrator.go": []byte(migratorFile),
+		fixturemigrate.FileName("20260921120000", "many items"): src,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, err := exec.Command("go", "build", "./"+dir).CombinedOutput(); err != nil {
+		t.Fatalf("the generated migration does not build: %v\n%s", err, out)
+	}
 }

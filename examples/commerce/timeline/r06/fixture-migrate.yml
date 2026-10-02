@@ -1,0 +1,148 @@
+# The configuration of the example shop's back office. See
+# fixture-migrate.example.yml at the top of the repository for every setting.
+# The master data is split by subject, and the application loads the files
+# with one dbfixture Load, in this order.
+fixtures:
+  - fixtures/reference.yml
+  - fixtures/catalog.yml
+  - fixtures/checkout.yml
+  - fixtures/storefront.yml
+  - fixtures/access.yml
+out: migrations
+package: migrations
+migrator: Migrations
+# Every seeded database has currencies; the migrations of a new one find the
+# table empty and leave the seed to dbfixture.
+seed_guard_table: billing.currencies
+database: env:DATABASE_URL
+# Every run of a fixture migration from this release on records what it
+# applied, found made and skipped, so a rollback undoes only what the run made
+# in that database, and status shows what a deploy skipped. The first
+# migration that carries it creates it.
+audit_table: fixture_audit
+
+policy:
+  # The back office edits master data in production; its edits win.
+  changed_row: warn
+  # The models spell a nullable column as a nullzero field, a jsonb one as a
+  # nullzero map: bun writes NULL for ~, and the tool cannot see the tag
+  # (known: F2).
+  null_default: warn
+  # A role or a permission is renamed in place: the grants and the admin
+  # users that point at it keep pointing at it.
+  renames: update
+
+models:
+  # ISO 4217: the code is the primary key, and what every reference names.
+  Currency:
+    table: billing.currencies
+    id: code
+    key: [code]
+    ref: code
+
+  Country:
+    table: countries
+    serial: true
+    key: [iso2]
+    ref: iso2
+    references:
+      currency_code: Currency
+
+  # Effective-dated: a rate is never edited in place once orders were taxed
+  # at it. A new rate closes the current one and opens the next.
+  TaxRate:
+    table: billing.tax_rates
+    serial: true
+    key: [country_id, tax_class, valid_from]
+    references:
+      country_id: Country
+    # Orders were taxed at every rate there ever was.
+    deletes: refuse
+
+  # Ops add local providers in the back office: the file adds and updates
+  # its own and never deletes one, and a provider only the database has is
+  # no drift.
+  PaymentProvider:
+    table: billing.payment_providers
+    key: [code]
+    ref: code
+    mode: upsert
+
+  # A tree through parent_id.
+  Category:
+    table: catalog.categories
+    serial: true
+    key: [slug]
+    ref: slug
+    references:
+      parent_id: Category
+
+  # One row per category, keyed by the category's id.
+  CategorySEO:
+    table: catalog.category_seo
+    id: none
+    key: [category_id]
+    references:
+      category_id: Category
+    defaults:
+      meta_description: ~
+
+  # Seeded once; logistics owns a zone, values and all, once it exists.
+  ShippingZone:
+    table: shipping_zones
+    serial: true
+    key: [code]
+    ref: code
+    mode: insert
+
+  ShippingMethod:
+    table: shipping_methods
+    serial: true
+    key: [code]
+    ref: code
+    references:
+      zone_id: ShippingZone
+      currency_code: Currency
+    # Merchandising prices a method in the back office once it exists.
+    insert_only: [base_price]
+
+  MenuItem:
+    table: menu_items
+    serial: true
+    key: [menu, slug]
+
+  SenderIdentity:
+    table: sender_identities
+    serial: true
+    key: [code]
+    ref: code
+
+  LoyaltyTier:
+    table: loyalty_tiers
+    serial: true
+    key: [code]
+    ref: code
+
+  AdminPermission:
+    table: admin_permissions
+    serial: true
+    key: [code]
+    ref: code
+
+  # A merchant's custom roles share the table and its identity: the database
+  # numbers every role, and the file's ids only seed a new database.
+  AdminRole:
+    table: admin_roles
+    key: [code]
+    ref: code
+    mode: upsert
+    ids: database
+
+  AdminRolePermission:
+    table: admin_role_permissions
+    key: [role_id, permission_id]
+    references:
+      role_id: AdminRole
+      permission_id: AdminPermission
+    # The grants of custom roles are the merchant's.
+    where: role_id IN (SELECT id FROM admin_roles WHERE builtin)

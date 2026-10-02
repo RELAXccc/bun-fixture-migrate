@@ -1,0 +1,61 @@
+description: |
+  Two branches generate from the same state. One adds SCIM provisioning as
+  feature 7, the other data residency, also as feature 7 (both took the next
+  id), and relabels the settings page. Each generates its migration. Merging
+  the second conflicts in the feature list and, on purpose, in the state file.
+  Keeping both migrations would not do: each was generated against the state
+  before either, so whichever runs second finds the rows the other changed, and
+  data residency would insert feature 7 on top of SCIM's. The developer follows
+  the runbook: resolves the fixture file (data residency becomes feature 8),
+  keeps the SCIM migration and the state file it left, deletes the data
+  residency migration and generates it again on top of SCIM's. status -offline
+  and a plan against production then confirm both.
+steps:
+  - merge:
+      branches:
+        - name: scim
+          steps:
+            - overlay: branch-scim
+            - generate: {name: scim, at: "20260914100000"}
+              output: ["Feature: 1 insert", "PlanFeature: 1 insert", "Translation: 2 inserts"]
+        - name: residency
+          steps:
+            - overlay: branch-residency
+            - generate: {name: data residency, at: "20260915100000"}
+              output: ["Feature: 1 insert", "PlanFeature: 2 inserts", "Translation: 1 update"]
+      conflicts: [fixtures/catalog.yml, migrations/fixture_state.yml]
+      resolve: merged
+      state: ours
+  # Both migrations in the directory, the state file as SCIM's left it: the
+  # data residency migration is one the state does not include, generated on
+  # another branch, and status says so rather than pointing at generate.
+  - cli: [status, -offline]
+    exit: 3
+    output:
+      - "20260915100000_fixture_data_residency is a generated fixture migration whose changes the state file does not include"
+    absent: ["run: bun-fixture-migrate generate"]
+  # A dry run shows what generate would write, and the same warning.
+  - cli: [generate, -dry-run, -name, merge, -at, "20260916100000"]
+    output: ["warning: 20260915100000_fixture_data_residency is a generated fixture migration whose changes the state file does not include"]
+  - cli: [generate, -name, merge, -at, "20260916100000"]
+    exit: 2
+  # The runbook: keep the migration a database will have applied first, delete
+  # the other, and generate it again from the state the kept one leaves.
+  - remove: [migrations/20260915100000_fixture_data_residency.go]
+  - generate: {name: data residency, at: "20260915100000"}
+    output: ["Feature: 1 insert", "PlanFeature: 2 inserts", "Translation: 1 update"]
+  - file: migrations/20260915100000_fixture_data_residency.go
+    output: ['"id":   fixturechange.Lit("8"),']
+  - cli: [status, -offline]
+    output: ["not migrated nothing"]
+  - cli: [plan, -strict]
+    env: prod
+    output:
+      - "20260914100000_fixture_scim: would succeed"
+      - "20260915100000_fixture_data_residency: would succeed"
+deploy: [prod, staging]
+expect:
+  check:
+    prod:
+      exit: 3
+      output: ["Category slug=dashboards", "name: database Dashboards & reports, file Dashboards"]

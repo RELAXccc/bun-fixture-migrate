@@ -1,0 +1,48 @@
+- model: Currency
+  rows:
+    - _id: eur
+      id: 1
+      code: EUR
+      symbol: "€"
+    - _id: usd
+      id: 2
+      code: USD
+      symbol: "$"
+
+- model: Plan
+  rows:
+    - _id: free
+      id: 1
+      name: free
+      currency_id: '{{ $.Currency.eur.ID }}'
+      price_cents: 0
+      seats: 1
+      settings: {trial_days: 0}
+    - _id: team
+      id: 2
+      name: team
+      currency_id: '{{ $.Currency.eur.ID }}'
+      price_cents: 2500
+      seats: 10
+      settings: {trial_days: 14, sso: true}
+      note: "most popular"
+
+    - _id: pro
+      id: 3
+      name: pro
+      currency_id: '{{ $.Currency.usd.ID }}'
+      price_cents: 9000
+      seats: 100
+      settings: {trial_days: 30, sso: true}
+
+- model: Feature
+  rows:
+    - plan_id: '{{ $.Plan.free.ID }}'
+      code: api
+      quota: 100
+    - plan_id: '{{ $.Plan.team.ID }}'
+      code: api
+      quota: 5000
+    - plan_id: '{{ $.Plan.pro.ID }}'
+      code: api
+      quota: 50000

@@ -1,9 +1,12 @@
 package fixturemigrate
 
 import (
+	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
+	"github.com/RELAXccc/bun-fixture-migrate/dbschema"
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 )
 
@@ -20,22 +23,87 @@ type Entry struct {
 	ID string
 	// Key is the natural key.
 	Key fixturechange.Values
-	// KeyStr is the natural key as one comparable string.
+	// KeyStr is the natural key as one comparable string, equal for two
+	// entries exactly when their keys are; see keyString. Messages name a
+	// row by keyLabel instead.
 	KeyStr string
 	// Cells are the compared columns. A column that is absent here is "not
 	// set", which is not the same as NULL.
 	Cells fixturechange.Values
+	// AsWritten holds, for a fixture row, the columns (the id included) whose
+	// value a string field gets differently from what it resolves to, with
+	// the text the string field gets; see Cell.StringText. Only the column's
+	// type says which of the two the database holds, so Canonicalize picks
+	// one and empties it, and a change carrying a value still in it is
+	// refused rather than guessed at.
+	//
+	// A reference is in it too when the ref value of the row it names is
+	// such a value: 0012 is the integer 10 in a bigint ref column and the
+	// text 0012 in a text one, and the reference has to carry whichever the
+	// database holds there.
+	AsWritten map[string]string
+	// from names, for a column in AsWritten whose value another row
+	// supplies, the column of that row whose type decides between the two
+	// readings: the ref column of the row a reference names, or the field a
+	// template copies. Any other column decides for itself.
+	from map[string]source
+	// asFloat holds, for a fixture row, the columns holding an unquoted
+	// number a float64 field holds as another number, with that one; see
+	// floatReading. In a numeric column only the model's Go type says which
+	// the database holds, and Canonicalize reports it.
+	asFloat map[string]string
+	// folded holds, for a key column whose type holds values equal that
+	// differ as text (citext), the column's value as the type compares it,
+	// as PostgreSQL lower-cases it. Set where the catalog was read; see
+	// foldKey.
+	folded map[string]string
+	// copied holds, for a fixture row, the columns a template copies from a
+	// field of another row other than its id, with that field. dbfixture
+	// stores what the field holds as fmt prints it, which only the field's
+	// Go type decides: a string or an integer as it is, a bool as true or
+	// false, a float64 of 100000000 as 1e+08, a time.Time with its zone's
+	// name. Canonicalize settles a copy of a string, an integer, a bool or a
+	// uuid column (settleCopies) and reports any other; a change carrying one
+	// it has not settled is refused.
+	copied map[string]source
+	// asJSON holds, for a fixture row, the columns whose value a json or
+	// jsonb column holds as something else than Cells says, with that JSON;
+	// see Cell.JSONText. Canonicalize takes it for such a column, and for a
+	// timestamptz one, which holds the same instant or, for a date alone,
+	// the midnight UTC a time.Time field makes of it. Without the database
+	// it is not used.
+	asJSON map[string]string
+	// unsure holds, for a fixture row, the columns whose value means one
+	// thing to one Go field type and another to another (Cell.Unsure), with
+	// the reason. No column type settles them, so a change carrying one is
+	// always refused.
+	unsure map[string]string
 }
 
 // Full is every column an insert writes or a delete guards on: the compared
-// columns plus the id when the row has one.
+// columns plus the id when the row has one, and the model's ids are the
+// files' (ids: database leaves them to every database).
 func (e *Entry) Full(m *Model) fixturechange.Values {
 	out := make(fixturechange.Values, len(e.Cells)+1)
 	for col, v := range e.Cells {
 		out[col] = v
 	}
-	if e.ID != "" {
+	if e.ID != "" && !m.idsFromDatabase() {
 		out[m.ID] = fixturechange.Lit(e.ID)
+	}
+	return out
+}
+
+// owned is the part of values the fixture files own in a row the database
+// holds: what a delete is guarded by. An insert_only column is the
+// database's once the row exists, and a guard on it would miss a row an
+// operator changed.
+func owned(m *Model, values fixturechange.Values) fixturechange.Values {
+	out := make(fixturechange.Values, len(values))
+	for col, v := range values {
+		if col == m.ID || m.ownsValue(col) {
+			out[col] = v
+		}
 	}
 	return out
 }
@@ -60,6 +128,61 @@ type Snapshot struct {
 	// key that is not unique, a zero written into a column whose default is
 	// not zero. They are reported, never worked around.
 	Findings []Finding
+
+	// unique holds, per model, the columns of each unique index of its
+	// table, once the catalog has been read for the snapshot (by
+	// DatabaseSnapshot or Canonicalize); nil while nobody has looked.
+	unique map[string][][]string
+	// tables holds, per model, its table as the catalog read for the
+	// snapshot describes it, as unique does; check reads the column
+	// defaults from it.
+	tables map[string]*dbschema.Table
+
+	// database is true for a snapshot DatabaseSnapshot read.
+	database bool
+	// softDeleted counts, per model with a soft_delete, the rows the
+	// snapshot leaves out because they are soft-deleted: a database's, or
+	// a fixture file's rows that set the column.
+	softDeleted map[string]int
+	// deleted holds, per model with a soft_delete, the natural keys a
+	// database holds soft-deleted rows of, by KeyStr, with the time the
+	// newest of them was deleted. Only DatabaseSnapshot fills it.
+	deleted map[string]map[string]string
+}
+
+// noteSoftDeleted counts a row the snapshot leaves out as soft-deleted.
+func (s *Snapshot) noteSoftDeleted(model string) {
+	if s.softDeleted == nil {
+		s.softDeleted = map[string]int{}
+	}
+	s.softDeleted[model]++
+}
+
+// typed reports a column of a model whose type the catalog read for the
+// snapshot names, so its values are as the database holds them.
+func (s *Snapshot) typed(model, col string) bool {
+	t := s.tables[model]
+	if t == nil {
+		return false
+	}
+	_, ok := t.Column(col)
+	return ok
+}
+
+// noteUniques records the unique indexes of a model's table, and the table.
+func (s *Snapshot) noteUniques(model string, table *dbschema.Table) {
+	if s.tables == nil {
+		s.tables = map[string]*dbschema.Table{}
+	}
+	s.tables[model] = table
+	if s.unique == nil {
+		s.unique = map[string][][]string{}
+	}
+	indexes := make([][]string, 0, len(table.Uniques))
+	for _, index := range table.Uniques {
+		indexes = append(indexes, append([]string(nil), index...))
+	}
+	s.unique[model] = indexes
 }
 
 // clone copies a snapshot deeply enough that rewriting an entry in it cannot
@@ -74,6 +197,48 @@ func (s *Snapshot) clone() *Snapshot {
 			c := *e
 			c.Key = copyValues(e.Key)
 			c.Cells = copyValues(e.Cells)
+			if e.AsWritten != nil {
+				c.AsWritten = make(map[string]string, len(e.AsWritten))
+				for col, text := range e.AsWritten {
+					c.AsWritten[col] = text
+				}
+			}
+			if e.from != nil {
+				c.from = make(map[string]source, len(e.from))
+				for col, src := range e.from {
+					c.from[col] = src
+				}
+			}
+			if e.asFloat != nil {
+				c.asFloat = make(map[string]string, len(e.asFloat))
+				for col, text := range e.asFloat {
+					c.asFloat[col] = text
+				}
+			}
+			if e.folded != nil {
+				c.folded = make(map[string]string, len(e.folded))
+				for col, text := range e.folded {
+					c.folded[col] = text
+				}
+			}
+			if e.copied != nil {
+				c.copied = make(map[string]source, len(e.copied))
+				for col, src := range e.copied {
+					c.copied[col] = src
+				}
+			}
+			if e.asJSON != nil {
+				c.asJSON = make(map[string]string, len(e.asJSON))
+				for col, text := range e.asJSON {
+					c.asJSON[col] = text
+				}
+			}
+			if e.unsure != nil {
+				c.unsure = make(map[string]string, len(e.unsure))
+				for col, reason := range e.unsure {
+					c.unsure[col] = reason
+				}
+			}
 			copied = append(copied, &c)
 		}
 		out.Entries[model] = copied
@@ -98,6 +263,10 @@ type Finding struct {
 	Row   string
 	// Detail is one sentence an operator can act on.
 	Detail string
+
+	// unsure marks an unbacked-key finding the lint could not decide, which
+	// key_index never makes more than a warning.
+	unsure bool
 }
 
 // FindingKind is what a finding is about.
@@ -110,18 +279,41 @@ const (
 	// FindingZeroDefault is a zero written into a column whose database
 	// default is something else, which bun does not write.
 	FindingZeroDefault FindingKind = "zero against a default"
+	// FindingNullDefault is an explicit null written into a column that has a
+	// default, which bun turns into DEFAULT for a pointer or nullzero field.
+	FindingNullDefault FindingKind = "null against a default"
+	// FindingInvalidValue is a value the column's type cannot hold, which
+	// the migration would fail on at deploy time.
+	FindingInvalidValue FindingKind = "invalid value"
 	// FindingUnknownColumn is a column in the fixture file that the table does
 	// not have.
 	FindingUnknownColumn FindingKind = "unknown column"
+	// FindingAmbiguousValue is a value whose meaning depends on the Go type
+	// of the model's field, which this tool cannot see and no column type
+	// settles: a sequence holding a null.
+	FindingAmbiguousValue FindingKind = "ambiguous value"
+	// FindingDuplicateID is two rows of a fixture file sharing one id, which
+	// two branches each adding the next id leave behind after a merge:
+	// dbfixture cannot load such a file, and no migration can insert both.
+	FindingDuplicateID FindingKind = "duplicate id"
+	// FindingUnbackedKey is a natural key, or the ref column of a model
+	// something references, that no unique index or constraint of the table
+	// makes unique among the model's rows: the database lets the
+	// application add a second row with it. Its Row is the key, "key
+	// [plan_id, code]" or "ref code"; see LintKeys.
+	FindingUnbackedKey FindingKind = "unbacked key"
+	// FindingSoftDelete is a soft_delete column the tool cannot work with:
+	// one the table does not have, or that is not a nullable timestamptz or
+	// timestamp column without a default, or rows holding the zero time,
+	// which a time.Time field without nullzero reads as live. It is always
+	// an error.
+	FindingSoftDelete FindingKind = "soft delete"
 )
 
-func (f Finding) String() string {
-	where := f.Model
-	if f.Row != "" {
-		where += " " + f.Row
-	}
-	return where + ": " + f.Detail
-}
+func (f Finding) String() string { return f.Where() + ": " + f.Detail }
+
+// Where names the row a finding is about, as Refusal.Where does.
+func (f Finding) Where() string { return rowWhere(f.Model, f.Row) }
 
 // byKey indexes the entries of a model by their natural key, in reading order.
 func byKey(entries []*Entry) (map[string][]*Entry, []string) {
@@ -136,19 +328,78 @@ func byKey(entries []*Entry) (map[string][]*Entry, []string) {
 	return groups, order
 }
 
-// keyString renders a natural key so two of them compare as strings.
+// keyString renders a natural key so two of them compare as strings, equal
+// exactly when the keys are. Every name and value is quoted and every value
+// carries its kind: spelled the way a person reads it, a NULL and the text
+// "NULL", a reference and the text "Currency(EUR)", or {a: "x/b=y", b: "z"}
+// and {a: "x", b: "y/b=z"} would be one key, and two different rows a
+// duplicate. It is never shown to anybody; keyLabel is.
 func keyString(model string, key fixturechange.Values) string {
-	cols := make([]string, 0, len(key))
-	for c := range key {
-		cols = append(cols, c)
+	var b strings.Builder
+	b.WriteString(strconv.Quote(model))
+	for _, c := range sortedColumns(key) {
+		b.WriteString(" " + strconv.Quote(c) + "=" + valueKey(key[c]))
 	}
-	sort.Strings(cols)
+	return b.String()
+}
+
+// setKey gives an entry its natural key. A key column that still holds two
+// readings (AsWritten) is compared under both: until the column's type says
+// which one the database holds, 0012 and "10" may or may not be one key, and
+// two keys are only the same when they are whichever reading it takes.
+func (e *Entry) setKey(model string, key fixturechange.Values) {
+	e.Key = key
+	e.KeyStr = keyString(model, key)
+	for _, col := range sortedColumns(key) {
+		if written, ok := e.AsWritten[col]; ok {
+			e.KeyStr += " " + strconv.Quote(col) + " written " + strconv.Quote(written)
+		}
+	}
+}
+
+// valueKey writes a value so that no two different values write the same
+// text.
+func valueKey(v fixturechange.Value) string {
+	switch {
+	case v.IsNull:
+		return "null"
+	case v.Ref != nil:
+		return "ref(" + strconv.Quote(v.Ref.Model) + "," + strconv.Quote(v.Ref.Key) + ")"
+	}
+	return strconv.Quote(v.Lit)
+}
+
+// keyLabel is a natural key as refusals and findings name a row,
+// "Plan/name=team", in the text reports and in the JSON ones. Two keys can
+// share a label; nothing compares them by it.
+func keyLabel(model string, key fixturechange.Values) string {
+	cols := sortedColumns(key)
 	parts := make([]string, 0, len(cols))
 	for _, c := range cols {
 		parts = append(parts, c+"="+key[c].String())
 	}
 	return model + "/" + strings.Join(parts, "/")
 }
+
+// foldKey is the natural key as its types compare it, as keyString writes
+// it, where a key column's type holds values equal that differ as text: Go
+// and GO in a citext column fold to one. "" for a key with no such column,
+// or before the catalog was read.
+func (e *Entry) foldKey(model string) string {
+	if len(e.folded) == 0 {
+		return ""
+	}
+	key := copyValues(e.Key)
+	for col, text := range e.folded {
+		if v, ok := key[col]; ok && !v.IsNull && v.Ref == nil {
+			key[col] = fixturechange.Lit(text)
+		}
+	}
+	return keyString(model, key)
+}
+
+// label is the entry's natural key as keyLabel writes it.
+func (e *Entry) label(model string) string { return keyLabel(model, e.Key) }
 
 // reportDuplicates adds a finding for every natural key more than one row
 // holds, naming each colliding id. A key that does not identify one row cannot
@@ -170,9 +421,38 @@ func (s *Snapshot) reportDuplicates(model string) {
 			ids = append(ids, id)
 		}
 		s.Findings = append(s.Findings, Finding{
-			Kind: FindingDuplicateKey, Model: model, Row: k,
+			Kind: FindingDuplicateKey, Model: model, Row: group[0].label(model),
 			Detail: "this natural key is held by " + plural(len(group), "row") + " (" + strings.Join(ids, ", ") +
-				"), so no lookup by it can tell them apart: give the table a unique index, or add a column to key",
+				"), so no lookup by it can tell them apart: " + indexAdvice(s.tables[model], sortedColumns(group[0].Key),
+				"give the table a unique index") + ", or add a column to key",
+		})
+	}
+}
+
+// reportDuplicateIDs adds a finding for every id more than one row of a model
+// holds, naming the rows.
+func (s *Snapshot) reportDuplicateIDs(cfg *Config, model string) {
+	rows := map[string][]string{}
+	var order []string
+	for _, e := range s.Entries[model] {
+		if e.ID == "" {
+			continue
+		}
+		if _, seen := rows[e.ID]; !seen {
+			order = append(order, e.ID)
+		}
+		rows[e.ID] = append(rows[e.ID], e.label(model))
+	}
+	id := cfg.Models[model].ID
+	for _, value := range order {
+		if len(rows[value]) < 2 {
+			continue
+		}
+		s.Findings = append(s.Findings, Finding{
+			Kind: FindingDuplicateID, Model: model, Row: id + "=" + value,
+			Detail: fmt.Sprintf("%s hold this %s (%s), and dbfixture cannot load the file: the second insert "+
+				"fails on the primary key. Give each row its own %s",
+				plural(len(rows[value]), "row"), id, strings.Join(rows[value], ", "), id),
 		})
 	}
 }

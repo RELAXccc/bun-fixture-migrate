@@ -1,0 +1,20 @@
+# The configuration the change set beside it was generated with: two models
+# bun soft-deletes, one under a unique index over every row, one under a
+# unique index over live rows only.
+fixture: fixture.yml
+out: migrations
+package: migrations
+migrator: Migrations
+seed_guard_table: corpus_sd_currencies
+models:
+  Currency:
+    table: corpus_sd_currencies
+    key: [code]
+    ref: code
+    soft_delete: deleted_at
+  Plan:
+    table: corpus_sd_plans
+    serial: true
+    key: [name]
+    references: {currency_id: Currency}
+    soft_delete: deleted_at

@@ -8,19 +8,22 @@ package dbtest_test
 //	BUN_FIXTURE_MIGRATE_POSTGRES=postgres://postgres:pg@127.0.0.1:55433/postgres?sslmode=disable go test ./...
 
 import (
+	"bytes"
 	"context"
-	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
+	fixturemigrate "github.com/RELAXccc/bun-fixture-migrate"
 	"github.com/RELAXccc/bun-fixture-migrate/fixtureapply"
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
 
 	"github.com/uptrace/bun"
-	"github.com/uptrace/bun/dialect/pgdialect"
-	"github.com/uptrace/bun/driver/pgdriver"
 )
 
 const schema = `
@@ -49,7 +52,7 @@ func connect(t *testing.T) *bun.DB {
 	if dsn == "" {
 		t.Skip("set BUN_FIXTURE_MIGRATE_POSTGRES to a PostgreSQL DSN to run the round trip")
 	}
-	db := bun.NewDB(sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(dsn))), pgdialect.New())
+	db := openDB(t, dsn, nil)
 	t.Cleanup(func() { db.Close() })
 	return db
 }
@@ -217,36 +220,71 @@ func TestAnEditedRowIsLeftAlone(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `UPDATE plans SET price_cents = 3333 WHERE name = 'team'`); err != nil {
 		t.Fatal(err)
 	}
-	var log []string
-	err := fixtureapply.Apply(ctx, db, changeSet(),
-		fixtureapply.WithLogger(func(f string, a ...any) { log = append(log, f) }))
+	var outcomes []fixtureapply.Outcome
+	err := fixtureapply.Apply(ctx, db, changeSet(), quiet(),
+		fixtureapply.WithReport(func(o fixtureapply.Outcome) { outcomes = append(outcomes, o) }))
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if got := scan[int64](t, db, `SELECT price_cents FROM plans WHERE name = 'team'`); got != 3333 {
 		t.Fatalf("the hand-made edit should have survived, price_cents = %d", got)
 	}
-	if len(log) != len(changeSet().Changes) {
-		t.Fatalf("every change should be reported, got %d lines", len(log))
+	reported := map[int]fixtureapply.Status{}
+	for _, o := range outcomes {
+		if o.Index >= 0 {
+			reported[o.Index] = o.Status
+		}
+	}
+	if len(reported) != len(changeSet().Changes) {
+		t.Fatalf("every change should be reported, got %v", reported)
+	}
+	if reported[2] != fixtureapply.StatusSkipped {
+		t.Fatalf("the edited row's update should be skipped, got %v", reported)
 	}
 }
 
-// A row that exists under another id is not inserted a second time.
-func TestAnInsertSkipsANameHeldUnderAnotherID(t *testing.T) {
+// A row that exists under another id is not inserted a second time, and is not
+// the row the fixture file describes either, even when every other value
+// agrees: it is id drift, under policy.id_drift. It used to be reported as a
+// row already there, nothing to do.
+func TestAnInsertOfANameHeldUnderAnotherIDIsIDDrift(t *testing.T) {
 	db := testDB(t)
 	seed(t, db)
 	ctx := context.Background()
-	if _, err := db.ExecContext(ctx, `INSERT INTO plans (id, name) VALUES (99, 'pro')`); err != nil {
+	// Every value the insert writes, under another id.
+	if _, err := db.ExecContext(ctx, `INSERT INTO plans (id, name, price_cents, rating, public, note)
+		VALUES (99, 'pro', 9000, 4.9, true, NULL)`); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixtureapply.Apply(ctx, db, changeSet(), quiet()); err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
-	if got := scan[int64](t, db, `SELECT count(*) FROM plans WHERE name = 'pro'`); got != 1 {
-		t.Fatalf("expected the row to be left alone, got %d rows named pro", got)
-	}
-	if got := scan[int64](t, db, `SELECT id FROM plans WHERE name = 'pro'`); got != 99 {
-		t.Fatalf("the existing row should keep its id, got %d", got)
+	set := changeSet()
+	set.Changes = set.Changes[:1]
+	for _, tc := range []struct {
+		policy fixturechange.Mode
+		fails  bool
+		status fixtureapply.Status
+	}{
+		{"", true, fixtureapply.StatusFailed},
+		{fixturechange.ModeWarn, false, fixtureapply.StatusSkipped},
+		{fixturechange.ModeIgnore, false, fixtureapply.StatusUnchanged},
+	} {
+		set.Policy.IDDrift = tc.policy
+		outcomes, err := applyReporting(t, db, set)
+		if (err != nil) != tc.fails {
+			t.Fatalf("id_drift %q: %v", tc.policy, err)
+		}
+		if len(outcomes) != 1 || outcomes[0].Status != tc.status {
+			t.Fatalf("id_drift %q: %+v", tc.policy, outcomes)
+		}
+		if tc.policy != fixturechange.ModeIgnore && (outcomes[0].Problem != fixtureapply.ProblemIDDrift ||
+			!strings.Contains(outcomes[0].Message, "exists, but under id 99 and not 3")) {
+			t.Fatalf("id_drift %q: %+v", tc.policy, outcomes)
+		}
+		if got := scan[int64](t, db, `SELECT count(*) FROM plans WHERE name = 'pro'`); got != 1 {
+			t.Fatalf("expected the row to be left alone, got %d rows named pro", got)
+		}
+		if got := scan[int64](t, db, `SELECT id FROM plans WHERE name = 'pro'`); got != 99 {
+			t.Fatalf("the existing row should keep its id, got %d", got)
+		}
 	}
 }
 
@@ -262,9 +300,15 @@ func TestAMissingReferenceFailsInsteadOfWritingNull(t *testing.T) {
 			Old: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "free")},
 			New: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "ghost")}},
 	}
-	err := fixtureapply.Apply(context.Background(), db, set, quiet())
-	if err == nil || !strings.Contains(err.Error(), "no row in plans") {
+	var outcomes []fixtureapply.Outcome
+	err := fixtureapply.Apply(context.Background(), db, set, quiet(),
+		fixtureapply.WithReport(func(o fixtureapply.Outcome) { outcomes = append(outcomes, o) }))
+	if err == nil || !strings.Contains(err.Error(),
+		`plan_id is to point at Plan "ghost", and no row of plans has name = "ghost"`) {
 		t.Fatalf("expected a failure naming the missing row, got %v", err)
+	}
+	if len(outcomes) != 1 || outcomes[0].Problem != fixtureapply.ProblemError {
+		t.Fatalf("a reference the change writes fails whatever the policy says: %+v", outcomes)
 	}
 	if got := scan[int64](t, db, `SELECT plan_id FROM features WHERE code = 'api' AND plan_id = 1`); got != 1 {
 		t.Fatalf("the transaction should have rolled back, plan_id = %d", got)
@@ -331,6 +375,12 @@ func TestAnUpdateOfAMissingRowFailsInsteadOfBeingRecorded(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no row of plans has name=team") {
 		t.Fatalf("the error has to say which row: %v", err)
+	}
+	// Dropping the change from the file would keep it from every other
+	// database too; the policy of this one migration is the remedy.
+	if !strings.Contains(err.Error(), `set MissingRow to "warn" in this migration's Policy`) ||
+		strings.Contains(err.Error(), "drop this change") {
+		t.Fatalf("the error has to name a remedy that keeps the change for other databases: %v", err)
 	}
 	// And the transaction rolled back, so the insert that came before the
 	// failing update is gone too.
@@ -409,7 +459,7 @@ func TestAChangedRowIsAWarningOrAnError(t *testing.T) {
 		fixtureapply.WithLogger(func(f string, a ...any) { log = append(log, fmt.Sprintf(f, a...)) })); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if !strings.Contains(strings.Join(log, "\n"), "somebody changed it in this database") {
+	if !strings.Contains(strings.Join(log, "\n"), "it was changed in this database") {
 		t.Fatalf("the operator has to be told what happened: %v", log)
 	}
 	if got := scan[int64](t, db, `SELECT price_cents FROM plans WHERE name = 'team'`); got != 3333 {
@@ -477,5 +527,856 @@ func TestARenameUpdatesTheKeyColumnUnderItsIDGuard(t *testing.T) {
 	err := fixtureapply.Apply(ctx, db2, set, quiet())
 	if err == nil || !strings.Contains(err.Error(), "under id 5 and not 2") {
 		t.Fatalf("expected the id drift to be named, got %v", err)
+	}
+
+	// id_drift warn and ignore are what a database whose ids are not the
+	// file's runs under: the rename finds its row by the old name alone,
+	// warns about the id under warn, and a second run finds it made. Guarded
+	// by the file's id, it was skipped and recorded.
+	for _, policy := range []fixturechange.Mode{fixturechange.ModeWarn, fixturechange.ModeIgnore} {
+		run(t, db2, "UPDATE plans SET name = 'team' WHERE id = 5")
+		set.Policy.IDDrift = policy
+		outcomes, err := applyReporting(t, db2, set)
+		if err != nil || len(outcomes) != 1 || outcomes[0].Status != fixtureapply.StatusApplied {
+			t.Fatalf("%s: %v %+v", policy, err, outcomes)
+		}
+		if warned := strings.Contains(outcomes[0].Message, "is under id 5, not 2"); warned != (policy == fixturechange.ModeWarn) {
+			t.Fatalf("%s: %+v", policy, outcomes[0])
+		}
+		if got := scan[int64](t, db2, `SELECT id FROM plans WHERE name = 'crew'`); got != 5 {
+			t.Fatalf("%s: crew is %d", policy, got)
+		}
+		if outcomes, err = applyReporting(t, db2, set); err != nil || outcomes[0].Status != fixtureapply.StatusUnchanged {
+			t.Fatalf("%s: a second run: %v %+v", policy, err, outcomes)
+		}
+	}
+}
+
+// A rename written as an update (renames: update) behaves like every other
+// change: a second run finds it made, a revert puts the old name back, and so
+// does a second revert. Keyed on the old name alone, the second run, the
+// revert and a plan of the applied migration all failed as a missing row.
+func TestARenameRunsTwiceAndReverts(t *testing.T) {
+	db := connect(t)
+	db.RegisterModel((*Currency)(nil), (*Plan)(nil), (*Feature)(nil))
+	ctx := context.Background()
+	cfg := pipelineConfig(t)
+	cfg.Policy.Renames = fixturemigrate.RenameUpdate
+	renamed := replaceOnce(t, oldFixture, "      name: team\n      currency_id: '{{ $.Currency.eur.ID }}'\n      price_cents: 2000\n",
+		"      name: crew\n      currency_id: '{{ $.Currency.eur.ID }}'\n      price_cents: 2500\n")
+	renamed = replaceOnce(t, renamed, "      code: sso\n      quota: 1\n", "      code: sso\n      quota: 2\n")
+	res, err := fixturemigrate.Compute(cfg, fixtureSnapshot(t, cfg, oldFixture, "base"),
+		fixtureSnapshot(t, cfg, renamed, "head"))
+	if err != nil || len(res.Refusals) != 0 {
+		t.Fatalf("Compute: %v %+v", err, res.Refusals)
+	}
+	if len(res.Changes) == 0 || res.Changes[0].ID == "" {
+		t.Fatalf("expected a rename first, got %+v", res.Changes)
+	}
+	set := fixturechange.Set{Name: "rename", SeedGuardTable: "plans", Tables: res.Tables, Changes: res.Changes}
+
+	resetSchema(t, db)
+	load(t, db, renamed)
+	want := snapshot(t, db)
+	resetSchema(t, db)
+	load(t, db, oldFixture)
+	before := snapshot(t, db)
+
+	run := func(what string, fn func(context.Context, bun.IDB, fixturechange.Set, ...fixtureapply.Option) error,
+		set fixturechange.Set, wantStatus fixtureapply.Status, wantState string) {
+		t.Helper()
+		var outcomes []fixtureapply.Outcome
+		if err := fn(ctx, db, set, quiet(), fixtureapply.WithReport(func(o fixtureapply.Outcome) {
+			outcomes = append(outcomes, o)
+		})); err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+		for _, o := range outcomes {
+			if o.Index >= 0 && o.Status != wantStatus {
+				t.Fatalf("%s: %s %s %s is %s, want %s: %s", what, o.Model, o.Key, o.Kind, o.Status, wantStatus, o.Message)
+			}
+		}
+		if got := snapshot(t, db); got != wantState {
+			t.Fatalf("%s left\n%s\nwant\n%s", what, got, wantState)
+		}
+	}
+	run("Apply", fixtureapply.Apply, set, fixtureapply.StatusApplied, want)
+	if got := scan[int64](t, db, `SELECT id FROM plans WHERE name = 'crew'`); got != 2 {
+		t.Fatalf("the renamed row keeps its id, got %d", got)
+	}
+	run("a second Apply", fixtureapply.Apply, set, fixtureapply.StatusUnchanged, want)
+	run("Revert", fixtureapply.Revert, set, fixtureapply.StatusApplied, before)
+	// The changes after the rename find their rows under the new name, which
+	// a revert takes away; the rename itself finds its row either way. bun
+	// never rolls one migration back twice, so only the rename is run again.
+	rename := set
+	rename.Changes = set.Changes[:1]
+	run("a second Revert of the rename", fixtureapply.Revert, rename, fixtureapply.StatusUnchanged, before)
+	run("Apply after the revert", fixtureapply.Apply, set, fixtureapply.StatusApplied, want)
+
+	// Another row took the old name after the rename: the rename is still the
+	// one this change made, and says so.
+	if _, err := db.ExecContext(ctx, `INSERT INTO plans (name, currency_id, price_cents, seats, rating, public)
+		VALUES ('team', 1, 1, 1, 1, true)`); err != nil {
+		t.Fatal(err)
+	}
+	var outcomes []fixtureapply.Outcome
+	if err := fixtureapply.Apply(ctx, db, set, quiet(),
+		fixtureapply.WithReport(func(o fixtureapply.Outcome) { outcomes = append(outcomes, o) })); err != nil {
+		t.Fatalf("Apply with the old name taken again: %v", err)
+	}
+	if outcomes[0].Status != fixtureapply.StatusUnchanged || !strings.Contains(outcomes[0].Message, "as name=crew") {
+		t.Fatalf("the rename is made already: %+v", outcomes[0])
+	}
+}
+
+// A reference in a guard whose row an admin renamed or removed is a row that no
+// longer holds what the change was generated against, and goes through the
+// policy like any other. It used to fail the deploy outright, whatever
+// changed_row said, which is the admin-UI case the policy exists for.
+//
+// The natural key of a delete referring to such a row is the same: the row it
+// deletes may be there still, pointing at the renamed row, and nothing can
+// tell. It was reported as already gone, at info level, whatever the policy
+// said, with the row still in the database.
+func TestAGuardReferenceToARenamedRowFollowsThePolicy(t *testing.T) {
+	db := connect(t)
+	db.RegisterModel((*Currency)(nil), (*Plan)(nil), (*Feature)(nil))
+	reset := func() {
+		t.Helper()
+		resetSchema(t, db)
+		load(t, db, oldFixture)
+		run(t, db, "INSERT INTO currencies (id, code, symbol) VALUES (2, 'USD', '$')",
+			"UPDATE currencies SET code = 'EURO' WHERE code = 'EUR'", // an admin renamed it
+			"UPDATE plans SET name = 'crew' WHERE name = 'team'")     // and this one
+	}
+	tables := fixturechange.Tables{
+		"Currency": {Name: "currencies", ID: "id", Key: "code"},
+		"Plan":     {Name: "plans", ID: "id", Key: "name", Serial: true},
+		"Feature":  {Name: "features", ID: "id", Serial: true},
+	}
+	currency := fixturechange.Change{Model: "Plan", Kind: fixturechange.Update,
+		Key: fixturechange.Values{"name": fixturechange.Lit("free")},
+		Old: fixturechange.Values{"currency_id": fixturechange.RefTo("Currency", "EUR")},
+		New: fixturechange.Values{"currency_id": fixturechange.RefTo("Currency", "USD")}}
+	feature := fixturechange.Change{Model: "Feature", Kind: fixturechange.Update,
+		Key: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "team"), "code": fixturechange.Lit("api")},
+		Old: fixturechange.Values{"quota": fixturechange.Lit("5000")},
+		New: fixturechange.Values{"quota": fixturechange.Lit("6000")}}
+	gone := fixturechange.Change{Model: "Feature", Kind: fixturechange.Delete,
+		Key: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "team"), "code": fixturechange.Lit("sso")},
+		Old: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "team"), "code": fixturechange.Lit("sso"),
+			"quota": fixturechange.Lit("1")}}
+
+	for _, tc := range []struct {
+		name    string
+		change  fixturechange.Change
+		policy  fixturechange.Policy
+		fails   bool
+		status  fixtureapply.Status
+		problem fixtureapply.Problem
+		says    string
+	}{
+		{"an old value, changed_row warn", currency, fixturechange.Policy{}, false,
+			fixtureapply.StatusSkipped, fixtureapply.ProblemChangedRow, `Currency "EUR" is not in this database`},
+		{"an old value, changed_row error", currency, fixturechange.Policy{ChangedRow: fixturechange.ModeError}, true,
+			fixtureapply.StatusFailed, fixtureapply.ProblemChangedRow, `Currency "EUR" is not in this database`},
+		{"the natural key, missing_row error", feature, fixturechange.Policy{}, true,
+			fixtureapply.StatusFailed, fixtureapply.ProblemMissingRow, `Plan "team" is not in this database`},
+		{"the natural key, missing_row warn", feature, fixturechange.Policy{MissingRow: fixturechange.ModeWarn}, false,
+			fixtureapply.StatusSkipped, fixtureapply.ProblemMissingRow, `Plan "team" is not in this database`},
+		{"the natural key of a delete, changed_row warn", gone, fixturechange.Policy{}, false,
+			fixtureapply.StatusSkipped, fixtureapply.ProblemChangedRow,
+			"the key refers to Plan(team), which no row holds any more: renamed or removed in this database"},
+		{"the natural key of a delete, changed_row error", gone, fixturechange.Policy{ChangedRow: fixturechange.ModeError}, true,
+			fixtureapply.StatusFailed, fixtureapply.ProblemChangedRow, "the key refers to Plan(team)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reset()
+			before := snapshot(t, db)
+			set := fixturechange.Set{Name: "refs", SeedGuardTable: "plans", Tables: tables, Policy: tc.policy,
+				Changes: []fixturechange.Change{tc.change}}
+			outcomes, err := applyReporting(t, db, set)
+			if (err != nil) != tc.fails {
+				t.Fatalf("Apply: %v", err)
+			}
+			if len(outcomes) != 1 || outcomes[0].Status != tc.status || outcomes[0].Problem != tc.problem ||
+				!strings.Contains(outcomes[0].Message, tc.says) {
+				t.Fatalf("outcomes %+v", outcomes)
+			}
+			if after := snapshot(t, db); after != before {
+				t.Fatalf("nothing may change:\n%s\nwas\n%s", after, before)
+			}
+		})
+	}
+}
+
+// A reference is resolved once per set and remembered. A row renamed or
+// deleted later in the same set was still found under its old name: here the
+// feature inserted for "free" pointed at the plan just renamed to "starter",
+// not at the one renamed to "free".
+func TestAReferenceAfterARenameInTheSameSetFindsTheRowNowNamedSo(t *testing.T) {
+	db := testDB(t)
+	seed(t, db)
+	rename := func(id, from, to string) fixturechange.Change {
+		return fixturechange.Change{Model: "Plan", Kind: fixturechange.Update, ID: id,
+			Key: fixturechange.Values{"name": fixturechange.Lit(from)},
+			Old: fixturechange.Values{"name": fixturechange.Lit(from)},
+			New: fixturechange.Values{"name": fixturechange.Lit(to)}}
+	}
+	set := fixturechange.Set{Name: "swap", Tables: tables(), Changes: []fixturechange.Change{
+		{Model: "Feature", Kind: fixturechange.Delete,
+			Key: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "free"), "code": fixturechange.Lit("api")},
+			Old: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "free"), "code": fixturechange.Lit("api"),
+				"quota": fixturechange.Lit("100")}},
+		rename("1", "free", "starter"),
+		rename("2", "team", "free"),
+		{Model: "Feature", Kind: fixturechange.Insert,
+			Key: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "free"), "code": fixturechange.Lit("sso")},
+			New: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "free"), "code": fixturechange.Lit("sso"),
+				"quota": fixturechange.Lit("1")}},
+	}}
+	if _, err := applyReporting(t, db, set); err != nil {
+		t.Fatal(err)
+	}
+	if got := scan[string](t, db, "SELECT p.name FROM features f JOIN plans p ON p.id = f.plan_id WHERE f.code = 'sso'"); got != "free" {
+		t.Fatalf("the feature of free points at %s", got)
+	}
+}
+
+// A set that deletes a plan and the feature pointing at it, run a second time,
+// finds the feature's key referring to the plan it deleted the first time:
+// that is the set's own work, already done, and not a row it cannot find. The
+// same holds for Revert run twice, whose deletes are the set's inserts.
+func TestASecondRunOfADeleteKeyedOnARowTheSetRemovesIsUnchanged(t *testing.T) {
+	db := testDB(t)
+	seed(t, db)
+	ctx := context.Background()
+	strict := fixturechange.Policy{ChangedRow: fixturechange.ModeError}
+	set := fixturechange.Set{Name: "gone", Tables: tables(), Policy: strict, Changes: []fixturechange.Change{
+		{Model: "Feature", Kind: fixturechange.Delete,
+			Key: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "free"), "code": fixturechange.Lit("api")},
+			Old: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "free"), "code": fixturechange.Lit("api"),
+				"quota": fixturechange.Lit("100")}},
+		{Model: "Plan", Kind: fixturechange.Delete, Key: fixturechange.Values{"name": fixturechange.Lit("free")},
+			Old: fixturechange.Values{"name": fixturechange.Lit("free"), "price_cents": fixturechange.Lit("0"),
+				"rating": fixturechange.Lit("0"), "public": fixturechange.Lit("true"), "note": fixturechange.Null()}},
+	}}
+	statuses := func(outcomes []fixtureapply.Outcome) string {
+		var out []string
+		for _, o := range outcomes {
+			out = append(out, string(o.Status))
+		}
+		return strings.Join(out, ",")
+	}
+	for _, want := range []string{"applied,applied", "unchanged,unchanged"} {
+		outcomes, err := applyReporting(t, db, set)
+		if err != nil || statuses(outcomes) != want {
+			t.Fatalf("want %s: %v %+v", want, err, outcomes)
+		}
+	}
+	insert := changeSet()
+	insert.Changes, insert.Policy = insert.Changes[:2], strict // pro, and its feature sso
+	if err := fixtureapply.Apply(ctx, db, insert, quiet()); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"applied,applied", "unchanged,unchanged"} {
+		var outcomes []fixtureapply.Outcome
+		err := fixtureapply.Revert(ctx, db, insert, quiet(),
+			fixtureapply.WithReport(func(o fixtureapply.Outcome) { outcomes = append(outcomes, o) }))
+		if err != nil || statuses(outcomes) != want {
+			t.Fatalf("Revert, want %s: %v %+v", want, err, outcomes)
+		}
+	}
+}
+
+// Global tags and each tenant's own share one table, and the model's where says
+// which rows are master data. Every statement, lookup and reference has to stay
+// inside it: before, the relabel of a global tag relabelled a tenant's tag too,
+// the insert of a global tag was skipped because a tenant had one by that code,
+// and a new rule was bound to a tenant's private tag.
+func TestAModelsWhereLimitsEveryStatement(t *testing.T) {
+	db := connect(t)
+	ctx := context.Background()
+	run(t, db,
+		"DROP TABLE IF EXISTS scoped_tag_rules", "DROP TABLE IF EXISTS scoped_tags",
+		`CREATE TABLE scoped_tags (id bigserial PRIMARY KEY, tenant_id bigint, code text NOT NULL, label text NOT NULL,
+			flags jsonb NOT NULL DEFAULT '{}')`,
+		"CREATE UNIQUE INDEX ON scoped_tags (code) WHERE tenant_id IS NULL",
+		`CREATE TABLE scoped_tag_rules (id bigserial PRIMARY KEY, name text NOT NULL UNIQUE,
+			tag_id bigint NOT NULL REFERENCES scoped_tags (id))`,
+		"INSERT INTO scoped_tags (id, code, label) VALUES (1, 'urgent', 'Urgent'), (2, 'later', 'Later'), (3, 'done', 'Done')",
+		"INSERT INTO scoped_tag_rules (id, name, tag_id) VALUES (1, 'escalate', 1)",
+		// Tenant 1's own tags, with the codes and labels of global ones.
+		`INSERT INTO scoped_tags (id, tenant_id, code, label) VALUES (5, 1, 'urgent', 'Urgent'), (6, 1, 'blocked', 'Blocked'),
+			(7, 1, 'later', 'Later')`,
+		`INSERT INTO scoped_tags (id, code, label, flags) VALUES (8, 'secret', 'Secret', '{"private": true}')`)
+	dump := func() string {
+		return scan[string](t, db, `SELECT string_agg(concat_ws(' ', id, tenant_id, code, label), ', ' ORDER BY id) FROM scoped_tags`) +
+			" | " + scan[string](t, db, `SELECT string_agg(concat_ws(' ', id, name, tag_id), ', ' ORDER BY id) FROM scoped_tag_rules`)
+	}
+	before := dump()
+	tag := func(code string) fixturechange.Values { return fixturechange.Values{"code": fixturechange.Lit(code)} }
+	set := fixturechange.Set{
+		Name:           "20260921120000_fixture_tags",
+		SeedGuardTable: "scoped_tags",
+		Tables: fixturechange.Tables{
+			// A ? that bun must not take for a placeholder, and a comment that
+			// must not swallow the rest of the statement.
+			"Tag":     {Name: "scoped_tags", ID: "id", Key: "code", Serial: true, Where: "tenant_id IS NULL AND NOT flags ? 'private' -- global rows"},
+			"TagRule": {Name: "scoped_tag_rules", ID: "id", Key: "name", Serial: true},
+		},
+		Changes: []fixturechange.Change{
+			{Model: "Tag", Kind: fixturechange.Update, Key: tag("urgent"),
+				Old: fixturechange.Values{"label": fixturechange.Lit("Urgent")},
+				New: fixturechange.Values{"label": fixturechange.Lit("URGENT")}},
+			{Model: "Tag", Kind: fixturechange.Insert, Key: tag("blocked"),
+				New: fixturechange.Values{"id": fixturechange.Lit("100"), "code": fixturechange.Lit("blocked"),
+					"label": fixturechange.Lit("Blocked globally")}},
+			{Model: "TagRule", Kind: fixturechange.Insert, Key: fixturechange.Values{"name": fixturechange.Lit("page")},
+				New: fixturechange.Values{"id": fixturechange.Lit("3"), "name": fixturechange.Lit("page"),
+					"tag_id": fixturechange.RefTo("Tag", "urgent")}},
+			{Model: "Tag", Kind: fixturechange.Delete, Key: tag("later"),
+				Old: fixturechange.Values{"id": fixturechange.Lit("2"), "code": fixturechange.Lit("later"),
+					"label": fixturechange.Lit("Later")}},
+		},
+	}
+	outcomes, err := applyReporting(t, db, set)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	for _, o := range outcomes {
+		if o.Index >= 0 && (o.Status != fixtureapply.StatusApplied || o.Rows != 1) {
+			t.Fatalf("every change applies to exactly the global row: %+v", o)
+		}
+	}
+	const after = "1 urgent URGENT, 3 done Done, 5 1 urgent Urgent, 6 1 blocked Blocked, 7 1 later Later, " +
+		"8 secret Secret, 100 blocked Blocked globally | 1 escalate 1, 3 page 1"
+	if got := dump(); got != after {
+		t.Fatalf("after Apply\n got %s\nwant %s", got, after)
+	}
+	outcomes, err = applyReporting(t, db, set)
+	if err != nil {
+		t.Fatalf("second Apply: %v", err)
+	}
+	for _, o := range outcomes {
+		if o.Index >= 0 && o.Status != fixtureapply.StatusUnchanged {
+			t.Fatalf("a second run finds every change made: %+v", o)
+		}
+	}
+	if err := fixtureapply.Revert(ctx, db, set, quiet()); err != nil {
+		t.Fatalf("Revert: %v", err)
+	}
+	if got := dump(); got != before {
+		t.Fatalf("after Revert\n got %s\nwant %s", got, before)
+	}
+
+	// A row the change writes has to be master data afterwards, or nothing
+	// would find it again.
+	set.Changes = []fixturechange.Change{{Model: "Tag", Kind: fixturechange.Insert, Key: tag("mine"),
+		New: fixturechange.Values{"code": fixturechange.Lit("mine"), "label": fixturechange.Lit("Mine"),
+			"tenant_id": fixturechange.Lit("1")}}}
+	if _, err := applyReporting(t, db, set); err == nil || !strings.Contains(err.Error(), "does not hold the model's where") {
+		t.Fatalf("want the row outside the where refused, got %v", err)
+	}
+	if got := dump(); got != before {
+		t.Fatalf("nothing may change\n got %s\nwant %s", got, before)
+	}
+}
+
+// Something other than the data can stop a guarded statement: a row-level
+// security policy, a BEFORE trigger that returns NULL, a rule. Each made the
+// statement change nothing, which was read as a row somebody had changed: the
+// change was skipped and the migration recorded as applied. A policy that hid
+// the seed guard table's rows made the whole set a recorded no-op. Each is an
+// error now.
+func TestAStatementSomethingElseStoppedFails(t *testing.T) {
+	db := testDB(t)
+	seed(t, db)
+	ctx := context.Background()
+	update := changeSet()
+	update.Changes = update.Changes[2:3] // team's price, rating, flag and note
+	insert := changeSet()
+	insert.Changes = insert.Changes[:1] // pro
+
+	t.Run("a trigger", func(t *testing.T) {
+		run(t, db, `CREATE OR REPLACE FUNCTION bfm_refuse() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NULL; END$$`,
+			"CREATE TRIGGER bfm_refuse BEFORE UPDATE OR INSERT ON plans FOR EACH ROW EXECUTE FUNCTION bfm_refuse()")
+		defer run(t, db, "DROP TRIGGER bfm_refuse ON plans")
+		for _, set := range []fixturechange.Set{update, insert} {
+			outcomes, err := applyReporting(t, db, set)
+			if err == nil || !strings.Contains(err.Error(), "a BEFORE trigger that returned NULL, a rule, or a row-level security policy stopped it") {
+				t.Fatalf("want the stopped statement named, got %v", err)
+			}
+			if len(outcomes) != 1 || outcomes[0].Status != fixtureapply.StatusFailed {
+				t.Fatalf("outcomes %+v", outcomes)
+			}
+		}
+	})
+
+	// The policies apply to a role that does not own the table, as an
+	// application role often does not.
+	run(t, db,
+		`DO $$BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'bfm_rls') THEN CREATE ROLE bfm_rls; END IF; END$$`,
+		"GRANT USAGE ON SCHEMA public TO bfm_rls",
+		"GRANT SELECT, INSERT, UPDATE, DELETE ON plans, features TO bfm_rls",
+		"GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO bfm_rls",
+		"ALTER TABLE plans ENABLE ROW LEVEL SECURITY",
+		"CREATE POLICY plans_read ON plans FOR SELECT USING (true)",
+		"CREATE POLICY plans_write ON plans FOR UPDATE USING (name <> 'team')",
+		"CREATE POLICY plans_add ON plans FOR INSERT WITH CHECK (true)")
+	asRole := func(set fixturechange.Set) error {
+		t.Helper()
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback()
+		if _, err := tx.ExecContext(ctx, "SET LOCAL ROLE bfm_rls"); err != nil {
+			t.Fatal(err)
+		}
+		return fixtureapply.Apply(ctx, tx, set, quiet())
+	}
+	t.Run("an update policy", func(t *testing.T) {
+		err := asRole(update)
+		if err == nil || !strings.Contains(err.Error(), "a row-level security policy applies to it") {
+			t.Fatalf("want the policy named, got %v", err)
+		}
+	})
+	t.Run("a policy that hides the seed guard table", func(t *testing.T) {
+		run(t, db, "DROP POLICY plans_read ON plans", "CREATE POLICY plans_read ON plans FOR SELECT USING (false)")
+		err := asRole(update)
+		if err == nil || !strings.Contains(err.Error(), "a row-level security policy applies to it") {
+			t.Fatalf("want the policy named rather than an unseeded database, got %v", err)
+		}
+	})
+	if got := scan[int64](t, db, "SELECT price_cents FROM plans WHERE name = 'team'"); got != 2000 {
+		t.Fatalf("nothing may change, price_cents = %d", got)
+	}
+}
+
+// A char(n) column compared through "character", which is char(1): 'EUR'
+// became 'E'. An update of a char(5) column never matched its guard and was
+// skipped as a changed row, a char(3)[] value was written as {"E  ","E  "},
+// every change keyed on a char(3) code failed as a missing row, and an insert
+// of a row already there failed as an id held by another row.
+func TestACharColumnKeepsItsLength(t *testing.T) {
+	db := connect(t)
+	run(t, db, "DROP TABLE IF EXISTS char_currencies",
+		"CREATE TABLE char_currencies (id bigserial PRIMARY KEY, code char(3) NOT NULL UNIQUE, label char(5) NOT NULL, aliases char(3)[])",
+		"INSERT INTO char_currencies (id, code, label, aliases) VALUES (1, 'EUR', 'Euro', '{EUR,EWR}'), (2, 'USD', 'Dolr', NULL)")
+	code := func(c string) fixturechange.Values { return fixturechange.Values{"code": fixturechange.Lit(c)} }
+	set := fixturechange.Set{
+		Name:   "20260921120000_fixture_chars",
+		Tables: fixturechange.Tables{"Currency": {Name: "char_currencies", ID: "id", Key: "code", Serial: true}},
+		Changes: []fixturechange.Change{
+			{Model: "Currency", Kind: fixturechange.Update, Key: code("EUR"),
+				Old: fixturechange.Values{"label": fixturechange.Lit("Euro"), "aliases": fixturechange.Lit(`["EUR","EWR"]`)},
+				New: fixturechange.Values{"label": fixturechange.Lit("Euros"), "aliases": fixturechange.Lit(`["EUR","EWR","ECU"]`)}},
+			{Model: "Currency", Kind: fixturechange.Insert, Key: code("GBP"),
+				New: fixturechange.Values{"id": fixturechange.Lit("3"), "code": fixturechange.Lit("GBP"),
+					"label": fixturechange.Lit("Pound"), "aliases": fixturechange.Lit(`["GBP","STG"]`)}},
+			{Model: "Currency", Kind: fixturechange.Delete, Key: code("USD"),
+				Old: fixturechange.Values{"id": fixturechange.Lit("2"), "code": fixturechange.Lit("USD"),
+					"label": fixturechange.Lit("Dolr"), "aliases": fixturechange.Null()}},
+		},
+	}
+	dump := func() string {
+		return scan[string](t, db, `SELECT string_agg(concat_ws(' ', id, code, label, aliases::text), ', ' ORDER BY id) FROM char_currencies`)
+	}
+	before := dump()
+	for _, want := range []fixtureapply.Status{fixtureapply.StatusApplied, fixtureapply.StatusUnchanged} {
+		outcomes, err := applyReporting(t, db, set)
+		if err != nil {
+			t.Fatalf("Apply: %v", err)
+		}
+		for _, o := range outcomes {
+			if o.Index >= 0 && o.Status != want {
+				t.Fatalf("want every change %s: %+v", want, o)
+			}
+		}
+		if got := dump(); got != "1 EUR Euros {EUR,EWR,ECU}, 3 GBP Pound {GBP,STG}" {
+			t.Fatalf("after Apply: %s", got)
+		}
+	}
+	if err := fixtureapply.Revert(context.Background(), db, set, quiet()); err != nil {
+		t.Fatalf("Revert: %v", err)
+	}
+	if got := dump(); got != before {
+		t.Fatalf("after Revert: %s, want %s", got, before)
+	}
+}
+
+// box and circle have an = that compares areas. A hand edit to another box of
+// the same area passed the guard and was overwritten; it is a changed row.
+func TestAGeometricValueIsComparedAsItself(t *testing.T) {
+	db := connect(t)
+	run(t, db, "DROP TABLE IF EXISTS zones",
+		"CREATE TABLE zones (id bigserial PRIMARY KEY, name text NOT NULL UNIQUE, area box, c circle)",
+		"INSERT INTO zones (name, area, c) VALUES ('zone', '(1,1),(0,0)', '<(0,0),1>')")
+	set := fixturechange.Set{
+		Name:   "20260921120000_fixture_zones",
+		Tables: fixturechange.Tables{"Zone": {Name: "zones", ID: "id", Key: "name"}},
+		Changes: []fixturechange.Change{{Model: "Zone", Kind: fixturechange.Update,
+			Key: fixturechange.Values{"name": fixturechange.Lit("zone")},
+			Old: fixturechange.Values{"area": fixturechange.Lit("(1,1),(0,0)"), "c": fixturechange.Lit("<(0,0),1>")},
+			New: fixturechange.Values{"area": fixturechange.Lit("(3,3),(0,0)"), "c": fixturechange.Lit("<(5,5),2>")}}},
+	}
+	// A hand edit: another box and another circle, of the same areas.
+	run(t, db, "UPDATE zones SET area = '(4,0.25),(0,0)', c = '<(9,9),1>'")
+	outcomes, err := applyReporting(t, db, set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outcomes) != 1 || outcomes[0].Problem != fixtureapply.ProblemChangedRow {
+		t.Fatalf("the edit is a changed row: %+v", outcomes)
+	}
+	if got := scan[string](t, db, "SELECT area::text || ' ' || c::text FROM zones"); got != "(4,0.25),(0,0) <(9,9),1>" {
+		t.Fatalf("the hand edit has to survive, got %s", got)
+	}
+	// Without the edit the change is made, and a second run finds it made.
+	run(t, db, "UPDATE zones SET area = '(1,1),(0,0)', c = '<(0,0),1>'")
+	for _, want := range []fixtureapply.Status{fixtureapply.StatusApplied, fixtureapply.StatusUnchanged} {
+		outcomes, err := applyReporting(t, db, set)
+		if err != nil || len(outcomes) != 1 || outcomes[0].Status != want {
+			t.Fatalf("want %s: %v %+v", want, err, outcomes)
+		}
+	}
+}
+
+// Revert compares each row with what the migration writes, and nothing records
+// whether the migration wrote it on this database. Where the row does not hold
+// it, the change is not reverted, and the outcome says so in those terms
+// rather than as a row the change was generated against.
+func TestARevertSaysWhatItLeftAlone(t *testing.T) {
+	db := testDB(t)
+	seed(t, db)
+	ctx := context.Background()
+	set := changeSet()
+	if err := fixtureapply.Apply(ctx, db, set, quiet()); err != nil {
+		t.Fatal(err)
+	}
+	run(t, db, "UPDATE plans SET price_cents = 3333 WHERE name = 'team'")
+	var outcomes []fixtureapply.Outcome
+	if err := fixtureapply.Revert(ctx, db, set, quiet(),
+		fixtureapply.WithReport(func(o fixtureapply.Outcome) { outcomes = append(outcomes, o) })); err != nil {
+		t.Fatalf("Revert: %v", err)
+	}
+	var team fixtureapply.Outcome
+	for _, o := range outcomes {
+		if o.Index == 2 {
+			team = o
+		}
+	}
+	if team.Status != fixtureapply.StatusSkipped ||
+		!strings.Contains(team.Message, "does not hold what the migration writes, so this change was not reverted") {
+		t.Fatalf("the revert has to say why it left the row alone: %+v", team)
+	}
+	if got := scan[int64](t, db, "SELECT price_cents FROM plans WHERE name = 'team'"); got != 3333 {
+		t.Fatalf("price_cents = %d", got)
+	}
+}
+
+// The application inserts into a table the migration writes explicit ids into,
+// while the migration runs. The sequence was moved past those ids only once
+// the whole set was done, so the application drew one of them meanwhile, and
+// one of the two inserts failed on the primary key.
+func TestTheSequenceMovesBeforeAnExplicitIDIsWritten(t *testing.T) {
+	db := testDB(t)
+	seed(t, db)
+	ctx := context.Background()
+	set := changeSet()
+	// pro, with id 3 while the sequence stands at 2, then team's update,
+	// which waits for a lock while the application inserts.
+	set.Changes = set.Changes[:3]
+	admin, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Rollback()
+	if _, err := admin.ExecContext(ctx, "SELECT 1 FROM plans WHERE name = 'team' FOR UPDATE"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	var outcomes []fixtureapply.Outcome
+	go func() {
+		done <- fixtureapply.Apply(ctx, db, set, quiet(),
+			fixtureapply.WithReport(func(o fixtureapply.Outcome) { outcomes = append(outcomes, o) }))
+	}()
+	for i := 0; scan[int64](t, db, "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' "+
+		"AND datname = current_database()") == 0; i++ {
+		if i == 100 {
+			t.Fatal("the change set never waited for the row")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	got := scan[int64](t, db, "SELECT nextval(pg_get_serial_sequence('plans', 'id'))")
+	if err := admin.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got <= 3 {
+		t.Fatalf("the application drew id %d while the migration was writing id 3", got)
+	}
+	// The move is reported as it was when it came after the set.
+	if last := outcomes[len(outcomes)-1]; last.Status != fixtureapply.StatusSequence || last.Model != "Plan" {
+		t.Fatalf("the sequence move has to be reported: %+v", outcomes)
+	}
+}
+
+// An id held by a row of a model nobody points at, which has no key column to
+// name it by, is named by the change's natural key.
+func TestAnIDHeldByAnotherRowIsNamedByItsKey(t *testing.T) {
+	db := testDB(t)
+	seed(t, db)
+	set := changeSet()
+	set.Tables["Feature"] = fixturechange.Table{Name: "features", ID: "id", Serial: true}
+	set.Changes = []fixturechange.Change{{Model: "Feature", Kind: fixturechange.Insert,
+		Key: fixturechange.Values{"plan_id": fixturechange.RefTo("Plan", "team"), "code": fixturechange.Lit("sso")},
+		New: fixturechange.Values{"id": fixturechange.Lit("1"), "plan_id": fixturechange.RefTo("Plan", "team"),
+			"code": fixturechange.Lit("sso")}}}
+	_, err := applyReporting(t, db, set)
+	if err == nil || !strings.Contains(err.Error(), "already held by the row id = 1 (code=api,plan_id=1)") {
+		t.Fatalf("the row holding the id has to be named, got %v", err)
+	}
+}
+
+// A caller that runs Apply itself, or reads the error bun's migrator returns,
+// can tell which change failed and why without reading the sentence.
+func TestAFailedChangeIsAChangeError(t *testing.T) {
+	db := testDB(t)
+	seed(t, db)
+	ctx := context.Background()
+	run(t, db, "DELETE FROM features", "DELETE FROM plans WHERE name = 'team'")
+	err := fixtureapply.Apply(ctx, db, changeSet(), quiet())
+	var ce *fixtureapply.ChangeError
+	if !errors.As(fmt.Errorf("migrate: up: %w", err), &ce) {
+		t.Fatalf("want a *ChangeError, got %T %v", err, err)
+	}
+	if ce.Outcome.Index != 2 || ce.Outcome.Problem != fixtureapply.ProblemMissingRow ||
+		ce.Outcome.Status != fixtureapply.StatusFailed || errors.Unwrap(ce) != nil {
+		t.Fatalf("outcome %+v, unwraps to %v", ce.Outcome, errors.Unwrap(ce))
+	}
+	if !strings.HasPrefix(err.Error(), "20260921120000_fixture_round_trip: Plan name=team update: no row of plans") {
+		t.Fatalf("the message reads as it did: %v", err)
+	}
+
+	// A statement that failed outright unwraps to its own error.
+	seed2 := testDB(t)
+	seed(t, seed2)
+	set := changeSet()
+	set.Changes = []fixturechange.Change{{Model: "Plan", Kind: fixturechange.Update,
+		Key: fixturechange.Values{"name": fixturechange.Lit("team")},
+		Old: fixturechange.Values{"price_cents": fixturechange.Lit("2000")},
+		New: fixturechange.Values{"price_cents": fixturechange.Lit("not a number")}}}
+	err = fixtureapply.Apply(ctx, seed2, set, quiet())
+	if !errors.As(err, &ce) || ce.Outcome.Problem != fixtureapply.ProblemError || errors.Unwrap(ce) == nil {
+		t.Fatalf("want a statement's error inside a *ChangeError, got %v", err)
+	}
+	var state interface{ SQLState() string }
+	var field interface{ Field(byte) string }
+	if !errors.As(err, &state) && !errors.As(err, &field) {
+		t.Fatalf("PostgreSQL's own error has to be reachable: %T", errors.Unwrap(ce))
+	}
+}
+
+// WithSlog writes the per-row report as records, with the outcome's fields as
+// attributes and a skipped change as a warning.
+func TestTheReportGoesToSlog(t *testing.T) {
+	db := testDB(t)
+	seed(t, db)
+	run(t, db, "UPDATE plans SET price_cents = 3333 WHERE name = 'team'")
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	if err := fixtureapply.Apply(context.Background(), db, changeSet(), fixtureapply.WithSlog(logger)); err != nil {
+		t.Fatal(err)
+	}
+	var records []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		var r map[string]any
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			t.Fatalf("%v: %s", err, line)
+		}
+		records = append(records, r)
+	}
+	if len(records) != 5 {
+		t.Fatalf("want one record per change and one for the sequence, got\n%s", buf.String())
+	}
+	if r := records[0]; r["level"] != "INFO" || r["msg"] != "fixture change applied" || r["model"] != "Plan" ||
+		r["key"] != "name=pro" || r["status"] != "applied" || r["rows"] != float64(1) || r["index"] != float64(0) {
+		t.Fatalf("applied: %v", r)
+	}
+	if r := records[2]; r["level"] != "WARN" || r["status"] != "skipped" || r["problem"] != "changed row" ||
+		!strings.Contains(r["message"].(string), "no longer holds the values") {
+		t.Fatalf("skipped: %v", r)
+	}
+	if r := records[4]; r["status"] != "sequence" || r["model"] != "Plan" {
+		t.Fatalf("sequence: %v", r)
+	}
+}
+
+// An array of two dimensions was unpacked one level deep at run time, and its
+// rows handed to the element type as text, which no integer reads. Each
+// array is now written whole, of whatever depth, and compared as itself.
+func TestAnArrayOfTwoDimensionsIsWrittenAndCompared(t *testing.T) {
+	db := connect(t)
+	run(t, db, "DROP TABLE IF EXISTS grids",
+		"CREATE TABLE grids (id bigserial PRIMARY KEY, name text NOT NULL UNIQUE, grid integer[], words text[], data bytea)",
+		`INSERT INTO grids (name, grid, words) VALUES ('g', '{{1,2},{3,4}}', '{"a b",NULL,"NULL"}')`)
+	key := fixturechange.Values{"name": fixturechange.Lit("g")}
+	set := fixturechange.Set{
+		Name:   "20260921120000_fixture_grids",
+		Tables: fixturechange.Tables{"Grid": {Name: "grids", ID: "id", Key: "name"}},
+		Changes: []fixturechange.Change{
+			{Model: "Grid", Kind: fixturechange.Update, Key: key,
+				Old: fixturechange.Values{"grid": fixturechange.Lit("[[1,2],[3,4]]"),
+					"words": fixturechange.Lit(`["a b",null,"NULL"]`)},
+				New: fixturechange.Values{"grid": fixturechange.Lit("[[5,6],[7,8]]"),
+					"words": fixturechange.Lit(`["{c}","say \"d\""]`)}},
+			{Model: "Grid", Kind: fixturechange.Insert, Key: fixturechange.Values{"name": fixturechange.Lit("h")},
+				New: fixturechange.Values{"name": fixturechange.Lit("h"), "grid": fixturechange.Lit("[[[1]],[[2]]]")}},
+		},
+	}
+	for _, want := range []fixtureapply.Status{fixtureapply.StatusApplied, fixtureapply.StatusUnchanged} {
+		outcomes, err := applyReporting(t, db, set)
+		if err != nil {
+			t.Fatalf("Apply: %v", err)
+		}
+		for _, o := range outcomes {
+			if o.Status != want {
+				t.Fatalf("want %s: %+v", want, o)
+			}
+		}
+	}
+	if got := scan[string](t, db, "SELECT grid::text || ' ' || words::text FROM grids WHERE name = 'g'"); got != `{{5,6},{7,8}} {"{c}","say \"d\""}` {
+		t.Fatalf("g: %s", got)
+	}
+	if got := scan[string](t, db, "SELECT grid::text FROM grids WHERE name = 'h'"); got != "{{{1}},{{2}}}" {
+		t.Fatalf("h: %s", got)
+	}
+
+	// A list for a bytea column is how a YAML sequence of numbers fills a
+	// []byte field; read as text the column would hold the list's characters.
+	set.Changes = []fixturechange.Change{{Model: "Grid", Kind: fixturechange.Update, Key: key,
+		Old: fixturechange.Values{"data": fixturechange.Null()},
+		New: fixturechange.Values{"data": fixturechange.Lit("[0, 255]")}}}
+	if _, err := applyReporting(t, db, set); err == nil || !strings.Contains(err.Error(), "is a bytea column") {
+		t.Fatalf("want the list refused, got %v", err)
+	}
+	// And rows of different lengths, which PostgreSQL cannot store.
+	set.Changes[0].New = fixturechange.Values{"grid": fixturechange.Lit("[[1,2],[3]]")}
+	set.Changes[0].Old = fixturechange.Values{"grid": fixturechange.Lit("[[5,6],[7,8]]")}
+	if _, err := applyReporting(t, db, set); err == nil || !strings.Contains(err.Error(), "same length") {
+		t.Fatalf("want the ragged array refused, got %v", err)
+	}
+	if got := scan[int64](t, db, "SELECT count(*) FROM grids WHERE data IS NOT NULL"); got != 0 {
+		t.Fatalf("nothing may be written, %d rows have data", got)
+	}
+}
+
+// A delete a model's deletes: cascade allows says which rows it reached, and
+// its revert says it does not bring them back. The rows were counted in full
+// before, and a table named with a ? broke the count: bun read the ? as a
+// placeholder.
+func TestACascadingDeleteSaysWhatItReached(t *testing.T) {
+	db := connect(t)
+	ctx := context.Background()
+	run(t, db, `DROP TABLE IF EXISTS cascade_subs, "cascade_notes?", cascade_plans`,
+		"CREATE TABLE cascade_plans (id bigserial PRIMARY KEY, name text NOT NULL UNIQUE)",
+		"CREATE TABLE cascade_subs (id bigserial PRIMARY KEY, plan_id bigint REFERENCES cascade_plans ON DELETE CASCADE)",
+		`CREATE TABLE "cascade_notes?" (id bigserial PRIMARY KEY, plan_id bigint REFERENCES cascade_plans ON DELETE SET NULL)`,
+		"INSERT INTO cascade_plans (id, name) VALUES (1, 'old')",
+		"INSERT INTO cascade_subs (plan_id) VALUES (1), (1)",
+		`INSERT INTO "cascade_notes?" (plan_id) VALUES (1)`)
+	set := fixturechange.Set{
+		Name:   "20260921120000_fixture_cascade",
+		Tables: fixturechange.Tables{"Plan": {Name: "cascade_plans", ID: "id", Key: "name"}},
+		Changes: []fixturechange.Change{{Model: "Plan", Kind: fixturechange.Delete,
+			Key: fixturechange.Values{"name": fixturechange.Lit("old")},
+			Old: fixturechange.Values{"id": fixturechange.Lit("1"), "name": fixturechange.Lit("old")}}},
+	}
+	outcomes, err := applyReporting(t, db, set)
+	if err == nil || len(outcomes) != 1 || outcomes[0].Problem != fixtureapply.ProblemReferenced ||
+		!strings.Contains(outcomes[0].Message, `1 row of "cascade_notes?" point at`) {
+		t.Fatalf("without deletes: cascade the delete is refused, naming the rows: %v %+v", err, outcomes)
+	}
+
+	set.Tables["Plan"] = fixturechange.Table{Name: "cascade_plans", ID: "id", Key: "name", Cascade: true}
+	outcomes, err = applyReporting(t, db, set)
+	if err != nil || len(outcomes) != 1 || outcomes[0].Status != fixtureapply.StatusApplied {
+		t.Fatalf("%v %+v", err, outcomes)
+	}
+	for _, want := range []string{"deleted 2 rows of cascade_subs with it", `set the reference of 1 row of "cascade_notes?" to NULL`,
+		"brings none of them back"} {
+		if !strings.Contains(outcomes[0].Message, want) {
+			t.Fatalf("the outcome has to say %q: %s", want, outcomes[0].Message)
+		}
+	}
+	var reverted []fixtureapply.Outcome
+	if err := fixtureapply.Revert(ctx, db, set, quiet(),
+		fixtureapply.WithReport(func(o fixtureapply.Outcome) { reverted = append(reverted, o) })); err != nil {
+		t.Fatal(err)
+	}
+	if len(reverted) != 1 || reverted[0].Status != fixtureapply.StatusApplied ||
+		!strings.Contains(reverted[0].Message, "are not restored") {
+		t.Fatalf("the revert has to say what it does not restore: %+v", reverted)
+	}
+	if got := scan[int64](t, db, "SELECT count(*) FROM cascade_subs"); got != 0 {
+		t.Fatalf("%d subscriptions", got)
+	}
+}
+
+// A rename of a code that a DEFERRABLE foreign key points at, followed in the
+// same set by the update of the rows pointing at it, holds once the set is
+// done and failed statement by statement. A set that leaves the key broken
+// fails at its end, inside its transaction, and bun's record is taken back.
+func TestDeferrableConstraintsAreCheckedWhenTheSetIsDone(t *testing.T) {
+	db := connect(t)
+	ctx := context.Background()
+	run(t, db, "DROP TABLE IF EXISTS deferred_prices, deferred_currencies",
+		"CREATE TABLE deferred_currencies (id bigserial PRIMARY KEY, code text NOT NULL UNIQUE)",
+		`CREATE TABLE deferred_prices (id bigserial PRIMARY KEY, sku text NOT NULL UNIQUE,
+			currency_code text NOT NULL REFERENCES deferred_currencies (code) DEFERRABLE INITIALLY IMMEDIATE)`,
+		"INSERT INTO deferred_currencies (id, code) VALUES (1, 'EUR')",
+		"INSERT INTO deferred_prices (sku, currency_code) VALUES ('a', 'EUR')")
+	rename := fixturechange.Change{Model: "Currency", Kind: fixturechange.Update, ID: "1",
+		Key: fixturechange.Values{"code": fixturechange.Lit("EUR")},
+		Old: fixturechange.Values{"code": fixturechange.Lit("EUR")},
+		New: fixturechange.Values{"code": fixturechange.Lit("EURO")}}
+	repoint := fixturechange.Change{Model: "Price", Kind: fixturechange.Update,
+		Key: fixturechange.Values{"sku": fixturechange.Lit("a")},
+		Old: fixturechange.Values{"currency_code": fixturechange.Lit("EUR")},
+		New: fixturechange.Values{"currency_code": fixturechange.Lit("EURO")}}
+	set := fixturechange.Set{
+		Name: "20260921120000_fixture_euro",
+		Tables: fixturechange.Tables{
+			"Currency": {Name: "deferred_currencies", ID: "id", Key: "code"},
+			"Price":    {Name: "deferred_prices", ID: "id", Key: "sku"},
+		},
+	}
+
+	// Alone, the rename leaves the price pointing at nothing.
+	run(t, db, "DROP TABLE IF EXISTS bun_migrations",
+		"CREATE TABLE bun_migrations (id bigserial PRIMARY KEY, name varchar, group_id bigint, "+
+			"migrated_at timestamptz NOT NULL DEFAULT current_timestamp)",
+		"INSERT INTO bun_migrations (name, group_id) VALUES ('20260921120000', 1)")
+	set.Changes = []fixturechange.Change{rename}
+	err := fixtureapply.Apply(ctx, db, set, quiet(), fixtureapply.WithMigrationName("20260921120000"))
+	if err == nil || !strings.Contains(err.Error(), "a constraint did not hold") ||
+		!errors.Is(err, fixtureapply.ErrRecordRemoved) {
+		t.Fatalf("want the broken key to fail the set and the record taken back, got %v", err)
+	}
+	if got := scan[string](t, db, "SELECT code FROM deferred_currencies"); got != "EUR" {
+		t.Fatalf("nothing may change, code %s", got)
+	}
+
+	set.Changes = []fixturechange.Change{rename, repoint}
+	if _, err := applyReporting(t, db, set); err != nil {
+		t.Fatalf("the set holds once it is done: %v", err)
+	}
+	if got := scan[string](t, db, "SELECT c.code FROM deferred_prices p JOIN deferred_currencies c ON c.code = p.currency_code"); got != "EURO" {
+		t.Fatalf("code %s", got)
 	}
 }

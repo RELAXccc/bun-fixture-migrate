@@ -10,17 +10,23 @@
 // reference is resolved to a real id before the statement runs, so a missing or
 // ambiguous target fails the migration instead of writing NULL.
 //
-// A guard that matches nothing is not success. bun's migrator marks a migration
-// applied the moment the function returns nil, so a statement that quietly
-// matched no row is a change that will never be attempted again: fix the
-// database, deploy once more, and the migration is already recorded. Every zero
-// row count is therefore diagnosed and, unless the change set's policy says
-// otherwise, turned into an error that rolls the transaction back.
+// A guard that matches nothing is not success. bun's migrator records a
+// migration as applied once its function returns nil, so a statement that
+// quietly matched no row is a change that will never be attempted again: fix
+// the database, deploy once more, and the migration is already recorded. Every
+// zero row count is therefore diagnosed and, unless the change set's policy
+// says otherwise, turned into an error that rolls the transaction back.
+//
+// Failing is only half of it. Unless the migrator was built
+// WithMarkAppliedOnSuccess(true), bun records the migration before running it
+// and keeps the record when it fails, so a failed change set would be recorded
+// as done all the same. Apply takes that record back; see Apply.
 //
 // Identifiers are never taken from user input at run time: table and column
 // names come from the generated file and must be plain SQL identifiers, which
-// Validate checks before any statement is built. Values are always bound
-// parameters.
+// Validate checks before any statement is built. Values never become part of
+// the SQL text this package writes: they are passed as arguments, which bun
+// quotes and escapes with the dialect's rules.
 package fixtureapply
 
 import (
@@ -28,193 +34,206 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
-	"regexp"
+	"log/slog"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/RELAXccc/bun-fixture-migrate/fixturechange"
+	"github.com/RELAXccc/bun-fixture-migrate/internal/pgerr"
 
 	"github.com/uptrace/bun"
 )
 
-// Option configures Apply and Revert.
-type Option func(*options)
-
-type options struct {
-	logf func(format string, args ...any)
-}
-
-// WithLogger replaces log.Printf as the destination of the per-row report.
-// Pass func(string, ...any) {} to silence it; warnings go here too, so silence
-// it only if something else is watching the migration.
-func WithLogger(logf func(format string, args ...any)) Option {
-	return func(o *options) { o.logf = logf }
-}
-
-func newOptions(opts []Option) options {
-	o := options{logf: log.Printf}
-	for _, fn := range opts {
-		fn(&o)
-	}
-	return o
-}
-
 // Apply runs a change set in one transaction.
+//
+// When it fails it returns an error, which rolls the transaction back and
+// fails the migration. Under bun's migrator that is not enough on its own:
+// unless the migrator was built WithMarkAppliedOnSuccess(true), bun inserts
+// the migration's record before calling it and leaves the record there when
+// it fails, and a recorded migration never runs again. Fix the database,
+// deploy once more, and nothing happens.
+//
+// So Apply, running under bun's migrator, first looks for that record: the
+// rows of the migrations table that carry this migration's name, were written
+// in the last minute, and are newer than every other migration's record, which
+// is what bun's default mode has just done -- one row, or one per replica that
+// started the migration at the same moment without bun's Lock. If the change
+// set then fails, those rows and no others are deleted. A migrator that records
+// on success has made no such row, and a record another process writes while
+// this one runs is not among the rows found before it ran, so neither is
+// touched. A replica's record deleted along with this one's, of a run that
+// succeeds, leaves the migration pending with its changes made; the next
+// migrate runs it again and finds every change made. So does RunMigration
+// re-running the newest migration, whose record bun updates in place. The
+// error says whether a record was deleted. The name is the one bun derived
+// from the migration's file name; see WithMigrationName.
+//
+// Two replicas starting together are best kept apart by bun's Lock, or by
+// building the migrator WithUpsert(true), which keeps one record per name;
+// either way only one record of a run is ever there to take back.
+//
+// A set with an AuditTable records, last in the transaction, what became of
+// each of its changes; see Set.AuditTable and Revert.
 func Apply(ctx context.Context, db bun.IDB, set fixturechange.Set, opts ...Option) error {
-	return db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		return run(ctx, tx, set, false, newOptions(opts))
+	o := newOptions(opts)
+	if o.migration == "" {
+		o.migration = migrationFromStack()
+	}
+	o.nested = inCallersTx(db)
+	rec := findRecord(ctx, db, set, o)
+	err := db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		return run(ctx, tx, set, false, o)
 	})
+	if err == nil {
+		return nil
+	}
+	return unrecord(ctx, db, set, o, rec, err)
 }
+
+// advisoryLock is the key of the transaction-scoped advisory lock every change
+// set takes: "bfm" and a version, in the high bytes, well away from the small
+// numbers applications pick for their own.
+const advisoryLock int64 = 0x62666d0001
 
 // Revert undoes a change set: the list backwards, every change inverted. An
 // insert becomes a delete guarded by the values it wrote, an update swaps old
 // and new, a delete becomes an insert of the row it removed.
+//
+// With an AuditTable, it reverts only the changes Apply made in this
+// database: those an 'up' row of the set after its last 'down' row records as
+// applied, which is the newest such row and, after a Revert that failed, the
+// ones before it. A change Apply found made already (unchanged) or passed
+// over (skipped) is left as it is, its outcome StatusUnchanged with a message
+// saying why, and so is every change of a run that found the database
+// unseeded. When the set's newest row is a 'down' row, the set is reverted
+// here already -- apply -revert by hand, then bun's Rollback, or two replicas
+// rolling back -- and nothing ran since: every change is left as it is,
+// StatusUnchanged. Without the table, or without a row of the set, it says so
+// in the log and reverts every change, as it does for a set without an
+// AuditTable.
+//
+// That is: it assumes Apply made every change of the set on this database. A
+// change Apply found already made -- the row already held the new values, or
+// was already there -- is reverted all the same: the update writes the old
+// value, which this database may never have held, and the insert's row is
+// deleted. A change Apply skipped is inverted too: a delete it skipped because
+// somebody had removed the row already puts the row back. Where a row does
+// not hold what the migration writes, the change is not reverted and its
+// outcome says so.
+//
+// It takes no record back. When it fails under a migrator that unrecords
+// before running (bun's default), the migration is left looking unapplied
+// while its changes are still in the database; that is harmless, because the
+// next migrate runs Apply again and every change it finds already made is
+// "unchanged".
 func Revert(ctx context.Context, db bun.IDB, set fixturechange.Set, opts ...Option) error {
+	o := newOptions(opts)
+	o.nested = inCallersTx(db)
 	return db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		return run(ctx, tx, set, true, newOptions(opts))
+		return run(ctx, tx, set, true, o)
 	})
 }
 
-var identPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_$]*$`)
-
-// quoteIdent double-quotes a plain, optionally schema-qualified identifier and
-// rejects anything else. Generated files only ever contain names that came from
-// the configuration, but this is the line between the file and the database and
-// it is cheap to hold.
-func quoteIdent(name string) (string, error) {
-	parts := strings.Split(name, ".")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if !identPattern.MatchString(p) {
-			return "", fmt.Errorf("%q is not a plain SQL identifier", name)
-		}
-		out = append(out, `"`+p+`"`)
-	}
-	return strings.Join(out, "."), nil
-}
-
-// Validate checks a change set without touching the database: known models,
-// plain identifiers, a kind that exists, and the shape each kind needs. Apply
-// and Revert call it first, and the generator's tests call it on their output.
-func Validate(set fixturechange.Set) error {
-	if err := set.Policy.Validate(); err != nil {
-		return err
-	}
-	// A model nobody points at needs no key column, so an empty one is only an
-	// error where a reference would use it.
-	referenced := map[string]bool{}
-	guardsID := map[string]bool{}
-	for _, c := range set.Changes {
-		if c.ID != "" {
-			guardsID[c.Model] = true
-		}
-		for _, values := range []fixturechange.Values{c.Key, c.Old, c.New} {
-			for _, v := range values {
-				if v.Ref != nil {
-					referenced[v.Ref.Model] = true
-				}
-			}
-		}
-	}
-	for _, model := range sortedModels(set.Tables) {
-		t := set.Tables[model]
-		parts := []struct{ what, name string }{{"table", t.Name}}
-		if t.Serial || referenced[model] || guardsID[model] {
-			parts = append(parts, struct{ what, name string }{"id column", t.ID})
-		}
-		if referenced[model] {
-			parts = append(parts, struct{ what, name string }{"key column", t.Key})
-		}
-		for _, part := range parts {
-			if part.name == "" {
-				return fmt.Errorf("model %q: no %s", model, part.what)
-			}
-			if _, err := quoteIdent(part.name); err != nil {
-				return fmt.Errorf("model %q: %s %w", model, part.what, err)
-			}
-		}
-	}
-	if set.SeedGuardTable != "" {
-		if _, err := quoteIdent(set.SeedGuardTable); err != nil {
-			return fmt.Errorf("seed guard table %w", err)
-		}
-	}
-	for i, c := range set.Changes {
-		if _, ok := set.Tables[c.Model]; !ok {
-			return fmt.Errorf("change %d: unknown model %q", i, c.Model)
-		}
-		if len(c.Key) == 0 {
-			return fmt.Errorf("change %d (%s): no key", i, c.Model)
-		}
-		for _, values := range []fixturechange.Values{c.Key, c.Old, c.New} {
-			for _, col := range sortedColumns(values) {
-				if _, err := quoteIdent(col); err != nil {
-					return fmt.Errorf("change %d (%s): %w", i, c.Model, err)
-				}
-				if ref := values[col].Ref; ref != nil {
-					if _, ok := set.Tables[ref.Model]; !ok {
-						return fmt.Errorf("change %d (%s.%s): reference to unknown model %q", i, c.Model, col, ref.Model)
-					}
-				}
-			}
-		}
-		switch c.Kind {
-		case fixturechange.Insert:
-			if len(c.New) == 0 {
-				return fmt.Errorf("change %d (%s): insert without columns", i, c.Model)
-			}
-			if len(c.Old) != 0 {
-				return fmt.Errorf("change %d (%s): insert with old values", i, c.Model)
-			}
-			if c.ID != "" {
-				return fmt.Errorf("change %d (%s): insert with an id guard", i, c.Model)
-			}
-		case fixturechange.Update:
-			if len(c.New) == 0 {
-				return fmt.Errorf("change %d (%s): update without columns", i, c.Model)
-			}
-			// Every written column must carry the value it is replacing,
-			// otherwise the statement would overwrite a row somebody else
-			// changed.
-			for _, col := range sortedColumns(c.New) {
-				if _, ok := c.Old[col]; !ok {
-					return fmt.Errorf("change %d (%s): update of %q without its old value", i, c.Model, col)
-				}
-			}
-		case fixturechange.Delete:
-			if len(c.New) != 0 {
-				return fmt.Errorf("change %d (%s): delete with new values", i, c.Model)
-			}
-			// A delete guards on the whole row it is removing. Without that it
-			// would take the natural key's word for it and remove a row
-			// somebody had since edited into something else.
-			if len(c.Old) == 0 {
-				return fmt.Errorf("change %d (%s): delete without the row it removes", i, c.Model)
-			}
-		default:
-			return fmt.Errorf("change %d (%s): unknown kind %q", i, c.Model, c.Kind)
-		}
+// WaitForChangeSets takes, in tx, the advisory lock every change set runs
+// under, waiting for one that runs now, in this process or another, to
+// finish. It holds the lock until tx ends, so no change set runs in between.
+// A program that reads the audit table and acts on what it says, as apply
+// -revert -record does, takes it first, so no run comes between the two.
+func WaitForChangeSets(ctx context.Context, tx bun.Tx) error {
+	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(?)", advisoryLock); err != nil {
+		return fmt.Errorf("wait for another change set to finish: %w", err)
 	}
 	return nil
+}
+
+// inCallersTx says whether db is a transaction somebody else began, which a
+// change set runs in a savepoint of.
+func inCallersTx(db bun.IDB) bool {
+	switch db.(type) {
+	case bun.Tx, *bun.Tx:
+		return true
+	}
+	return false
 }
 
 func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o options) error {
 	if err := Validate(set); err != nil {
 		return err
 	}
+	// What became of every change, for the audit table.
+	var outcomes []Outcome
+	if set.AuditTable != "" {
+		report := o.report
+		o.report = func(out Outcome) {
+			outcomes = append(outcomes, out)
+			report(out)
+		}
+	}
+	restore, lockTimeout, err := session(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if err := rowSecurity(ctx, tx, set, revert); err != nil {
+		return err
+	}
+	// Waiting for another replica's change set is not the wait lock_timeout
+	// is about, whether the set's or one the session has from the DSN. Inside
+	// a caller's transaction the caller's lock_timeout stays: the caller may
+	// hold locks already, as plan does, and set it to bound how long it keeps
+	// them while it waits.
+	if !o.nested {
+		if _, err := tx.ExecContext(ctx, "SELECT set_config('lock_timeout', '0', true)"); err != nil {
+			return fmt.Errorf("set lock_timeout to 0: %w", err)
+		}
+	}
+	// One change set at a time, whoever runs it: two replicas of an
+	// application migrating at the same start-up would otherwise both find a
+	// row missing and both insert it. The lock is the transaction's and ends
+	// with it; the second one then finds every change made.
+	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(?)", advisoryLock); err != nil {
+		return fmt.Errorf("wait for another change set to finish: %w", err)
+	}
+	if set.LockTimeout != "" {
+		lockTimeout = set.LockTimeout
+	}
+	if set.LockTimeout != "" || !o.nested {
+		if _, err := tx.ExecContext(ctx, "SELECT set_config('lock_timeout', ?, true)", lockTimeout); err != nil {
+			return fmt.Errorf("set lock_timeout to %s: %w", lockTimeout, err)
+		}
+	}
+	check, err := withDeferredConstraints(ctx, tx, set)
+	if err != nil {
+		return err
+	}
+	end := func() error { return finish(ctx, tx, set, revert, check, restore, outcomes) }
 	if set.SeedGuardTable != "" {
 		seeded, err := tableHasRows(ctx, tx, set.SeedGuardTable)
 		if err != nil {
-			return err
+			return privilege(err)
 		}
 		if !seeded {
-			o.logf("%s: %s is empty, nothing to do (the fixture loader seeds this database)", set.Name, set.SeedGuardTable)
-			return nil
+			msg := set.SeedGuardTable + " is empty, nothing to do (the fixture loader seeds this database)"
+			out := Outcome{Set: set.Name, Index: -1, Status: StatusUnseeded, Message: msg}
+			o.log(ctx, slog.LevelInfo, "fixture change set not run, the database is not seeded", out,
+				set.Name+": "+msg)
+			o.report(out)
+			return end()
+		}
+	}
+	// Revert undoes what the last Apply here did, which the audit table
+	// says, read under the advisory lock so no other run comes in between.
+	var base Applies
+	var reverted *AuditRecord
+	if revert && set.AuditTable != "" {
+		if base, reverted, err = revertBase(ctx, tx, set, o); err != nil {
+			return err
 		}
 	}
 
-	r := &runner{tx: tx, set: set, refs: map[string]string{}, resync: map[string]bool{}}
+	r := &runner{tx: tx, set: set, revert: revert, dryRun: o.dryRun, refs: map[string]string{},
+		resync: map[string]bool{}, advanced: map[string]bool{}, types: map[string]map[string]colType{},
+		sequences: map[string]string{}, seqSelect: map[string]bool{}}
 	order := make([]int, len(set.Changes))
 	for i := range order {
 		order[i] = i
@@ -230,24 +249,393 @@ func run(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool, o 
 			c = invert(c)
 		}
 		where := fmt.Sprintf("%s: %s %s %s", set.Name, c.Model, keyLabel(c.Key), c.Kind)
+		out := Outcome{Set: set.Name, Index: i, Model: c.Model, Kind: c.Kind, Key: keyLabel(c.Key)}
+		if reverted != nil {
+			out.Status, out.Message = StatusUnchanged, fmt.Sprintf("not reverted: already reverted here, audit "+
+				"row %d, and no Apply ran since", reverted.ID)
+			o.log(ctx, slog.LevelInfo, "fixture change not reverted, the change set is reverted here already", out,
+				where+": "+out.Message)
+			o.report(out)
+			continue
+		}
+		if base != nil {
+			if made, done, row := base.Made(i, set.Changes[i]); !made {
+				out.Status, out.Message = StatusUnchanged, notMade(base, done, row)
+				o.log(ctx, slog.LevelInfo, "fixture change not reverted, the migration did not make it here", out,
+					where+": "+out.Message)
+				o.report(out)
+				continue
+			}
+		}
 		res, err := r.exec(ctx, c)
 		if err != nil {
-			return fmt.Errorf("%s: %w", where, err)
+			err = privilege(err)
+			out.Status, out.Problem, out.Message = StatusFailed, ProblemError, err.Error()
+			if pgerr.State(err) == pgerr.LockNotAvailable && set.LockTimeout != "" {
+				err = fmt.Errorf("another session held a lock on a row of %s for longer than the lock timeout "+
+					"of %s, so nothing was changed; the change set runs again on the next deploy: %w",
+					set.Tables[c.Model].Name, set.LockTimeout, err)
+				out.Problem, out.Message = ProblemLockTimeout, err.Error()
+			}
+			o.report(out)
+			return &ChangeError{Outcome: out, err: err}
 		}
+		out.Rows, out.Message = res.rows, res.message
 		if res.problem == "" {
-			o.logf("%s: applied (%s)", where, rowCount(res.rows))
-			continue
+			out.Action = res.actionOf(c.Kind)
 		}
-		if res.problem == problemBenign {
-			o.logf("%s: %s", where, res.message)
-			continue
+		switch {
+		case res.problem == "":
+			out.Status = StatusApplied
+			// A message says what else the change did, which is worth a
+			// warning, unless it only says how: a restored row.
+			level, text := slog.LevelInfo, fmt.Sprintf("%s: applied (%s)", where, rowsDone(res.rows, out.Action))
+			if res.message != "" {
+				text += ". " + res.message
+				if !res.info {
+					level = slog.LevelWarn
+				}
+			}
+			o.log(ctx, level, "fixture change applied", out, text)
+		case res.problem == problemBenign:
+			out.Status = StatusUnchanged
+			o.log(ctx, slog.LevelInfo, "fixture change already made", out, where+": "+res.message)
+		case modeFor(set.PolicyFor(c.Model), res.problem) == fixturechange.ModeError:
+			out.Status, out.Problem = StatusFailed, res.problem.exported()
+			o.report(out)
+			return &ChangeError{Outcome: out}
+		default:
+			out.Status, out.Problem = StatusSkipped, res.problem.exported()
+			o.log(ctx, slog.LevelWarn, "fixture change skipped", out, where+": SKIPPED. "+res.message)
 		}
-		if modeFor(set.Policy, res.problem) == fixturechange.ModeError {
-			return fmt.Errorf("%s: %s", where, res.message)
-		}
-		o.logf("%s: SKIPPED. %s", where, res.message)
+		o.report(out)
 	}
-	return r.syncSequences(ctx)
+	if err := r.syncSequences(ctx, o); err != nil {
+		return err
+	}
+	return end()
+}
+
+// finish ends a run that succeeded: it checks the deferred constraints, writes
+// the run's row into the set's audit table, if it has one, and puts back the
+// session's settings. A run that fails before this point writes no row; one
+// that fails here rolls back.
+//
+// The row is written while the set's lock_timeout is in force: put back, the
+// session's is often 0, and a lock on the audit table -- an ALTER TABLE, a
+// VACUUM FULL -- would hold the migration, and the rows it has locked, for as
+// long as it lasts.
+func finish(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool,
+	check, restore func(context.Context) error, outcomes []Outcome) error {
+
+	if err := check(ctx); err != nil {
+		return err
+	}
+	if set.AuditTable != "" {
+		if err := writeAudit(ctx, tx, set, revert, outcomes); err != nil {
+			return err
+		}
+	}
+	return restore(ctx)
+}
+
+// revertBase is the audit rows of the runs of Apply a Revert undoes, or the
+// row of the Revert that undid them already, and says in the log what Revert
+// does with them, or without them.
+func revertBase(ctx context.Context, tx bun.IDB, set fixturechange.Set, o options) (Applies, *AuditRecord, error) {
+	base, reverted, err := ApplyRecords(ctx, tx, set)
+	if pgerr.State(err) == pgerr.LockNotAvailable {
+		return nil, nil, auditLocked(set, "reading what to revert from", err)
+	}
+	if pgerr.State(err) == pgerr.InsufficientPrivilege {
+		return nil, nil, fmt.Errorf("%s: the role running the migration may not read the audit table %s, which says "+
+			"what to revert, so nothing was changed: grant it SELECT and INSERT on the table: %w", set.Name,
+			set.AuditTable, err)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	out := Outcome{Set: set.Name, Index: -1}
+	switch {
+	case reverted != nil:
+		// Reverting again would invert the changes the Apply before that
+		// Revert found made or skipped, which the first Revert left alone:
+		// an admin's value overwritten by an old one this database never
+		// held.
+		out.Message = fmt.Sprintf("the change set is reverted here already: the newest row of %s for it, row %d, is "+
+			"the Revert of %s, and no Apply ran since, so nothing is reverted", set.AuditTable, reverted.ID,
+			reverted.AppliedAt.UTC().Format(time.RFC3339))
+		o.log(ctx, slog.LevelWarn, "the change set is reverted here already, nothing is reverted", out,
+			set.Name+": "+out.Message)
+		return nil, reverted, nil
+	case len(base) == 0:
+		out.Message = fmt.Sprintf("%s holds no row of this change set: it never ran here with the audit table, so "+
+			"every change is reverted, as if the migration had made them all in this database", set.AuditTable)
+		o.log(ctx, slog.LevelWarn, "no audit row of the change set, every change is reverted", out,
+			set.Name+": "+out.Message)
+		return nil, nil, nil
+	case base.ran() == nil:
+		out.Message = fmt.Sprintf("the run here was unseeded (row %d of %s): the database was not seeded yet, so "+
+			"nothing was changed, and nothing is reverted", base[0].ID, set.AuditTable)
+		o.log(ctx, slog.LevelInfo, "the change set ran here unseeded, nothing is reverted", out, set.Name+": "+out.Message)
+		return base, nil, nil
+	}
+	made := 0
+	for i, c := range set.Changes {
+		if ok, _, _ := base.Made(i, c); ok {
+			made++
+		}
+	}
+	out.Message = fmt.Sprintf("reverts the %s that the Apply of %s (row %d of %s) and any before it since the last "+
+		"Revert made in this database; the %s they found made or skipped %s left alone", plural(made, "change"),
+		base[0].AppliedAt.UTC().Format(time.RFC3339), base[0].ID, set.AuditTable,
+		plural(len(set.Changes)-made, "other change"), isAre(len(set.Changes)-made))
+	o.log(ctx, slog.LevelInfo, "the change set is reverted as its audit rows say", out, set.Name+": "+out.Message)
+	if base[0].SetSHA256 != SetSHA256(set) {
+		out.Message = fmt.Sprintf("the change set was edited after it ran here: it is not the one row %d of %s "+
+			"recorded, so each change is matched to what that run did by its model, key and kind, and one the run "+
+			"did not have is not reverted", base[0].ID, set.AuditTable)
+		o.log(ctx, slog.LevelWarn, "the change set was edited after it ran here", out, set.Name+": "+out.Message)
+	}
+	return base, nil, nil
+}
+
+// notMade says why Revert leaves a change alone: no run of Apply in this
+// database made it.
+func notMade(base Applies, done AuditOutcome, row *AuditRecord) string {
+	if row == nil {
+		ran := base.ran()
+		if ran == nil {
+			return fmt.Sprintf("not reverted: the run here was unseeded (audit row %d): nothing was changed, so "+
+				"nothing is reverted", base[0].ID)
+		}
+		return fmt.Sprintf("not reverted: the change set did not hold this change when it ran here, the Apply of %s "+
+			"(row %d)", ran.AppliedAt.UTC().Format(time.RFC3339), ran.ID)
+	}
+	when := fmt.Sprintf("the Apply of %s (row %d)", row.AppliedAt.UTC().Format(time.RFC3339), row.ID)
+	what := string(done.Status)
+	if done.Problem != "" {
+		what += " [" + string(done.Problem) + "]"
+	}
+	return fmt.Sprintf("not reverted: the migration did not make it in this database, where %s found it %s, so the "+
+		"row is left as it is", when, what)
+}
+
+func plural(n int, word string) string {
+	if n == 1 {
+		return "1 " + word
+	}
+	return fmt.Sprintf("%d %ss", n, word)
+}
+
+func isAre(n int) string {
+	if n == 1 {
+		return "is"
+	}
+	return "are"
+}
+
+// session makes a literal mean in the migration what it meant to dbfixture.
+// yaml.v3 reads a timestamp without a zone as UTC, and bun writes the
+// time.Time it becomes with an offset, so "2026-01-01 10:00:00" in a fixture
+// file is 10:00 UTC in the seeded database whatever the server's TimeZone. A
+// migration binding the same text has to read it the same way, and a date such
+// as 2026-01-02 has to be year-month-day. IntervalStyle is postgres, as when
+// the generator read the values: it decides how an interval such as
+// '-1 2:03:04' is read, and how one is spelled where intervals compare through
+// their text (see looseEquality). The settings are local to the transaction;
+// restore puts back what a caller's own transaction had, and a rollback does
+// that by itself. restore also puts back lock_timeout, which run changes, and
+// lockTimeout is the session's.
+func session(ctx context.Context, tx bun.IDB) (restore func(context.Context) error, lockTimeout string, err error) {
+	var tz, ds, is string
+	if err := tx.QueryRowContext(ctx, "SELECT current_setting('TimeZone'), current_setting('DateStyle'), "+
+		"current_setting('IntervalStyle'), current_setting('lock_timeout')").
+		Scan(&tz, &ds, &is, &lockTimeout); err != nil {
+		return nil, "", fmt.Errorf("read the session's settings: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "SELECT set_config('TimeZone', 'UTC', true), "+
+		"set_config('DateStyle', 'ISO, YMD', true), set_config('IntervalStyle', 'postgres', true)"); err != nil {
+		return nil, "", fmt.Errorf("fix the session's settings: %w", err)
+	}
+	return func(ctx context.Context) error {
+		if _, err := tx.ExecContext(ctx, "SELECT set_config('TimeZone', ?, true), set_config('DateStyle', ?, true), "+
+			"set_config('IntervalStyle', ?, true), set_config('lock_timeout', ?, true)", tz, ds, is, lockTimeout); err != nil {
+			return fmt.Errorf("restore the session's settings: %w", err)
+		}
+		return nil
+	}, lockTimeout, nil
+}
+
+// rowSecurity refuses a change set that a row-level security policy would
+// reach, before any of it runs. Filtered by a policy, an update of a row the
+// policy hides changes nothing, which reads as a row somebody edited and is
+// skipped; a seed guard table whose rows it hides makes the whole set a no-op
+// that bun records as applied; a child table whose rows it hides lets a delete
+// cascade into rows nobody counted.
+//
+// It looks at the tables the set reads and writes, the seed guard table, the
+// tables whose foreign keys point at a table the set deletes from, and the
+// audit table once it exists: a policy hiding other roles' rows there would
+// have Revert find no Apply and revert every change. A table that only a
+// trigger writes into is not among them: the policy applies to the trigger's
+// rows as to any other write, which is what the trigger's author meant.
+// Turning row_security off would have made those writes fail instead.
+func rowSecurity(ctx context.Context, tx bun.IDB, set fixturechange.Set, revert bool) error {
+	deletes := map[string]bool{}
+	for _, c := range set.Changes {
+		// Revert turns an insert into a delete, and a delete into an insert.
+		if (c.Kind == fixturechange.Delete) != revert && c.Kind != fixturechange.Update {
+			deletes[c.Model] = true
+		}
+	}
+	var rows []string
+	var args []any
+	add := func(name string, deleted bool) {
+		q, err := quoteIdent(name)
+		if err != nil {
+			return // Validate has refused it already
+		}
+		rows = append(rows, "(?, ?)")
+		args = append(args, q, deleted)
+	}
+	for _, model := range sortedModels(set.Tables) {
+		add(set.Tables[model].Name, deletes[model])
+	}
+	if set.SeedGuardTable != "" {
+		add(set.SeedGuardTable, false)
+	}
+	if set.AuditTable != "" {
+		add(set.AuditTable, false)
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	// A table that does not exist is left to the statement that needs it,
+	// which fails with PostgreSQL's own words.
+	query := `WITH t (rel, deleted) AS (SELECT to_regclass(n), d FROM (VALUES ` + strings.Join(rows, ", ") + `) v (n, d))
+SELECT DISTINCT rel::text FROM (
+  SELECT rel FROM t WHERE rel IS NOT NULL
+  UNION ALL
+  SELECT con.conrelid FROM pg_constraint con JOIN t ON con.confrelid = t.rel WHERE t.deleted AND con.contype = 'f'
+) s WHERE row_security_active(rel) ORDER BY 1`
+	var active []string
+	if err := tx.NewRaw(query, args...).Scan(ctx, &active); err != nil {
+		return fmt.Errorf("look for row-level security on the tables of the change set: %w", err)
+	}
+	if len(active) == 0 {
+		return nil
+	}
+	audit := ""
+	if set.AuditTable != "" {
+		q, _ := quoteIdent(set.AuditTable)
+		var on bool
+		if err := tx.QueryRowContext(ctx, "SELECT coalesce(row_security_active(to_regclass(?)), false)", q).
+			Scan(&on); err != nil {
+			return fmt.Errorf("look for row-level security on the audit table %s: %w", set.AuditTable, err)
+		}
+		if on {
+			audit = fmt.Sprintf(" On the audit table %s, a policy that hides rows would hide the runs a Revert "+
+				"follows, and the Revert would undo every change.", set.AuditTable)
+		}
+	}
+	return fmt.Errorf("%s: row-level security is active on %s for the role running the migration: a row-level "+
+		"security policy applies to it, which would hide rows from the change set or stop its changes, so nothing "+
+		"was changed.%s Run migrations as the tables' owner while they are not FORCE ROW LEVEL SECURITY, or as a "+
+		"role with BYPASSRLS", set.Name, strings.Join(active, ", "), audit)
+}
+
+// privilege adds what to do to an error PostgreSQL raised because the role may
+// not do something. A row-level security policy on a table a trigger writes
+// into makes itself known the same way, when the trigger's row does not pass
+// it.
+func privilege(err error) error {
+	var said *grantError
+	if pgerr.State(err) != pgerr.InsufficientPrivilege || errors.As(err, &said) {
+		return err
+	}
+	return fmt.Errorf("%w. The role running the migration lacks a privilege, or a row-level security policy "+
+		"applies to it, which would hide rows from the change set or stop its changes: run migrations as the "+
+		"tables' owner or a role with BYPASSRLS, or grant what is missing. Nothing was changed", err)
+}
+
+// withDeferredConstraints makes every DEFERRABLE constraint wait for the end of
+// the change set, and returns a check that checks them all there.
+//
+// A change set holds as a whole, not after each statement: the rename of a
+// currency code that a DEFERRABLE foreign key points at is followed, in the
+// same set, by the update of the prices pointing at it, and checked statement
+// by statement the rename fails. Checked when the set is done, a constraint
+// that does not hold fails the set like any other change, inside its
+// transaction, so bun's record is taken back as usual. A constraint that is
+// not DEFERRABLE is checked as it always is. Inside a caller's transaction the
+// check also covers whatever the caller had left deferred, and afterwards
+// every constraint is back in the mode it is declared with; see
+// deferredByDefault.
+func withDeferredConstraints(ctx context.Context, tx bun.IDB,
+	set fixturechange.Set) (func(context.Context) error, error) {
+
+	if _, err := tx.ExecContext(ctx, "SET CONSTRAINTS ALL DEFERRED"); err != nil {
+		return nil, fmt.Errorf("defer the constraints to the end of the change set: %w", err)
+	}
+	return func(ctx context.Context) error {
+		if _, err := tx.ExecContext(ctx, "SET CONSTRAINTS ALL IMMEDIATE"); err != nil {
+			// A foreign key's check locks the row it points at, and waits
+			// for a session that holds it like any statement of the set.
+			if pgerr.State(err) == pgerr.LockNotAvailable {
+				limit := "the session's lock_timeout"
+				if set.LockTimeout != "" {
+					limit = "the lock timeout of " + set.LockTimeout
+				}
+				out := Outcome{Set: set.Name, Index: -1, Status: StatusFailed, Problem: ProblemLockTimeout,
+					Message: fmt.Sprintf("once every change was made, checking the constraints PostgreSQL defers "+
+						"waited for a lock another session held for longer than %s, so nothing was changed; the "+
+						"change set runs again on the next deploy", limit)}
+				return &ChangeError{Outcome: out, err: fmt.Errorf("%s: %w", out.Message, err)}
+			}
+			return fmt.Errorf("%s: once every change was made, a constraint did not hold, so nothing was "+
+				"changed: %w", set.Name, privilege(err))
+		}
+		return deferredByDefault(ctx, tx)
+	}, nil
+}
+
+// deferredByDefault puts every constraint declared DEFERRABLE INITIALLY
+// DEFERRED back to deferred, after the check at the end of a change set made
+// them all immediate. Inside a caller's transaction -- plan simulating a deploy,
+// a test, a program of its own -- a later statement relying on such a
+// constraint, a child row inserted before its parent, would otherwise fail
+// where the deploy, which commits each migration, succeeds.
+//
+// PostgreSQL does not say which mode a caller had set a constraint to, so it
+// gets the mode it is declared with. SET CONSTRAINTS finds a constraint by its
+// name in its schema, and takes every constraint of that name there: a name
+// that one constraint declared INITIALLY DEFERRED shares with another that is
+// not is left immediate rather than defer the other one too. A schema the role
+// may not use is left out: SET CONSTRAINTS would refuse its name, and nothing
+// the role does reaches its tables.
+func deferredByDefault(ctx context.Context, tx bun.IDB) error {
+	var names string
+	if err := tx.QueryRowContext(ctx, `
+SELECT coalesce(string_agg(quote_ident(n.nspname) || '.' || quote_ident(c.conname), ', '
+                           ORDER BY n.nspname, c.conname), '')
+FROM (SELECT DISTINCT connamespace, conname FROM pg_constraint WHERE condeferrable AND condeferred) c
+JOIN pg_namespace n ON n.oid = c.connamespace
+WHERE NOT pg_is_other_temp_schema(n.oid) AND has_schema_privilege(n.oid, 'USAGE')
+  AND NOT EXISTS (SELECT 1 FROM pg_constraint o
+                  WHERE o.connamespace = c.connamespace AND o.conname = c.conname AND NOT o.condeferred)`).
+		Scan(&names); err != nil {
+		return fmt.Errorf("read the constraints declared INITIALLY DEFERRED: %w", err)
+	}
+	if names == "" {
+		return nil
+	}
+	// The names come from the catalog, quoted, and may hold a ? that bun
+	// would read as a placeholder in the text of the statement.
+	if _, err := tx.ExecContext(ctx, "SET CONSTRAINTS ? DEFERRED", bun.Safe(names)); err != nil {
+		return fmt.Errorf("defer the constraints declared INITIALLY DEFERRED again: %w", err)
+	}
+	return nil
 }
 
 // problem names the three materially different reasons a guarded statement
@@ -261,12 +649,35 @@ const (
 	problemMissing problem = "missing"
 	problemChanged problem = "changed"
 	problemIDDrift problem = "id drift"
+	// problemReferenced is a delete of a row other rows point at. It is
+	// always an error: the delete would cascade into, detach, or be refused
+	// by rows the change set knows nothing about.
+	problemReferenced problem = "referenced"
+	// problemDuplicate is a natural key more than one row holds.
+	problemDuplicate problem = "duplicate"
 )
 
-// modeFor is what the change set's policy says about one problem. An unset
-// policy field is the strict reading: a change that could not be made fails the
-// migration rather than being recorded as done. A benign outcome, where the
-// database already holds what the change wanted, is never an error.
+func (p problem) exported() Problem {
+	switch p {
+	case problemMissing:
+		return ProblemMissingRow
+	case problemChanged:
+		return ProblemChangedRow
+	case problemIDDrift:
+		return ProblemIDDrift
+	case problemReferenced:
+		return ProblemReferenced
+	case problemDuplicate:
+		return ProblemDuplicateKey
+	}
+	return ""
+}
+
+// modeFor is what a policy, the one the change's model runs under, says about
+// one problem. An unset policy field is the strict reading: a change that could
+// not be made fails the migration rather than being recorded as done. A benign
+// outcome, where the database already holds what the change wanted, is never an
+// error.
 func modeFor(p fixturechange.Policy, pr problem) fixturechange.Mode {
 	switch pr {
 	case problemBenign:
@@ -284,6 +695,10 @@ func modeFor(p fixturechange.Policy, pr problem) fixturechange.Mode {
 		if p.IDDrift == fixturechange.ModeWarn || p.IDDrift == fixturechange.ModeIgnore {
 			return fixturechange.ModeWarn
 		}
+	case problemDuplicate:
+		if p.DuplicateKey == fixturechange.ModeWarn {
+			return fixturechange.ModeWarn
+		}
 	}
 	return fixturechange.ModeError
 }
@@ -292,9 +707,42 @@ type outcome struct {
 	rows    int64
 	problem problem
 	message string
+	// action is what an applied change did when that is not what its kind
+	// does to a row of a table without a SoftDelete.
+	action Action
+	// info says the message of an applied change only says how it was
+	// made, and is no warning.
+	info bool
+}
+
+// rowsDone is the row count of an applied change, with what it did to them
+// when its kind does not say: "1 row, soft-deleted".
+func rowsDone(n int64, a Action) string {
+	if a == ActionSoftDeleted || a == ActionRestored {
+		return rowCount(n) + ", " + string(a)
+	}
+	return rowCount(n)
+}
+
+// actionOf is what the change, of kind k, did to its row.
+func (o outcome) actionOf(k fixturechange.Kind) Action {
+	switch {
+	case o.action != "":
+		return o.action
+	case k == fixturechange.Insert:
+		return ActionInserted
+	case k == fixturechange.Update:
+		return ActionUpdated
+	}
+	return ActionDeleted
 }
 
 // invert turns a change into the change that undoes it.
+//
+// An update that writes a key column -- a rename -- leaves its row under the
+// key it gives it, so that is the key the inverted update finds the row by.
+// Keeping the old key would look for a row named both the old way and the new
+// way at once, and the revert of every rename would fail as a missing row.
 func invert(c fixturechange.Change) fixturechange.Change {
 	switch c.Kind {
 	case fixturechange.Insert:
@@ -302,460 +750,49 @@ func invert(c fixturechange.Change) fixturechange.Change {
 	case fixturechange.Delete:
 		return fixturechange.Change{Model: c.Model, Kind: fixturechange.Insert, Key: c.Key, New: c.Old}
 	default:
-		return fixturechange.Change{Model: c.Model, Kind: c.Kind, ID: c.ID, Key: c.Key, Old: c.New, New: c.Old}
+		key, _ := movedKey(c.Key, c.New)
+		return fixturechange.Change{Model: c.Model, Kind: c.Kind, ID: c.ID, Key: key, Old: c.New, New: c.Old}
 	}
+}
+
+// movedKey is the natural key a row has once values are written into it: key,
+// with every key column the values hold replaced. The second result says
+// whether they hold one at all, which is what a rename is.
+func movedKey(key, values fixturechange.Values) (fixturechange.Values, bool) {
+	out := make(fixturechange.Values, len(key))
+	moved := false
+	for col, v := range key {
+		if nv, ok := values[col]; ok {
+			v, moved = nv, true
+		}
+		out[col] = v
+	}
+	return out, moved
 }
 
 type runner struct {
-	tx   bun.IDB
-	set  fixturechange.Set
-	refs map[string]string // model\x00key -> resolved id
+	tx  bun.IDB
+	set fixturechange.Set
+	// revert is true while Revert runs the inverted changes, whose rows are
+	// compared with what the migration wrote rather than with what it was
+	// generated against.
+	revert bool
+	// dryRun is WithDryRun: no sequence is moved.
+	dryRun bool
+	refs   map[string]string // model\x00key -> resolved id
 	// resync collects the models that got an explicit id written into a
 	// sequence-backed table.
 	resync map[string]bool
-}
-
-func (r *runner) exec(ctx context.Context, c fixturechange.Change) (outcome, error) {
-	t := r.set.Tables[c.Model]
-	table, err := quoteIdent(t.Name)
-	if err != nil {
-		return outcome{}, err
-	}
-	switch c.Kind {
-	case fixturechange.Insert:
-		return r.insert(ctx, c, t, table)
-	case fixturechange.Update:
-		return r.update(ctx, c, t, table)
-	default:
-		return r.delete(ctx, c, t, table)
-	}
-}
-
-func (r *runner) insert(ctx context.Context, c fixturechange.Change, t fixturechange.Table, table string) (outcome, error) {
-	// An explicit id that another row already holds is checked before the
-	// statement runs, so the failure names the row instead of arriving as a
-	// primary-key violation from somewhere inside the driver.
-	if id, ok := c.New[t.ID]; ok && id.Ref == nil && !id.IsNull && r.set.Policy.IDDrift != fixturechange.ModeIgnore {
-		taken, err := r.idTakenByAnotherRow(ctx, c, t, table, id.Lit)
-		if err != nil {
-			return outcome{}, err
-		}
-		if taken != "" {
-			return outcome{problem: problemIDDrift, message: fmt.Sprintf(
-				"%s %s = %s is already held by the row %s. Inserting this row would either fail on the primary key "+
-					"or, without a unique index, leave two rows nothing can tell apart. Decide which row keeps the id",
-				t.Name, t.ID, id.Lit, taken)}, nil
-		}
-	}
-
-	var cols, exprs []string
-	var args []any
-	explicitID := false
-	for _, col := range sortedColumns(c.New) {
-		expr, a, err := r.value(ctx, c.New[col])
-		if err != nil {
-			return outcome{}, err
-		}
-		q, err := quoteIdent(col)
-		if err != nil {
-			return outcome{}, err
-		}
-		if col == t.ID {
-			explicitID = true
-		}
-		cols = append(cols, q)
-		exprs = append(exprs, expr)
-		args = append(args, a...)
-	}
-	// The existence check keys on the natural key alone. A row that already
-	// exists under a different id is somebody else's row, not ours to insert
-	// again: keying on the id as well is how a second copy appears, and then
-	// every later lookup by name finds two.
-	where, whereArgs, err := r.match(ctx, c.Key)
-	if err != nil {
-		return outcome{}, err
-	}
-	args = append(args, whereArgs...)
-	query := fmt.Sprintf("INSERT INTO %s (%s) SELECT %s WHERE NOT EXISTS (SELECT 1 FROM %s WHERE %s)",
-		table, strings.Join(cols, ", "), strings.Join(exprs, ", "), table, where)
-	n, err := r.run(ctx, query, args)
-	if err != nil {
-		return outcome{}, err
-	}
-	if n > 0 {
-		if explicitID && t.Serial {
-			r.resync[c.Model] = true
-		}
-		return outcome{rows: n}, nil
-	}
-	return r.diagnoseInsert(ctx, c, t, table)
-}
-
-func (r *runner) update(ctx context.Context, c fixturechange.Change, t fixturechange.Table, table string) (outcome, error) {
-	var sets []string
-	var args []any
-	for _, col := range sortedColumns(c.New) {
-		expr, a, err := r.value(ctx, c.New[col])
-		if err != nil {
-			return outcome{}, err
-		}
-		q, err := quoteIdent(col)
-		if err != nil {
-			return outcome{}, err
-		}
-		sets = append(sets, q+" = "+expr)
-		args = append(args, a...)
-	}
-	where, whereArgs, err := r.guard(ctx, c, t)
-	if err != nil {
-		return outcome{}, err
-	}
-	args = append(args, whereArgs...)
-	n, err := r.run(ctx, fmt.Sprintf("UPDATE %s SET %s WHERE %s", table, strings.Join(sets, ", "), where), args)
-	if err != nil {
-		return outcome{}, err
-	}
-	if n > 0 {
-		return outcome{rows: n}, nil
-	}
-	return r.diagnose(ctx, c, t, table, c.New)
-}
-
-func (r *runner) delete(ctx context.Context, c fixturechange.Change, t fixturechange.Table, table string) (outcome, error) {
-	where, args, err := r.guard(ctx, c, t)
-	if err != nil {
-		return outcome{}, err
-	}
-	n, err := r.run(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s", table, where), args)
-	if err != nil {
-		return outcome{}, err
-	}
-	if n > 0 {
-		return outcome{rows: n}, nil
-	}
-	return r.diagnose(ctx, c, t, table, nil)
-}
-
-// diagnose works out why a guarded update or delete matched nothing. The answer
-// decides whether the migration may be recorded as applied, so it is worth
-// three extra queries on a path that is not supposed to be taken.
-//
-// Every one of them propagates its error. A failed statement inside a
-// PostgreSQL transaction poisons it: the eventual COMMIT returns the ROLLBACK
-// tag and no error at all, so a diagnostic whose error is swallowed silently
-// throws the whole migration away while reporting success.
-func (r *runner) diagnose(ctx context.Context, c fixturechange.Change, t fixturechange.Table, table string,
-	wanted fixturechange.Values) (outcome, error) {
-
-	byKey, err := r.count(ctx, table, c.Key)
-	if err != nil {
-		return outcome{}, err
-	}
-	if byKey == 0 {
-		if c.Kind == fixturechange.Delete {
-			return outcome{problem: problemBenign, message: "the row is already gone, nothing to delete"}, nil
-		}
-		return outcome{problem: problemMissing, message: fmt.Sprintf(
-			"no row of %s has %s. The row this change updates is not in the database, so the change cannot be made. "+
-				"Put the row back, or drop this change from the migration",
-			t.Name, keyLabel(c.Key))}, nil
-	}
-	if len(wanted) > 0 {
-		already, err := r.count(ctx, table, c.Key, wanted)
-		if err != nil {
-			return outcome{}, err
-		}
-		if already > 0 {
-			return outcome{problem: problemBenign, message: "the row already holds these values, nothing to do"}, nil
-		}
-	}
-	if c.ID != "" {
-		withID, err := r.count(ctx, table, c.Key, fixturechange.Values{t.ID: fixturechange.Lit(c.ID)})
-		if err != nil {
-			return outcome{}, err
-		}
-		if withID == 0 {
-			ids, err := r.idsFor(ctx, table, t, c.Key)
-			if err != nil {
-				return outcome{}, err
-			}
-			return outcome{problem: problemIDDrift, message: fmt.Sprintf(
-				"%s %s exists, but under %s %s and not %s. This change was generated for the row with that id; "+
-					"applying it to a different row would move data the ids point at",
-				t.Name, keyLabel(c.Key), t.ID, strings.Join(ids, ", "), c.ID)}, nil
-		}
-	}
-	return outcome{problem: problemChanged, message: fmt.Sprintf(
-		"%s %s no longer holds the values this change was generated against, so somebody changed it in this "+
-			"database. It was left alone. Compare it with the fixture file and decide which one is right",
-		t.Name, keyLabel(c.Key))}, nil
-}
-
-// diagnoseInsert explains an insert whose NOT EXISTS found a row.
-func (r *runner) diagnoseInsert(ctx context.Context, c fixturechange.Change, t fixturechange.Table,
-	table string) (outcome, error) {
-
-	same, err := r.count(ctx, table, c.Key, withoutColumn(c.New, t.ID))
-	if err != nil {
-		return outcome{}, err
-	}
-	if same > 0 {
-		return outcome{problem: problemBenign, message: "the row is already there with these values, nothing to insert"}, nil
-	}
-	return outcome{problem: problemChanged, message: fmt.Sprintf(
-		"%s %s already exists and holds different values, so nothing was inserted. Somebody added or edited this "+
-			"row in this database. Compare it with the fixture file and decide which one is right",
-		t.Name, keyLabel(c.Key))}, nil
-}
-
-// idTakenByAnotherRow returns a description of the row holding that id when it
-// is not the row the change is about, and "" otherwise.
-func (r *runner) idTakenByAnotherRow(ctx context.Context, c fixturechange.Change, t fixturechange.Table,
-	table, id string) (string, error) {
-
-	keyWhere, keyArgs, err := r.match(ctx, c.Key)
-	if err != nil {
-		return "", err
-	}
-	idCol, err := quoteIdent(t.ID)
-	if err != nil {
-		return "", err
-	}
-	args := append([]any{id}, keyArgs...)
-	var found string
-	query := fmt.Sprintf("SELECT %s::text FROM %s WHERE %s = ? AND NOT (%s) LIMIT 1", idCol, table, idCol, keyWhere)
-	err = r.tx.QueryRowContext(ctx, query, args...).Scan(&found)
-	if err != nil {
-		if isNoRows(err) {
-			return "", nil
-		}
-		return "", fmt.Errorf("look for the row holding %s = %s: %w", t.ID, id, err)
-	}
-	if t.Key != "" {
-		keyCol, err := quoteIdent(t.Key)
-		if err != nil {
-			return "", err
-		}
-		var label string
-		q := fmt.Sprintf("SELECT %s::text FROM %s WHERE %s = ? LIMIT 1", keyCol, table, idCol)
-		if err := r.tx.QueryRowContext(ctx, q, found).Scan(&label); err != nil && !isNoRows(err) {
-			return "", err
-		} else if err == nil {
-			return fmt.Sprintf("%s = %s (%s %s)", t.ID, found, t.Key, label), nil
-		}
-	}
-	return t.ID + " = " + found, nil
-}
-
-func (r *runner) idsFor(ctx context.Context, table string, t fixturechange.Table,
-	key fixturechange.Values) ([]string, error) {
-
-	where, args, err := r.match(ctx, key)
-	if err != nil {
-		return nil, err
-	}
-	idCol, err := quoteIdent(t.ID)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := r.tx.QueryContext(ctx,
-		fmt.Sprintf("SELECT %s::text FROM %s WHERE %s ORDER BY 1 LIMIT 5", idCol, table, where), args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out = append(out, id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return out, rows.Close()
-}
-
-func (r *runner) count(ctx context.Context, table string, sets ...fixturechange.Values) (int64, error) {
-	where, args, err := r.matchAll(ctx, sets...)
-	if err != nil {
-		return 0, err
-	}
-	var n int64
-	if err := r.tx.QueryRowContext(ctx,
-		fmt.Sprintf("SELECT count(*) FROM %s WHERE %s", table, where), args...).Scan(&n); err != nil {
-		return 0, fmt.Errorf("count the rows the change should have matched: %w", err)
-	}
-	return n, nil
-}
-
-func withoutColumn(values fixturechange.Values, col string) fixturechange.Values {
-	out := make(fixturechange.Values, len(values))
-	for k, v := range values {
-		if k == col {
-			continue
-		}
-		out[k] = v
-	}
-	return out
-}
-
-func (r *runner) run(ctx context.Context, query string, args []any) (int64, error) {
-	res, err := r.tx.ExecContext(ctx, query, args...)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
-}
-
-// guard is the WHERE clause of an update or a delete: the natural key, the old
-// values, and the id when the change carries one.
-func (r *runner) guard(ctx context.Context, c fixturechange.Change, t fixturechange.Table) (string, []any, error) {
-	sets := []fixturechange.Values{c.Key, c.Old}
-	if c.ID != "" {
-		sets = append(sets, fixturechange.Values{t.ID: fixturechange.Lit(c.ID)})
-	}
-	return r.matchAll(ctx, sets...)
-}
-
-// match renders "col IS NOT DISTINCT FROM <value>" for every column, joined by
-// AND. IS NOT DISTINCT FROM rather than = so a NULL compares like any other
-// value.
-func (r *runner) match(ctx context.Context, values fixturechange.Values) (string, []any, error) {
-	var parts []string
-	var args []any
-	for _, col := range sortedColumns(values) {
-		expr, a, err := r.value(ctx, values[col])
-		if err != nil {
-			return "", nil, err
-		}
-		q, err := quoteIdent(col)
-		if err != nil {
-			return "", nil, err
-		}
-		parts = append(parts, q+" IS NOT DISTINCT FROM "+expr)
-		args = append(args, a...)
-	}
-	if len(parts) == 0 {
-		return "TRUE", nil, nil
-	}
-	return strings.Join(parts, " AND "), args, nil
-}
-
-func (r *runner) matchAll(ctx context.Context, sets ...fixturechange.Values) (string, []any, error) {
-	var parts []string
-	var args []any
-	for _, values := range sets {
-		if len(values) == 0 {
-			continue
-		}
-		part, a, err := r.match(ctx, values)
-		if err != nil {
-			return "", nil, err
-		}
-		parts = append(parts, part)
-		args = append(args, a...)
-	}
-	if len(parts) == 0 {
-		return "TRUE", nil, nil
-	}
-	return strings.Join(parts, " AND "), args, nil
-}
-
-// value renders one value as an expression plus its arguments. A reference is
-// looked up now, not turned into a subselect: a subselect that finds nothing
-// yields NULL, and the statement around it would happily write that NULL as a
-// foreign key, or match a row whose column is NULL, and report a row affected.
-func (r *runner) value(ctx context.Context, v fixturechange.Value) (string, []any, error) {
-	switch {
-	case v.IsNull:
-		return "NULL", nil, nil
-	case v.Ref == nil:
-		return "?", []any{v.Lit}, nil
-	}
-	id, err := r.resolve(ctx, *v.Ref)
-	if err != nil {
-		return "", nil, err
-	}
-	return "?", []any{id}, nil
-}
-
-func (r *runner) resolve(ctx context.Context, ref fixturechange.Ref) (string, error) {
-	cacheKey := ref.Model + "\x00" + ref.Key
-	if id, ok := r.refs[cacheKey]; ok {
-		return id, nil
-	}
-	t := r.set.Tables[ref.Model]
-	table, err := quoteIdent(t.Name)
-	if err != nil {
-		return "", err
-	}
-	idCol, err := quoteIdent(t.ID)
-	if err != nil {
-		return "", err
-	}
-	keyCol, err := quoteIdent(t.Key)
-	if err != nil {
-		return "", err
-	}
-	rows, err := r.tx.QueryContext(ctx,
-		fmt.Sprintf("SELECT %s FROM %s WHERE %s = ? LIMIT 2", idCol, table, keyCol), ref.Key)
-	if err != nil {
-		return "", err
-	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return "", err
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		return "", err
-	}
-	switch len(ids) {
-	case 0:
-		return "", fmt.Errorf("%s %q: no row in %s with %s = %q", ref.Model, ref.Key, t.Name, t.Key, ref.Key)
-	case 1:
-		r.refs[cacheKey] = ids[0]
-		return ids[0], nil
-	default:
-		return "", fmt.Errorf("%s %q: more than one row in %s with %s = %q, cannot tell them apart",
-			ref.Model, ref.Key, t.Name, t.Key, ref.Key)
-	}
-}
-
-// syncSequences moves the sequence of every table that got an explicit id past
-// the highest id in it. Without this the next ordinary insert reuses an id that
-// is already taken.
-func (r *runner) syncSequences(ctx context.Context) error {
-	models := make([]string, 0, len(r.resync))
-	for m := range r.resync {
-		models = append(models, m)
-	}
-	sort.Strings(models)
-	for _, m := range models {
-		t := r.set.Tables[m]
-		table, err := quoteIdent(t.Name)
-		if err != nil {
-			return err
-		}
-		idCol, err := quoteIdent(t.ID)
-		if err != nil {
-			return err
-		}
-		query := fmt.Sprintf(
-			`SELECT setval(s.seq, GREATEST(s.top, 1)) FROM (SELECT pg_get_serial_sequence(?, ?) AS seq, `+
-				`(SELECT COALESCE(MAX(%s), 0) FROM %s) AS top) s WHERE s.seq IS NOT NULL`, idCol, table)
-		if _, err := r.tx.ExecContext(ctx, query, t.Name, t.ID); err != nil {
-			return fmt.Errorf("move the sequence of %s past the ids written: %w", t.Name, err)
-		}
-	}
-	return nil
+	// advanced holds the models whose sequence moved before an explicit id
+	// was written, which syncSequences reports with its own moves.
+	advanced map[string]bool
+	// types holds, per model, the types of its table's columns, read once.
+	types map[string]map[string]colType
+	// sequences holds, per model, the sequence of its id column, "" for
+	// none, read once, and seqSelect, per sequence, whether the role may
+	// read it as a table.
+	sequences map[string]string
+	seqSelect map[string]bool
 }
 
 func tableHasRows(ctx context.Context, tx bun.IDB, table string) (bool, error) {

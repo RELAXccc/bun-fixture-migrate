@@ -1,0 +1,76 @@
+description: |
+  The loyalty programme ends, and its model goes. A SQL migration drops the
+  customers' tier column, another drops the tiers' table, and the developer
+  takes LoyaltyTier out of the fixture file, the configuration and the
+  models, all in one go. Every command then stops on the state file, which
+  still holds the tiers: it says the model is in the fixture file and not in
+  the configuration, which it is not, and the docs say nothing about retiring
+  a model. The way out is the one for any change a hand-written migration
+  makes: the DROP TABLE takes the rows out of every database, and baseline
+  -force records the files as they are. (The probe takes the other way:
+  delete the rows with a generated migration first, then drop the model.)
+  The outlet store catches up six releases: the hotfix, the drift, the 1200
+  customs codes, the merge and this.
+steps:
+  - overlay: .
+  - generate: {name: end of loyalty, at: "20271206100000"}
+    exit: 1
+    known: F5
+    output: ['model "LoyaltyTier" is in the fixture file but not in the configuration']
+  - cli: [status, -offline]
+    exit: 1
+    known: F5
+    output: ['model "LoyaltyTier" is in the fixture file but not in the configuration']
+  - cli: [baseline]
+    exit: 1
+  - cli: [baseline, -force]
+    output: ["wrote migrations/fixture_state.yml"]
+  - cli: [status, -offline]
+    output: ["not migrated nothing"]
+deploy: [prod, staging, outlet]
+plan:
+  - cli: [plan, -with-sql, -strict]
+    env: outlet
+    output:
+      - "20270720100000_fixture_austrian_reduced_vat: would succeed"
+      - "20271004100000_fixture_hs_codes: would succeed"
+      - "20271103100000_fixture_smart_home: would succeed"
+      - "20271206090000_customers_without_loyalty (SQL): would succeed"
+      - "20271206110000_drop_loyalty_tiers (SQL): would succeed"
+after:
+  - sql: SELECT (to_regclass('public.loyalty_tiers') IS NULL)::text
+    env: prod
+    want: "true"
+known:
+  - "F5: a model taken out of the files and the configuration at once stops every command with a message that blames the fixture file; the docs have no runbook for it. baseline -force gets out, the DROP TABLE being the migration that covers it"
+probes:
+  # Two steps instead: the rows go in a generated migration while the model
+  # is still configured, then the model goes with its table. Generated against
+  # production, which still has the table before the deploy. Against the
+  # workstation, migrated past the DROP TABLE already, the deletes of 0.0 and
+  # 5.0 are refused with a sentence that asks for a database to be configured:
+  # one is, and it lacks the table.
+  - name: delete the tiers first
+    from: start
+    when: before-deploy
+    clone: prod
+    steps:
+      - overlay: probe-two-steps
+      - cli: [generate, -dry-run, -name, end of loyalty]
+        exit: 2
+        known: F7
+        output:
+          - "refused: LoyaltyTier/code=bronze: discount_percent is written 0.0"
+          - "with the database configured (and without -no-lint) the tool reads the types and decides"
+      - generate: {name: end of loyalty, at: "20271206100000"}
+        env: prod
+        output: ["LoyaltyTier: 4 deletes"]
+      - overlay: .
+      - cli: [status, -offline]
+        output: ["not migrated nothing"]
+      - cli: [plan, -with-sql, -strict]
+        env: clone
+        output:
+          - "20271206090000_customers_without_loyalty (SQL): would succeed"
+          - "applied LoyaltyTier code=platinum delete (1 row)"
+          - "20271206110000_drop_loyalty_tiers (SQL): would succeed"

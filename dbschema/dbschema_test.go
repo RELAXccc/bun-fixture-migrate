@@ -36,6 +36,31 @@ func TestLiteralDefault(t *testing.T) {
 	}
 }
 
+// What an INSERT that says DEFAULT puts into the column, for the null half of
+// the round-trip hazard. A NULL default and a generation expression are not
+// defaults of that kind.
+func TestNonNullDefault(t *testing.T) {
+	for _, tc := range []struct {
+		col  Column
+		want string
+		has  bool
+	}{
+		{Column{}, "", false},
+		{Column{Default: "NULL::text"}, "", false},
+		{Column{Default: "NULL"}, "", false},
+		{Column{Default: "'none'::text"}, "none", true},
+		{Column{Default: "0"}, "0", true},
+		{Column{Default: "now()"}, "now()", true},
+		{Column{Default: "nextval('t_x_seq'::regclass)"}, "nextval('t_x_seq'::regclass)", true},
+		{Column{Default: "(price * 2)", Generated: true}, "", false},
+	} {
+		got, ok := tc.col.NonNullDefault()
+		if ok != tc.has || got != tc.want {
+			t.Errorf("NonNullDefault(%+v) = %q, %v; want %q, %v", tc.col, got, ok, tc.want, tc.has)
+		}
+	}
+}
+
 // The round-trip hazard: a column whose default is not the type's zero cannot
 // hold that zero through a bun insert, because bun writes DEFAULT instead.
 func TestZeroIsNotDefault(t *testing.T) {
@@ -57,6 +82,11 @@ func TestZeroIsNotDefault(t *testing.T) {
 		{"serial", Column{Type: "int8", Default: "nextval('t_id_seq'::regclass)"}, false, ""},
 		{"expression", Column{Type: "timestamptz", Default: "now()"}, false, ""},
 		{"unknown type", Column{Type: "jsonb", Default: "'{}'::jsonb"}, false, ""},
+		// An expression is never the zero: bun writes DEFAULT and the
+		// database runs it.
+		{"uuid generated", Column{Type: "uuid", Default: "gen_random_uuid()"}, true, "gen_random_uuid()"},
+		{"int from a function", Column{Type: "int4", Default: "next_rank()"}, true, "next_rank()"},
+		{"generated column", Column{Type: "int4", Default: "(a * 2)", Generated: true}, false, ""},
 	} {
 		hazard, stored := tc.col.ZeroIsNotDefault()
 		if hazard != tc.hazard || stored != tc.stored {
@@ -115,5 +145,92 @@ func TestNamesAreSorted(t *testing.T) {
 	})
 	if strings.Join(names, " ") != "master.items public.currencies public.plans" {
 		t.Fatalf("Names = %v", names)
+	}
+}
+
+// A length is read out of the type modifier the way each type keeps it.
+func TestDeclaredLength(t *testing.T) {
+	for _, tc := range []struct {
+		col    Column
+		typmod int
+		want   int
+	}{
+		{Column{Type: "varchar"}, 9, 5},
+		{Column{Type: "bpchar"}, 5, 1},
+		{Column{Type: "bpchar"}, -1, 0},
+		{Column{Type: "bit"}, 3, 3},
+		{Column{Type: "varbit"}, -1, 0},
+		{Column{Type: "_bpchar", Category: "A", ElemType: "bpchar"}, 7, 3},
+		{Column{Type: "_bit", Category: "A", ElemType: "bit"}, 8, 8},
+		{Column{Type: "numeric"}, 655366, 0},
+		{Column{Type: "text"}, -1, 0},
+	} {
+		if got := declaredLength(tc.col, tc.typmod); got != tc.want {
+			t.Errorf("%+v %d: %d, want %d", tc.col, tc.typmod, got, tc.want)
+		}
+	}
+}
+
+// A domain is its base type to the zero check, and its default is the
+// column's when the column has none: the catalog query puts it in Default.
+func TestADomainIsItsBaseType(t *testing.T) {
+	qty := Column{Type: "int4", Domain: "qty", FullType: "qty", Default: "1"}
+	if zero, ok := qty.ZeroText(); !ok || zero != "0" {
+		t.Fatalf("%q %v", zero, ok)
+	}
+	if hazard, stored := qty.ZeroIsNotDefault(); !hazard || stored != "1" {
+		t.Fatalf("a zero against the domain's default 1: %v %q", hazard, stored)
+	}
+	code := Column{Type: "varchar", Domain: "code", Category: "S"}
+	if !code.StringField() {
+		t.Fatal("a domain over varchar is written from a string field")
+	}
+}
+
+// How a message names an index, and which ones refuse two equal rows.
+func TestKeyIndexDefinition(t *testing.T) {
+	plain := func(cols ...string) []IndexColumn {
+		var out []IndexColumn
+		for _, c := range cols {
+			out = append(out, IndexColumn{Column: c})
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		index    KeyIndex
+		want     string
+		equality bool
+	}{
+		{KeyIndex{Unique: true, Columns: plain("parent_id", "code")}, "UNIQUE (parent_id, code)", true},
+		{KeyIndex{Unique: true, Primary: true, Columns: plain("id")}, "PRIMARY KEY (id)", true},
+		{KeyIndex{Unique: true, NullsNotDistinct: true, Columns: plain("parent_id", "code")},
+			"UNIQUE NULLS NOT DISTINCT (parent_id, code)", true},
+		{KeyIndex{Unique: true, Columns: plain("code"), Predicate: "(deleted_at IS NULL)"},
+			"UNIQUE (code) WHERE deleted_at IS NULL", true},
+		{KeyIndex{Unique: true, Columns: plain("code"), Predicate: "((deleted_at IS NULL) AND (tenant_id IS NULL))"},
+			"UNIQUE (code) WHERE (deleted_at IS NULL) AND (tenant_id IS NULL)", true},
+		{KeyIndex{Unique: true, Columns: []IndexColumn{{Expr: "lower(email)"}}}, "UNIQUE (lower(email))", true},
+		{KeyIndex{Unique: true, Columns: []IndexColumn{{Expr: "COALESCE(parent_id, 0)"}, {Column: "code"}}},
+			"UNIQUE (COALESCE(parent_id, 0), code)", true},
+		{KeyIndex{Unique: true, Columns: []IndexColumn{{Expr: "(plan_id + 1)"}}}, "UNIQUE ((plan_id + 1))", true},
+		{KeyIndex{Unique: true, Columns: []IndexColumn{{Expr: "lower(a) || lower(b)"}}},
+			"UNIQUE ((lower(a) || lower(b)))", true},
+		{KeyIndex{Exclusion: true, Columns: []IndexColumn{{Column: "code", Operator: "="}}},
+			"EXCLUDE (code WITH =)", true},
+		{KeyIndex{Exclusion: true, Columns: []IndexColumn{{Column: "code", Operator: "="},
+			{Column: "during", Operator: "&&"}}}, "EXCLUDE (code WITH =, during WITH &&)", false},
+	} {
+		if got := tc.index.Definition(); got != tc.want {
+			t.Errorf("Definition() = %q, want %q", got, tc.want)
+		}
+		if got := tc.index.Equality(); got != tc.equality {
+			t.Errorf("%s: Equality() = %v", tc.want, got)
+		}
+	}
+	if !(KeyIndex{Columns: plain("a")}).Plain() || (KeyIndex{Columns: []IndexColumn{{Expr: "lower(a)"}}}).Plain() {
+		t.Error("Plain")
+	}
+	if got := trimParens("((a = ')') AND (b IS NULL))"); got != "(a = ')') AND (b IS NULL)" {
+		t.Errorf("trimParens: %q", got)
 	}
 }

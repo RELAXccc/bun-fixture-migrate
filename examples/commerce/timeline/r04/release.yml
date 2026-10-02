@@ -1,0 +1,104 @@
+description: |
+  The summer storefront: sale moves to the front of the header menu, and in
+  Germany standard shipping becomes the default instead of express. The menu's
+  positions are unique per menu under a constraint checked after every
+  statement, and the five header items rotate: generate refuses the circle,
+  since no order of the updates gets through. The developer takes the way out
+  the refusal names: park sale at a position no item holds in a migration of
+  its own, then the rest in the next. The default shipping method is unique
+  per zone under a partial unique index, which generate does not order by:
+  flipping both methods in one migration fails at run time (the probe), so the
+  same two migrations first clear the old default, then set the new one.
+  Meanwhile, in production, logistics lowers Germany's free-shipping threshold
+  (zones are the database's under mode: insert), merchandising raises the
+  standard price (an insert_only column) and ops add TWINT, a provider of
+  their own (mode: upsert). None of it is drift. The file follows the
+  threshold and the price for new shops, which generate notes and leaves to
+  the databases. Staging catches up two releases at once.
+steps:
+  - overlay: .
+  - generate: {name: header order, at: "20270405100000"}
+    exit: 2
+    output:
+      - "refused: MenuItem/menu=header/slug=sale: moves (menu, position) from (header, 5) to (header, 1) while"
+      - "trade values with it in a circle, and the unique index on (menu, position) is checked after every statement"
+      - "5 changes refused, nothing written"
+  - overlay: park
+  - generate: {name: park sale and express, at: "20270405100000"}
+    known: F4
+    output:
+      - "MenuItem: 2 updates"
+      - "ShippingMethod: 1 update"
+      - "note: ShippingZone: 1 row with other values in the state after 20270301100000_fixture_category_tree, which mode insert never updates"
+      - "note: ShippingMethod: 1 row with another base_price in the state after 20270301100000_fixture_category_tree, which insert_only leaves to the database"
+  - overlay: .
+  - generate: {name: header order, at: "20270405100100"}
+    output:
+      - "MenuItem: 5 updates"
+      - "ShippingMethod: 1 update"
+  - cli: [status, -offline]
+    output: ["not migrated nothing"]
+deploy: [prod, staging]
+before_deploy:
+  prod:
+    - UPDATE shipping_zones SET free_shipping_over = 39.00 WHERE code = 'domestic'
+    - UPDATE shipping_methods SET base_price = 5.49 WHERE code = 'dhl-standard'
+    - >-
+      INSERT INTO billing.payment_providers (code, kind, display_name, supported_currencies, fee_percent, active)
+      VALUES ('twint', 'wallet', '{"en": "TWINT", "de": "TWINT"}', '{CHF}', 1.30, true)
+plan:
+  - cli: [plan, -strict]
+    env: prod
+    output:
+      - "20270405100000_fixture_park_sale_and_express: would succeed"
+      - "applied MenuItem menu=header,slug=sale update (1 row)"
+      - "applied ShippingMethod code=dhl-express update (1 row)"
+      - "20270405100100_fixture_header_order: would succeed"
+      - "applied ShippingMethod code=dhl-standard update (1 row)"
+  - cli: [plan, -strict]
+    env: staging
+    output:
+      - "20270301100000_fixture_category_tree: would succeed"
+      - "20270405100100_fixture_header_order: would succeed"
+expect:
+  check:
+    prod:
+      output:
+        - "Left to the database by the configuration, which is no drift:"
+        - "PaymentProvider: 1 row only in the database, which mode upsert never deletes"
+      absent: ["ShippingZone:", "ShippingMethod:"]
+    staging:
+      output:
+        - "ShippingZone: 1 row with other values in the database, which mode insert never updates"
+        - "ShippingMethod: 1 row with another base_price in the database, which insert_only leaves to the database"
+after:
+  - sql: SELECT string_agg(slug || '@' || position, ',' ORDER BY position) FROM menu_items WHERE menu = 'header'
+    env: prod
+    want: "sale@1,new@2,women@3,men@4,home@5"
+  - sql: SELECT string_agg(code, ',' ORDER BY code) FROM shipping_methods WHERE is_default AND zone_id = (SELECT id FROM shipping_zones WHERE code = 'domestic')
+    env: prod
+    want: "dhl-standard"
+  # Staging was seeded at r02, before the file followed production: its
+  # zone and price are what they were seeded with, and stay so.
+  - sql: SELECT (SELECT free_shipping_over::text FROM shipping_zones WHERE code = 'domestic') || '/' || (SELECT base_price::text FROM shipping_methods WHERE code = 'dhl-standard')
+    env: staging
+    want: "50.00/4.99"
+known:
+  - "F4: generate does not order the updates by a partial unique index: two updates that move the one default of a zone from one method to the other fail in one migration; worked around with two migrations, the old default cleared in the first"
+probes:
+  # Both methods flip in one migration. Only a partial unique index says a
+  # zone has one default, and generate orders the updates as the file lists
+  # them: standard is set before express is cleared.
+  - name: the default flipped in one migration
+    from: start
+    when: before-deploy
+    known: F4
+    steps:
+      - overlay: probe-default
+      - generate: {name: standard default, at: "20270405100000"}
+        output: ["ShippingMethod: 2 updates"]
+      - cli: [plan]
+        env: prod
+        exit: 3
+        output:
+          - 'failed ShippingMethod code=dhl-standard update [error]: ERROR: duplicate key value violates unique constraint "shipping_methods_one_default"'

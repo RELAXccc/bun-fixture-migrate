@@ -35,6 +35,44 @@ type Table struct {
 	// into such a table leaves the sequence behind, so fixtureapply advances
 	// it afterwards.
 	Serial bool
+	// Cascade allows a delete to reach rows of other tables through a
+	// foreign key declared ON DELETE CASCADE, SET NULL or SET DEFAULT. Without
+	// it such a delete fails while any row still points at the one being
+	// deleted: removing a plan must not quietly delete or detach the
+	// subscriptions on it.
+	Cascade bool
+	// Where, when set, is an SQL predicate over the table's columns that
+	// limits which of its rows are master data: the configuration's where,
+	// such as tenant_id IS NULL for global rows that share a table with each
+	// tenant's own. Every statement, every lookup by natural key and every
+	// reference to the model sees only the rows it holds for, and a row a
+	// change writes has to hold it afterwards. Without it, a change to a
+	// global row would also reach a tenant's row with the same key, and a
+	// reference could bind a global row to a tenant's private one.
+	//
+	// It is the configuration's own SQL, written into the statements as it
+	// stands; fixtureapply refuses one that could reach outside the
+	// parentheses it is put in.
+	Where string
+	// Policy, when set, is what the changes of this model do when the
+	// database is not in the state they were generated against, in place of
+	// the set's Policy: the configuration's changed_row, missing_row,
+	// id_drift and duplicate_key of the model. A field left empty here is
+	// the set's, so Policy{ChangedRow: ModeWarn} changes that one decision
+	// for this model and no other. Nil is the set's Policy throughout.
+	Policy *Policy
+	// SoftDelete, when set, is the column of the model's bun soft_delete
+	// field: a row is live while it is NULL. Every statement, natural-key
+	// lookup and reference sees live rows only. A Delete sets it to now()
+	// instead of deleting the row; an Insert first restores the newest
+	// soft-deleted row that holds the change's values. A change never writes
+	// or compares the column itself.
+	//
+	// A set without it deletes rows as it always did, so a model that gains
+	// a soft_delete keeps the hard deletes of the migrations generated
+	// before. An older fixtureapply does not compile a set that has it, which
+	// is why it needs no Format of its own.
+	SoftDelete string
 }
 
 // Tables maps a model name to its table.
@@ -99,6 +137,10 @@ type Change struct {
 
 // Set is one generated migration's payload.
 type Set struct {
+	// Format is the version of this type's meaning the set was written for;
+	// 0 means 1. fixtureapply refuses a set of a format newer than
+	// CurrentFormat rather than run it with a meaning it does not know.
+	Format int
 	// Name identifies the set in log lines; the generator uses the migration
 	// file name.
 	Name string
@@ -107,15 +149,104 @@ type Set struct {
 	// the fixture loader will insert the new state by itself and the migration
 	// must keep its hands off.
 	SeedGuardTable string
-	Tables         Tables
-	Changes        []Change
+	// MigrationsTable is the table bun's migrator records applied migrations
+	// in: "bun_migrations" unless the migrator was built WithTableName. Empty
+	// means DefaultMigrationsTable.
+	//
+	// It is here because of one line in migrate.Migrator.Migrate: unless the
+	// migrator was built WithMarkAppliedOnSuccess(true), it records a migration
+	// as applied before it runs it, and leaves the record in place when the
+	// migration fails. A change set that failed and rolled back would then be
+	// recorded as done and never attempted again. fixtureapply.Apply removes
+	// that one record when it fails, and only that one; see Apply.
+	MigrationsTable string
+	Tables          Tables
+	Changes         []Change
 	// Policy is what the migration does when the database is not in the state
 	// the change set was generated against. The generator writes the values
 	// from the configuration file into it, so the migration carries its own
 	// policy and a later change to the configuration does not silently change
 	// what an old migration does.
 	Policy Policy
+	// LockTimeout, when set, is how long a statement of the change set waits
+	// for a lock another session holds on a row or table it writes, in
+	// PostgreSQL's spelling: "5s", "500ms", "1min". The change set then fails
+	// and rolls back instead of waiting behind, say, an admin's open
+	// transaction while the application's own writes queue up behind it; the
+	// next deploy runs it again. Waiting for another change set to finish is
+	// not affected, nor limited by a lock_timeout the session has, unless the
+	// set runs inside a caller's transaction, whose lock_timeout limits that
+	// wait. Empty means the session's own lock_timeout, which is usually none.
+	LockTimeout string
+	// AuditTable, when set, is the table, optionally schema-qualified, in
+	// which every successful Apply and Revert of the set records what it did
+	// with each change, in the same transaction: one row per run, which
+	// fixtureapply creates the table for when it is missing. Revert then
+	// undoes only the changes Apply made in this database, and status shows
+	// per database which changes a deploy skipped. Empty records nothing, and
+	// Revert inverts every change.
+	AuditTable string
 }
+
+// PolicyFor is the policy the changes of a model run under: the set's
+// Policy, with every field the model's table sets in its own Policy in its
+// place.
+func (s Set) PolicyFor(model string) Policy {
+	p := s.Policy
+	t, ok := s.Tables[model]
+	if !ok || t.Policy == nil {
+		return p
+	}
+	for _, f := range []struct{ to, from *Mode }{
+		{&p.MissingRow, &t.Policy.MissingRow}, {&p.ChangedRow, &t.Policy.ChangedRow},
+		{&p.IDDrift, &t.Policy.IDDrift}, {&p.DuplicateKey, &t.Policy.DuplicateKey},
+	} {
+		if *f.from != "" {
+			*f.to = *f.from
+		}
+	}
+	return p
+}
+
+// Concat joins parts of a change set's Changes in order. A generated file of
+// more than a thousand changes writes them as one function per hundred and
+// joins them with it, because the Go compiler takes much longer over one
+// literal of thousands of changes than over the same changes in parts.
+func Concat(parts ...[]Change) []Change {
+	n := 0
+	for _, p := range parts {
+		n += len(p)
+	}
+	out := make([]Change, 0, n)
+	for _, p := range parts {
+		out = append(out, p...)
+	}
+	return out
+}
+
+// DefaultMigrationsTable is the table bun's migrator uses when it was not built
+// WithTableName.
+const DefaultMigrationsTable = "bun_migrations"
+
+// CurrentFormat is the newest Set.Format this version knows.
+//
+// A generated file lives in an application's repository for good, and is
+// compiled against whatever version of this module the application uses
+// later, so what a set means can never quietly change. The rules:
+//
+//   - A new field, or a new function such as Concat, needs no new format. A
+//     field defaults to what a set without it always meant, and a file that
+//     uses either does not compile against an older version, which is the
+//     loudest refusal there is.
+//   - A change to what an existing field or value means needs one: the
+//     generator then writes Format into every file, and an older fixtureapply
+//     refuses the file instead of running it with the old meaning.
+//   - The generator writes Format only from the first format that needs it,
+//     so the files of format 1 read as they always have.
+//
+// The files generated by every earlier version are kept, unchanged, under
+// testdata/generated, and the tests read, validate, compile and run them all.
+const CurrentFormat = 1
 
 // Mode is what a policy does when it triggers. The empty Mode is the strict
 // reading of whichever policy carries it, so a Policy nobody filled in fails on
@@ -161,6 +292,12 @@ type Policy struct {
 	// IDDrift is what happens when the id in the change set is not the id the
 	// database gave the row: ModeError (the default), ModeWarn or ModeIgnore.
 	IDDrift Mode
+	// DuplicateKey is what happens when more than one row holds the natural
+	// key a change finds its row by: ModeError (the default) or ModeWarn,
+	// which leaves all of them alone and carries on. A change is never made
+	// to more than one row; nothing can say which of them the fixture file
+	// means.
+	DuplicateKey Mode
 }
 
 // Validate reports a policy field holding something this package does not
@@ -179,6 +316,7 @@ func (p Policy) Validate() error {
 		{"MissingRow", p.MissingRow, []Mode{ModeError, ModeWarn}},
 		{"ChangedRow", p.ChangedRow, []Mode{ModeError, ModeWarn}},
 		{"IDDrift", p.IDDrift, []Mode{ModeError, ModeWarn, ModeIgnore}},
+		{"DuplicateKey", p.DuplicateKey, []Mode{ModeError, ModeWarn}},
 	} {
 		if f.value == "" || f.value.valid(f.allowed...) {
 			continue

@@ -164,3 +164,44 @@ func TestWorstFollowsThePolicyPerKind(t *testing.T) {
 		t.Fatalf("FindingMode(unknown column) = %q", got)
 	}
 }
+
+// A row whose id drifted, with policy.id_drift set to warn, is reported as a
+// warning and does not stop anything.
+func TestCheckReportsAWarningAsOne(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Policy.IDDrift = ModeWarn
+	res := checkOf(t, cfg, base, strings.Replace(base, "      id: 2\n      name: team\n", "      id: 7\n      name: team\n", 1))
+	if len(res.Refusals) != 0 || len(res.Warnings) != 1 || !res.Drifted() {
+		t.Fatalf("expected one warning, got %+v / %+v", res.Warnings, res.Refusals)
+	}
+	report := strings.Join(res.Lines(), "\n")
+	if !strings.Contains(report, "Warnings, which the policy lets a migration carry on past:\n  Plan/name=team: its id changed from 2 to 7") {
+		t.Fatalf("unexpected report:\n%s", report)
+	}
+}
+
+// A row's label starts with its model, and a report does not say the model
+// twice; the fields stay as they are.
+func TestAReportNamesTheModelOnce(t *testing.T) {
+	r := Refusal{Model: "Feature", Key: "Feature/code=api/plan_id=Plan(team)", Reason: "why"}
+	if got := r.String(); got != "Feature/code=api/plan_id=Plan(team): why" {
+		t.Fatalf("got %q", got)
+	}
+	if got := (Refusal{Model: "Plan", Key: "id 3", Reason: "why"}).String(); got != "Plan id 3: why" {
+		t.Fatalf("got %q", got)
+	}
+	if got := (Refusal{Model: "Plan", Reason: "why"}).String(); got != "Plan: why" {
+		t.Fatalf("got %q", got)
+	}
+	f := Finding{Kind: FindingDuplicateKey, Model: "Plan", Row: "Plan/name=team", Detail: "two rows"}
+	if got := f.String(); got != "Plan/name=team: two rows" || f.Row != "Plan/name=team" || f.Model != "Plan" {
+		t.Fatalf("got %q", got)
+	}
+	if got := (Finding{Model: "Plan", Row: "seats", Detail: "x"}).String(); got != "Plan seats: x" {
+		t.Fatalf("got %q", got)
+	}
+	// A model whose name another's label starts with is still named.
+	if got := (Finding{Model: "Plan", Row: "PlanItem/name=a", Detail: "x"}).String(); got != "Plan PlanItem/name=a: x" {
+		t.Fatalf("got %q", got)
+	}
+}

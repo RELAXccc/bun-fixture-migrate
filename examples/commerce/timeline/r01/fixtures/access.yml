@@ -1,0 +1,39 @@
+# The back office's built-in roles and what they may do. A merchant adds
+# custom roles of its own; the database numbers those and these alike.
+
+- model: AdminPermission
+  rows:
+    - {_id: catalog_read, id: 1, code: catalog.read, description: See products and categories}
+    - {_id: catalog_write, id: 2, code: catalog.write, description: Edit products and categories}
+    - {_id: catalog_publish, id: 3, code: catalog.publish, description: Publish products to the storefront}
+    - {_id: orders_read, id: 4, code: orders.read, description: See orders}
+    - {_id: orders_refund, id: 5, code: orders.refund, description: Refund an order}
+    - {_id: customers_read, id: 6, code: customers.read, description: See customers}
+    - {_id: settings_write, id: 7, code: settings.write, description: Change the shop's settings}
+
+- model: AdminRole
+  rows:
+    - {_id: owner, id: 1, code: owner, name: Owner, builtin: true}
+    - {_id: manager, id: 2, code: manager, name: Store manager, builtin: true}
+    - {_id: merchandiser, id: 3, code: merchandiser, name: Merchandiser, builtin: true}
+    - {_id: support, id: 4, code: support, name: Customer support, builtin: true}
+
+- model: AdminRolePermission
+  rows:
+    - {role_id: '{{ $.AdminRole.owner.ID }}', permission_id: '{{ $.AdminPermission.catalog_read.ID }}'}
+    - {role_id: '{{ $.AdminRole.owner.ID }}', permission_id: '{{ $.AdminPermission.catalog_write.ID }}'}
+    - {role_id: '{{ $.AdminRole.owner.ID }}', permission_id: '{{ $.AdminPermission.catalog_publish.ID }}'}
+    - {role_id: '{{ $.AdminRole.owner.ID }}', permission_id: '{{ $.AdminPermission.orders_read.ID }}'}
+    - {role_id: '{{ $.AdminRole.owner.ID }}', permission_id: '{{ $.AdminPermission.orders_refund.ID }}'}
+    - {role_id: '{{ $.AdminRole.owner.ID }}', permission_id: '{{ $.AdminPermission.customers_read.ID }}'}
+    - {role_id: '{{ $.AdminRole.owner.ID }}', permission_id: '{{ $.AdminPermission.settings_write.ID }}'}
+    - {role_id: '{{ $.AdminRole.manager.ID }}', permission_id: '{{ $.AdminPermission.catalog_read.ID }}'}
+    - {role_id: '{{ $.AdminRole.manager.ID }}', permission_id: '{{ $.AdminPermission.catalog_write.ID }}'}
+    - {role_id: '{{ $.AdminRole.manager.ID }}', permission_id: '{{ $.AdminPermission.orders_read.ID }}'}
+    - {role_id: '{{ $.AdminRole.manager.ID }}', permission_id: '{{ $.AdminPermission.orders_refund.ID }}'}
+    - {role_id: '{{ $.AdminRole.manager.ID }}', permission_id: '{{ $.AdminPermission.customers_read.ID }}'}
+    - {role_id: '{{ $.AdminRole.merchandiser.ID }}', permission_id: '{{ $.AdminPermission.catalog_read.ID }}'}
+    - {role_id: '{{ $.AdminRole.merchandiser.ID }}', permission_id: '{{ $.AdminPermission.catalog_write.ID }}'}
+    - {role_id: '{{ $.AdminRole.merchandiser.ID }}', permission_id: '{{ $.AdminPermission.catalog_publish.ID }}'}
+    - {role_id: '{{ $.AdminRole.support.ID }}', permission_id: '{{ $.AdminPermission.orders_read.ID }}'}
+    - {role_id: '{{ $.AdminRole.support.ID }}', permission_id: '{{ $.AdminPermission.customers_read.ID }}'}
